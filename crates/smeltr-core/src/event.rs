@@ -86,6 +86,61 @@ pub enum Payload {
         exception_codes: Vec<String>,
         summary: String,
     },
+    MetalCbCommitted {
+        cb_id: u64,
+        queue_id: u64,
+        queue_depth: u32,
+        label: Option<String>,
+    },
+    MetalCbScheduled {
+        cb_id: u64,
+        queue_id: u64,
+    },
+    MetalCbCompleted {
+        cb_id: u64,
+        queue_id: u64,
+        status: u32,
+        error_code: Option<i64>,
+        error_domain: Option<String>,
+        in_flight_ns: u64,
+    },
+    MetalCbWarning {
+        cb_id: u64,
+        queue_id: u64,
+        elapsed_ns: u64,
+    },
+    MetalHeapAlloc {
+        heap_id: u64,
+        size_bytes: u64,
+        label: Option<String>,
+    },
+    MetalHeapFree {
+        heap_id: u64,
+    },
+    MetalBufferAlloc {
+        buffer_id: u64,
+        heap_id: Option<u64>,
+        size_bytes: u64,
+        label: Option<String>,
+    },
+    MetalBufferFree {
+        buffer_id: u64,
+    },
+    MetalTextureAlloc {
+        texture_id: u64,
+        heap_id: Option<u64>,
+        size_bytes: u64,
+        label: Option<String>,
+    },
+    MetalTextureFree {
+        texture_id: u64,
+    },
+    MetalHookDropped {
+        count: u64,
+    },
+    MetalHookSkipped {
+        reason: String,
+    },
     ProbeHealth {
         probe: String,
         state: ProbeHealthState,
@@ -245,6 +300,131 @@ mod tests {
                 reason: Some("no SMC keys".into()),
             },
             Source::System,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_cb_committed() {
+        round_trip(
+            Payload::MetalCbCommitted {
+                cb_id: 0xdead_beef,
+                queue_id: 0x1438e0,
+                queue_depth: 7,
+                label: Some("eval".into()),
+            },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_cb_scheduled() {
+        round_trip(
+            Payload::MetalCbScheduled {
+                cb_id: 1,
+                queue_id: 2,
+            },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_cb_completed() {
+        round_trip(
+            Payload::MetalCbCompleted {
+                cb_id: 1,
+                queue_id: 2,
+                status: 4,
+                error_code: Some(0x0e),
+                error_domain: Some("MTLCommandBufferErrorDomain".into()),
+                in_flight_ns: 10_270_000_000,
+            },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_cb_warning() {
+        round_trip(
+            Payload::MetalCbWarning {
+                cb_id: 1,
+                queue_id: 2,
+                elapsed_ns: 6_400_000_000,
+            },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_heap_alloc() {
+        round_trip(
+            Payload::MetalHeapAlloc {
+                heap_id: 0x1a4,
+                size_bytes: 7_500_000_000,
+                label: None,
+            },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_heap_free() {
+        round_trip(Payload::MetalHeapFree { heap_id: 0x1a4 }, Source::MetalHook);
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_buffer_alloc() {
+        round_trip(
+            Payload::MetalBufferAlloc {
+                buffer_id: 0xb1,
+                heap_id: Some(0x1a4),
+                size_bytes: 4096,
+                label: Some("video_embeds".into()),
+            },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_buffer_free() {
+        round_trip(
+            Payload::MetalBufferFree { buffer_id: 0xb1 },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_texture_alloc() {
+        round_trip(
+            Payload::MetalTextureAlloc {
+                texture_id: 0xa1b2,
+                heap_id: None,
+                size_bytes: 16384,
+                label: None,
+            },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_texture_free() {
+        round_trip(
+            Payload::MetalTextureFree { texture_id: 0xa1b2 },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_hook_dropped() {
+        round_trip(Payload::MetalHookDropped { count: 42 }, Source::MetalHook);
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_hook_skipped() {
+        round_trip(
+            Payload::MetalHookSkipped {
+                reason: "macOS 27 untested".into(),
+            },
+            Source::MetalHook,
         );
     }
 }
