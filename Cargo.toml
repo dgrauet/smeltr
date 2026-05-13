@@ -5,6 +5,7 @@ members = [
     "crates/smeltr-daemon",
     "crates/smeltr-cli",
     "crates/smeltr-probes-core",
+    "crates/smeltr-probes-vm",
 ]
 
 [workspace.package]
