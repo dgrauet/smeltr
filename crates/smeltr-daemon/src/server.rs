@@ -168,7 +168,10 @@ async fn handle_msg(
         }
         ClientToDaemon::DetachScopedProbes { pid, exit_code } => {
             probe_runtime.detach_scoped(pid).await;
-            let label = format!("record:exit pid={pid} code={:?}", exit_code);
+            let label = match exit_code {
+                Some(c) => format!("record:exit pid={pid} code={c}"),
+                None => format!("record:exit pid={pid} code=none"),
+            };
             match session.append(
                 smeltr_core::event::Source::Mark,
                 Some(pid),

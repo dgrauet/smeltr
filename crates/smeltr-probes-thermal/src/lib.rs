@@ -62,6 +62,11 @@ impl Probe for ThermalProbe {
                 Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
                     return Err(ProbeError::Unavailable(e.to_string()))
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ProbeError::Unavailable(format!(
+                        "kern.thermalstate not available: {e}"
+                    )))
+                }
                 Err(e) => return Err(ProbeError::Transient(e.to_string())),
             };
             if last != Some(level) {
