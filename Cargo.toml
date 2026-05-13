@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/smeltr-core", "crates/smeltr-daemon", "crates/smeltr-cli"]
+members = [
+    "crates/smeltr-core",
+    "crates/smeltr-daemon",
+    "crates/smeltr-cli",
+    "crates/smeltr-probes-core",
+]
 
 [workspace.package]
 edition = "2021"
