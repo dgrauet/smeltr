@@ -1,5 +1,5 @@
 use clap::Parser;
-use smeltr_daemon::{bus, server, sessions};
+use smeltr_daemon::{bus, probes, server, sessions};
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -32,6 +32,12 @@ async fn main() -> anyhow::Result<()> {
     }
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
+    let sink = Arc::new(probes::DaemonSink {
+        session: session.clone(),
+        bus: bus.clone(),
+    });
+    let probe_runtime = probes::ProbeRuntime::start_global(sink);
+
     let server = server::Server::bind(session.clone(), bus.clone(), shutdown_tx.clone())?;
     let server_task = tokio::spawn(server.run());
 
@@ -55,6 +61,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Drop server task (listener will close)
     server_task.abort();
+
+    probe_runtime.shutdown().await;
 
     // Finalize session (idempotent, safe with outstanding Arc clones).
     if let Err(e) = session.finalize(Some(0), "daemon shutdown") {

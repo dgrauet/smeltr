@@ -13,6 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 smeltr-core = { path = "../smeltr-core" }
+smeltr-probes-core = { path = "../smeltr-probes-core" }
+smeltr-probes-vm = { path = "../smeltr-probes-vm" }
+smeltr-probes-proc = { path = "../smeltr-probes-proc" }
+smeltr-probes-thermal = { path = "../smeltr-probes-thermal" }
+smeltr-probes-oslog = { path = "../smeltr-probes-oslog" }
+smeltr-probes-ioreport = { path = "../smeltr-probes-ioreport" }
+smeltr-probes-crash-reports = { path = "../smeltr-probes-crash-reports" }
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
