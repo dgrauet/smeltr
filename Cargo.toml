@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/smeltr-core"]
-# smeltr-daemon added by Task 8, smeltr-cli added by Task 13.
+members = ["crates/smeltr-core", "crates/smeltr-daemon"]
+# smeltr-cli added by Task 13.
 
 [workspace.package]
 edition = "2021"

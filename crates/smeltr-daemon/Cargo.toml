@@ -1,0 +1,24 @@
+[package]
+name = "smeltr-daemon"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "smeltrd"
+path = "src/main.rs"
+
+[dependencies]
+smeltr-core = { path = "../smeltr-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+uuid.workspace = true
+time.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
