@@ -9,6 +9,7 @@ members = [
     "crates/smeltr-probes-proc",
     "crates/smeltr-probes-thermal",
     "crates/smeltr-probes-oslog",
+    "crates/smeltr-probes-ioreport",
 ]
 
 [workspace.package]
