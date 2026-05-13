@@ -36,9 +36,14 @@ async fn main() -> anyhow::Result<()> {
         session: session.clone(),
         bus: bus.clone(),
     });
-    let probe_runtime = probes::ProbeRuntime::start_global(sink);
+    let probe_runtime = Arc::new(probes::ProbeRuntime::start_global(sink));
 
-    let server = server::Server::bind(session.clone(), bus.clone(), shutdown_tx.clone())?;
+    let server = server::Server::bind(
+        session.clone(),
+        bus.clone(),
+        probe_runtime.clone(),
+        shutdown_tx.clone(),
+    )?;
     let server_task = tokio::spawn(server.run());
 
     // SIGTERM / SIGINT → graceful shutdown

@@ -3,6 +3,7 @@
 //! broadcast bus.
 
 use crate::bus::Bus;
+use crate::probes::ProbeRuntime;
 use crate::protocol::{ClientToDaemon, DaemonToClient};
 use crate::sessions::ActiveSession;
 use smeltr_core::reader::{find_session_dir, list_sessions, read_events, read_metadata};
@@ -25,6 +26,7 @@ pub struct Server {
     listener: UnixListener,
     session: Arc<ActiveSession>,
     bus: Bus,
+    probe_runtime: Arc<ProbeRuntime>,
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 
@@ -32,6 +34,7 @@ impl Server {
     pub fn bind(
         session: Arc<ActiveSession>,
         bus: Bus,
+        probe_runtime: Arc<ProbeRuntime>,
         shutdown: tokio::sync::watch::Sender<bool>,
     ) -> std::io::Result<Self> {
         let path = socket_path();
@@ -44,6 +47,7 @@ impl Server {
             listener,
             session,
             bus,
+            probe_runtime,
             shutdown,
         })
     }
@@ -56,8 +60,9 @@ impl Server {
                     let (stream, _) = accept?;
                     let session = self.session.clone();
                     let bus = self.bus.clone();
+                    let probe_runtime = self.probe_runtime.clone();
                     let shutdown_tx = self.shutdown.clone();
-                    tokio::spawn(handle_connection(stream, session, bus, shutdown_tx));
+                    tokio::spawn(handle_connection(stream, session, bus, probe_runtime, shutdown_tx));
                 }
                 _ = rx.changed() => {
                     if *rx.borrow() { break; }
@@ -72,9 +77,12 @@ async fn handle_connection(
     mut stream: UnixStream,
     session: Arc<ActiveSession>,
     bus: Bus,
+    probe_runtime: Arc<ProbeRuntime>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) {
-    if let Err(e) = handle_connection_inner(&mut stream, &session, &bus, &shutdown_tx).await {
+    if let Err(e) =
+        handle_connection_inner(&mut stream, &session, &bus, &probe_runtime, &shutdown_tx).await
+    {
         tracing::warn!(error = %e, "connection ended with error");
     }
 }
@@ -83,6 +91,7 @@ async fn handle_connection_inner(
     stream: &mut UnixStream,
     session: &Arc<ActiveSession>,
     bus: &Bus,
+    probe_runtime: &Arc<ProbeRuntime>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
 ) -> std::io::Result<()> {
     loop {
@@ -90,15 +99,16 @@ async fn handle_connection_inner(
             Some(m) => m,
             None => return Ok(()),
         };
-        let resp = handle_msg(msg, session, bus, shutdown_tx);
+        let resp = handle_msg(msg, session, bus, probe_runtime, shutdown_tx).await;
         write_msg(stream, &resp).await?;
     }
 }
 
-fn handle_msg(
+async fn handle_msg(
     msg: ClientToDaemon,
     session: &Arc<ActiveSession>,
     bus: &Bus,
+    probe_runtime: &Arc<ProbeRuntime>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
 ) -> DaemonToClient {
     match msg {
@@ -152,6 +162,25 @@ fn handle_msg(
             let _ = shutdown_tx.send(true);
             DaemonToClient::Ack
         }
+        ClientToDaemon::AttachScopedProbes { pid } => {
+            probe_runtime.attach_scoped(pid).await;
+            DaemonToClient::Ack
+        }
+        ClientToDaemon::DetachScopedProbes { pid, exit_code } => {
+            probe_runtime.detach_scoped(pid).await;
+            let label = format!("record:exit pid={pid} code={:?}", exit_code);
+            match session.append(
+                smeltr_core::event::Source::Mark,
+                Some(pid),
+                smeltr_core::event::Payload::Mark { label },
+            ) {
+                Ok(ev) => {
+                    bus.publish(ev);
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to append detach mark"),
+            }
+            DaemonToClient::Ack
+        }
     }
 }
 
@@ -191,6 +220,7 @@ async fn write_msg<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probes::{DaemonSink, ProbeRuntime};
     use smeltr_core::event::{Payload, Source};
 
     async fn connect() -> UnixStream {
@@ -209,8 +239,13 @@ mod tests {
         let _home = temp_env();
         let session = Arc::new(ActiveSession::open_new().unwrap());
         let bus = Bus::new();
+        let sink = Arc::new(DaemonSink {
+            session: session.clone(),
+            bus: bus.clone(),
+        });
+        let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));
         let (tx, _rx) = tokio::sync::watch::channel(false);
-        let server = Server::bind(session.clone(), bus, tx.clone()).unwrap();
+        let server = Server::bind(session.clone(), bus, probe_runtime.clone(), tx.clone()).unwrap();
         tokio::spawn(server.run());
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -242,5 +277,6 @@ mod tests {
         assert!(matches!(resp, DaemonToClient::Ack));
 
         let _ = tx.send(true);
+        probe_runtime.shutdown().await;
     }
 }

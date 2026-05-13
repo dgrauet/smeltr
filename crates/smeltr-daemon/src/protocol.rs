@@ -26,6 +26,11 @@ pub enum ClientToDaemon {
     GetSession { id: SessionId },
     /// Ask the daemon to stop cleanly.
     Shutdown,
+    /// Attach scoped probes (mach-exceptions, pid-filtered crash reports) to
+    /// the given child PID. Used by `smeltr record`.
+    AttachScopedProbes { pid: u32 },
+    /// Detach scoped probes for the given PID and emit a final marker.
+    DetachScopedProbes { pid: u32, exit_code: Option<i32> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
