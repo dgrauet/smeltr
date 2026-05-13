@@ -24,7 +24,7 @@ impl std::str::FromStr for SessionId {
     fn from_str(s: &str) -> Result<Self, Self::Err> { Uuid::parse_str(s).map(Self) }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub session_id:     SessionId,
     pub started_rfc3339: String,
