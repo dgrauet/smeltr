@@ -26,6 +26,14 @@ enum Cmd {
     },
     /// Audit probe availability and permissions.
     Doctor,
+    /// Spawn a child process under smeltr's scoped probes.
+    Record {
+        /// Command to execute.
+        cmd: String,
+        /// Arguments to pass to the command.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -42,6 +50,10 @@ fn main() -> anyhow::Result<()> {
             Cmd::Mark { label } => commands::mark::run(label).await,
             Cmd::Sessions { sub } => commands::sessions::run(sub).await,
             Cmd::Doctor => commands::doctor::run(),
+            Cmd::Record { cmd, args } => {
+                let code = commands::record::run(&cmd, &args).await?;
+                std::process::exit(code);
+            }
         }
     })
 }

@@ -95,6 +95,48 @@ fn end_to_end_mark_then_show() {
 }
 
 #[test]
+fn record_captures_child_lifecycle() {
+    let home = tempfile::tempdir().unwrap();
+    let sock = home.path().join("smeltr.sock");
+
+    let mut child = StdCommand::new(smeltrd_path())
+        .env("SMELTR_HOME", home.path())
+        .env("SMELTR_SOCKET", &sock)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn smeltrd");
+    assert!(wait_for_socket(&sock), "daemon never created its socket");
+
+    Command::cargo_bin("smeltr")
+        .unwrap()
+        .env("SMELTR_HOME", home.path())
+        .env("SMELTR_SOCKET", &sock)
+        .args(["record", "/bin/sleep", "1"])
+        .assert()
+        .success();
+
+    // Shut down the daemon so it flushes events to disk.
+    let _ = StdCommand::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .output();
+    let _ = child.wait();
+    std::thread::sleep(Duration::from_millis(100));
+
+    let sessions_root = home.path().join("sessions");
+    let entries: Vec<_> = std::fs::read_dir(&sessions_root)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "expected exactly one session directory");
+    let events_path = entries[0].path().join("events.cbor");
+    let bytes = std::fs::read(events_path).unwrap();
+    let s = String::from_utf8_lossy(&bytes);
+    assert!(s.contains("record:exit"), "expected record:exit marker");
+}
+
+#[test]
 fn doctor_prints_probe_status() {
     let out = Command::cargo_bin("smeltr")
         .unwrap()
