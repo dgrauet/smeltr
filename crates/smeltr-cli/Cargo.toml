@@ -1,28 +1,26 @@
 [package]
-name = "smeltr-daemon"
+name = "smeltr-cli"
 edition.workspace = true
 version.workspace = true
 
-[lib]
-name = "smeltr_daemon"
-path = "src/lib.rs"
-
 [[bin]]
-name = "smeltrd"
+name = "smeltr"
 path = "src/main.rs"
 
 [dependencies]
 smeltr-core = { path = "../smeltr-core" }
+smeltr-daemon = { path = "../smeltr-daemon" }
 anyhow.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 serde.workspace = true
 ciborium.workspace = true
-uuid.workspace = true
-time.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+time.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+assert_cmd.workspace = true
+predicates.workspace = true

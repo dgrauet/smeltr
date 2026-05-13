@@ -1,9 +1,5 @@
-mod bus;
-mod protocol;
-mod server;
-mod sessions;
-
 use clap::Parser;
+use smeltr_daemon::{bus, server, sessions};
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
