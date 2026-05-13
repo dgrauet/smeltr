@@ -1,12 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/smeltr-core", "crates/smeltr-daemon", "crates/smeltr-cli"]
+members = ["crates/smeltr-core"]
+# smeltr-daemon added by Task 8, smeltr-cli added by Task 13.
 
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
-rust-version = "1.78"
+rust-version = "1.88"
 
 [workspace.dependencies]
 anyhow = "1"
