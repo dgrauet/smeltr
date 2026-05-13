@@ -56,11 +56,9 @@ async fn main() -> anyhow::Result<()> {
     // Drop server task (listener will close)
     server_task.abort();
 
-    // Finalize session
-    if let Ok(s) = Arc::try_unwrap(session) {
-        s.finalize(Some(0), "daemon shutdown")?;
-    } else {
-        tracing::warn!("active session has outstanding refs; metadata may be incomplete");
+    // Finalize session (idempotent, safe with outstanding Arc clones).
+    if let Err(e) = session.finalize(Some(0), "daemon shutdown") {
+        tracing::error!(error = %e, "failed to finalize session on shutdown");
     }
 
     let _ = std::fs::remove_file(&pid_path);

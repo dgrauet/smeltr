@@ -1,8 +1,4 @@
 //! Active session bookkeeping inside the daemon.
-//!
-//! The daemon always has exactly one "active session" open. When events come
-//! in, they're stamped with that session id and appended to its writer. On
-//! shutdown the active session is finalized.
 
 use smeltr_core::clock::MonoClock;
 use smeltr_core::event::{Event, Payload, Source};
@@ -13,7 +9,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
 pub struct ActiveSession {
-    inner: Mutex<Inner>,
+    inner: Mutex<Option<Inner>>,
 }
 
 struct Inner {
@@ -32,13 +28,13 @@ impl ActiveSession {
         let clock = MonoClock::new();
         let wall_epoch_ns = now_unix_ns();
         let s = Self {
-            inner: Mutex::new(Inner {
+            inner: Mutex::new(Some(Inner {
                 writer,
                 session_id: id,
                 clock,
                 wall_epoch_ns,
                 seq: 0,
-            }),
+            })),
         };
         s.append_internal(
             Source::System,
@@ -51,11 +47,14 @@ impl ActiveSession {
     }
 
     pub fn id(&self) -> SessionId {
-        self.inner.lock().unwrap().session_id
+        self.inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("session not finalized")
+            .session_id
     }
 
-    /// Stamps an event with current clock/seq/session id and writes it.
-    /// Returns the fully-populated Event so it can also be broadcast.
     pub fn append(
         &self,
         source: Source,
@@ -71,7 +70,10 @@ impl ActiveSession {
         pid: Option<u32>,
         payload: Payload,
     ) -> std::io::Result<Event> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
+        let inner = guard
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("session already finalized"))?;
         let ts_mono = inner.clock.now_ns();
         let ts_wall = inner.wall_epoch_ns + ts_mono;
         inner.seq += 1;
@@ -91,7 +93,8 @@ impl ActiveSession {
         Ok(ev)
     }
 
-    pub fn finalize(self, exit_code: Option<i32>, reason: &str) -> std::io::Result<()> {
+    /// Idempotent. Subsequent calls are no-ops.
+    pub fn finalize(&self, exit_code: Option<i32>, reason: &str) -> std::io::Result<()> {
         let _ = self.append(
             Source::System,
             None,
@@ -100,7 +103,11 @@ impl ActiveSession {
                 reason: reason.to_string(),
             },
         );
-        let inner = self.inner.into_inner().unwrap();
+        let inner = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.take()
+        };
+        let Some(inner) = inner else { return Ok(()) };
         let ended = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
         inner.writer.finalize(exit_code, ended)
     }
@@ -147,5 +154,20 @@ mod tests {
         let meta = read_metadata(&dirs[0]).unwrap();
         assert_eq!(meta.exit_code, Some(0));
         assert!(meta.ended_rfc3339.is_some());
+    }
+
+    #[test]
+    fn finalize_works_even_with_outstanding_arc_clones() {
+        let _home = temp_home();
+        let s = std::sync::Arc::new(ActiveSession::open_new().unwrap());
+        let s_clone = s.clone();
+
+        s.finalize(Some(7), "shutdown").unwrap();
+
+        let dirs = list_sessions().unwrap();
+        let meta = read_metadata(&dirs[0]).unwrap();
+        assert_eq!(meta.exit_code, Some(7));
+        assert!(meta.ended_rfc3339.is_some());
+        drop(s_clone);
     }
 }
