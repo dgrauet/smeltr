@@ -1,0 +1,20 @@
+[package]
+name = "smeltr-probes-proc"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+smeltr-core = { path = "../smeltr-core" }
+smeltr-probes-core = { path = "../smeltr-probes-core" }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = { workspace = true }
+async-trait = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
