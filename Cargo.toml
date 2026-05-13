@@ -7,6 +7,7 @@ members = [
     "crates/smeltr-probes-core",
     "crates/smeltr-probes-vm",
     "crates/smeltr-probes-proc",
+    "crates/smeltr-probes-thermal",
 ]
 
 [workspace.package]
