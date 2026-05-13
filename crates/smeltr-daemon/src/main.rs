@@ -13,8 +13,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
 
     let _args = Args::parse();
@@ -26,7 +27,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Write PID file for `smeltr daemon stop`.
     let pid_path = pid_file_path();
-    if let Some(parent) = pid_path.parent() { std::fs::create_dir_all(parent)?; }
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
     let server = server::Server::bind(session.clone(), bus.clone(), shutdown_tx.clone())?;
@@ -35,8 +38,10 @@ async fn main() -> anyhow::Result<()> {
     // SIGTERM / SIGINT → graceful shutdown
     let shutdown_signal = shutdown_tx.clone();
     tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-        let mut sigint  = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        let mut sigint =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
         tokio::select! {
             _ = sigterm.recv() => tracing::info!("SIGTERM, shutting down"),
             _ = sigint.recv()  => tracing::info!("SIGINT, shutting down"),

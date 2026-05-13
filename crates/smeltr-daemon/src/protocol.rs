@@ -15,9 +15,11 @@ pub enum ClientToDaemon {
     Hello { client: String },
     /// Append an event to the current active session. Server fills in
     /// ts_mono/ts_wall/seq/session_id; client only specifies source/pid/payload.
-    Emit { source: smeltr_core::event::Source,
-           pid:    Option<u32>,
-           payload: smeltr_core::event::Payload },
+    Emit {
+        source: smeltr_core::event::Source,
+        pid: Option<u32>,
+        payload: smeltr_core::event::Payload,
+    },
     /// Request a list of session directory names (basename only).
     ListSessions,
     /// Request all events of a given session.
@@ -29,11 +31,21 @@ pub enum ClientToDaemon {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum DaemonToClient {
-    Welcome { daemon_version: String, active_session: SessionId },
+    Welcome {
+        daemon_version: String,
+        active_session: SessionId,
+    },
     Ack,
-    Error { message: String },
-    SessionList { dirs: Vec<String> },
-    SessionEvents { events: Vec<Event>, metadata: smeltr_core::session::SessionMetadata },
+    Error {
+        message: String,
+    },
+    SessionList {
+        dirs: Vec<String>,
+    },
+    SessionEvents {
+        events: Vec<Event>,
+        metadata: smeltr_core::session::SessionMetadata,
+    },
 }
 
 #[cfg(test)]
@@ -43,7 +55,9 @@ mod tests {
 
     #[test]
     fn client_msg_round_trip() {
-        let m = ClientToDaemon::Hello { client: "test".into() };
+        let m = ClientToDaemon::Hello {
+            client: "test".into(),
+        };
         let mut buf = Vec::new();
         write_frame(&mut buf, &m).unwrap();
         let back: ClientToDaemon = read_frame(&mut &buf[..]).unwrap().unwrap();

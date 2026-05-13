@@ -5,10 +5,10 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
-    Mark,          // user marker
-    System,        // internal daemon events (session start/end, drops)
-    // Probes added in later plans:
-    // IoReport, Vm, Proc, OsLog, Thermal, MachExc, CrashReport, MetalHook, PythonSidecar
+    Mark, // user marker
+    System, // internal daemon events (session start/end, drops)
+          // Probes added in later plans:
+          // IoReport, Vm, Proc, OsLog, Thermal, MachExc, CrashReport, MetalHook, PythonSidecar
 }
 
 /// Tagged union of every payload smeltr can produce. We start with the two that
@@ -20,7 +20,7 @@ pub enum Source {
 pub enum Payload {
     Mark { label: String },
     SessionStarted { wall_unix_ns: u64 },
-    SessionEnded   { wall_unix_ns: u64, reason: String },
+    SessionEnded { wall_unix_ns: u64, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,10 +28,10 @@ pub struct Event {
     pub ts_mono_ns: u64,
     pub ts_wall_ns: u64,
     pub session_id: Uuid,
-    pub source:     Source,
-    pub pid:        Option<u32>,
-    pub seq:        u64,
-    pub payload:    Payload,
+    pub source: Source,
+    pub pid: Option<u32>,
+    pub seq: u64,
+    pub payload: Payload,
 }
 
 #[cfg(test)]
@@ -46,7 +46,9 @@ mod tests {
             source: Source::Mark,
             pid: Some(42),
             seq: 7,
-            payload: Payload::Mark { label: "hello".into() },
+            payload: Payload::Mark {
+                label: "hello".into(),
+            },
         }
     }
 

@@ -2,15 +2,25 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionId(pub Uuid);
 
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionId {
-    pub fn new() -> Self { Self(Uuid::new_v4()) }
-    pub fn short(&self) -> String { self.0.as_simple().to_string()[..8].to_string() }
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+    pub fn short(&self) -> String {
+        self.0.as_simple().to_string()[..8].to_string()
+    }
 }
 
 impl std::fmt::Display for SessionId {
@@ -21,18 +31,20 @@ impl std::fmt::Display for SessionId {
 
 impl std::str::FromStr for SessionId {
     type Err = uuid::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> { Uuid::parse_str(s).map(Self) }
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s).map(Self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
-    pub session_id:     SessionId,
+    pub session_id: SessionId,
     pub started_rfc3339: String,
-    pub ended_rfc3339:   Option<String>,
-    pub host:            String,
-    pub mlx_version:     Option<String>,
-    pub exit_code:       Option<i32>,
-    pub argv:            Vec<String>,
+    pub ended_rfc3339: Option<String>,
+    pub host: String,
+    pub mlx_version: Option<String>,
+    pub exit_code: Option<i32>,
+    pub argv: Vec<String>,
 }
 
 impl SessionMetadata {
@@ -51,7 +63,8 @@ impl SessionMetadata {
 
 fn hostname_or_unknown() -> String {
     std::process::Command::new("hostname")
-        .output().ok()
+        .output()
+        .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".into())
@@ -67,7 +80,9 @@ pub fn sessions_root() -> PathBuf {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).expect("HOME must be set")
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .expect("HOME must be set")
 }
 
 /// Directory name for a session: `YYYY-MM-DD-HHMMSS-<8 hex>`.
@@ -76,8 +91,12 @@ pub fn session_dir_name(meta: &SessionMetadata) -> String {
         .expect("metadata wrote a valid RFC3339 timestamp");
     format!(
         "{:04}-{:02}-{:02}-{:02}{:02}{:02}-{}",
-        t.year(), u8::from(t.month()), t.day(),
-        t.hour(), t.minute(), t.second(),
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
         meta.session_id.short(),
     )
 }
@@ -86,8 +105,12 @@ pub fn session_dir(meta: &SessionMetadata) -> PathBuf {
     sessions_root().join(session_dir_name(meta))
 }
 
-pub fn metadata_path(dir: &Path) -> PathBuf { dir.join("metadata.toml") }
-pub fn events_path(dir: &Path)   -> PathBuf { dir.join("events.cbor") }
+pub fn metadata_path(dir: &Path) -> PathBuf {
+    dir.join("metadata.toml")
+}
+pub fn events_path(dir: &Path) -> PathBuf {
+    dir.join("events.cbor")
+}
 
 #[cfg(test)]
 mod tests {

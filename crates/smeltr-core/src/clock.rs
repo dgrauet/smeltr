@@ -9,7 +9,9 @@ pub struct MonoClock {
 
 impl MonoClock {
     pub fn new() -> Self {
-        Self { epoch: Instant::now() }
+        Self {
+            epoch: Instant::now(),
+        }
     }
 
     /// Nanoseconds since this clock's epoch. Monotonic, never goes backward.
@@ -19,7 +21,9 @@ impl MonoClock {
 }
 
 impl Default for MonoClock {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

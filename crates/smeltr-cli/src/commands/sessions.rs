@@ -26,17 +26,23 @@ async fn ls() -> anyhow::Result<()> {
         Ok(mut c) => match c.request(ClientToDaemon::ListSessions).await {
             Ok(DaemonToClient::SessionList { dirs }) => Some(dirs),
             _ => None,
-        }
+        },
         Err(_) => None,
     };
     let dirs = match from_daemon {
         Some(d) => d,
-        None => list_sessions()?.into_iter()
+        None => list_sessions()?
+            .into_iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect(),
     };
-    if dirs.is_empty() { println!("(no sessions)"); return Ok(()); }
-    for d in dirs { println!("{d}"); }
+    if dirs.is_empty() {
+        println!("(no sessions)");
+        return Ok(());
+    }
+    for d in dirs {
+        println!("{d}");
+    }
     Ok(())
 }
 
@@ -62,11 +68,16 @@ async fn show(id: &str) -> anyhow::Result<()> {
 }
 
 fn resolve_id(s: &str) -> anyhow::Result<SessionId> {
-    if let Ok(sid) = s.parse::<SessionId>() { return Ok(sid); }
+    if let Ok(sid) = s.parse::<SessionId>() {
+        return Ok(sid);
+    }
     // Allow 8-char short id by listing and matching.
     let s = s.to_lowercase();
     for p in list_sessions()? {
-        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         if name.ends_with(&s) {
             let meta = read_metadata(&p)?;
             return Ok(meta.session_id);
@@ -75,21 +86,33 @@ fn resolve_id(s: &str) -> anyhow::Result<SessionId> {
     anyhow::bail!("could not resolve session id `{s}`")
 }
 
-fn print_session(meta: &smeltr_core::session::SessionMetadata, events: &[smeltr_core::event::Event]) -> anyhow::Result<()> {
+fn print_session(
+    meta: &smeltr_core::session::SessionMetadata,
+    events: &[smeltr_core::event::Event],
+) -> anyhow::Result<()> {
     println!("session    {}", meta.session_id);
     println!("started    {}", meta.started_rfc3339);
-    if let Some(end) = &meta.ended_rfc3339 { println!("ended      {end}"); }
+    if let Some(end) = &meta.ended_rfc3339 {
+        println!("ended      {end}");
+    }
     println!("host       {}", meta.host);
-    if let Some(c) = meta.exit_code { println!("exit_code  {c}"); }
+    if let Some(c) = meta.exit_code {
+        println!("exit_code  {c}");
+    }
     println!("events     {}", events.len());
     println!();
     for ev in events {
         let kind = match &ev.payload {
-            smeltr_core::event::Payload::Mark { label }              => format!("mark    {label}"),
-            smeltr_core::event::Payload::SessionStarted { .. }       => "session-started".into(),
-            smeltr_core::event::Payload::SessionEnded { reason, .. } => format!("session-ended ({reason})"),
+            smeltr_core::event::Payload::Mark { label } => format!("mark    {label}"),
+            smeltr_core::event::Payload::SessionStarted { .. } => "session-started".into(),
+            smeltr_core::event::Payload::SessionEnded { reason, .. } => {
+                format!("session-ended ({reason})")
+            }
         };
-        println!("  +{:>10}ns  seq={:>4}  src={:?}  {kind}", ev.ts_mono_ns, ev.seq, ev.source);
+        println!(
+            "  +{:>10}ns  seq={:>4}  src={:?}  {kind}",
+            ev.ts_mono_ns, ev.seq, ev.source
+        );
     }
     Ok(())
 }

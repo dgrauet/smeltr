@@ -13,8 +13,8 @@ pub enum DaemonCmd {
 
 pub async fn run(cmd: DaemonCmd) -> anyhow::Result<()> {
     match cmd {
-        DaemonCmd::Start  => start().await,
-        DaemonCmd::Stop   => stop().await,
+        DaemonCmd::Start => start().await,
+        DaemonCmd::Stop => stop().await,
         DaemonCmd::Status => status().await,
     }
 }
@@ -30,7 +30,8 @@ fn pid_file_path() -> PathBuf {
 }
 
 fn read_pid() -> Option<u32> {
-    std::fs::read_to_string(pid_file_path()).ok()
+    std::fs::read_to_string(pid_file_path())
+        .ok()
         .and_then(|s| s.trim().parse().ok())
 }
 
@@ -66,14 +67,19 @@ async fn start() -> anyhow::Result<()> {
 
 async fn stop() -> anyhow::Result<()> {
     let pid = read_pid().ok_or_else(|| anyhow::anyhow!("no pid file"))?;
-    if !process_alive(pid) { anyhow::bail!("pid {pid} is not running"); }
+    if !process_alive(pid) {
+        anyhow::bail!("pid {pid} is not running");
+    }
     unsafe {
         if libc_kill(pid as i32, 15) != 0 {
             anyhow::bail!("kill failed: {}", std::io::Error::last_os_error());
         }
     }
     for _ in 0..40 {
-        if !process_alive(pid) { println!("smeltrd stopped"); return Ok(()); }
+        if !process_alive(pid) {
+            println!("smeltrd stopped");
+            return Ok(());
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     anyhow::bail!("smeltrd still alive after 2s")
@@ -85,10 +91,13 @@ async fn status() -> anyhow::Result<()> {
             println!("pid:    {pid}");
         }
         Some(pid) => println!("pid:    {pid} (stale, not running)"),
-        None      => println!("pid:    (no pid file)"),
+        None => println!("pid:    (no pid file)"),
     }
     println!("socket: {}", smeltr_daemon::server::socket_path().display());
-    println!("home:   {}", std::env::var("SMELTR_HOME").unwrap_or_else(|_| "$HOME/.smeltr".into()));
+    println!(
+        "home:   {}",
+        std::env::var("SMELTR_HOME").unwrap_or_else(|_| "$HOME/.smeltr".into())
+    );
     Ok(())
 }
 
@@ -100,4 +109,6 @@ fn process_alive(pid: u32) -> bool {
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
-unsafe fn libc_kill(pid: i32, sig: i32) -> i32 { kill(pid, sig) }
+unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
+    kill(pid, sig)
+}

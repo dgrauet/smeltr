@@ -23,21 +23,29 @@ pub fn socket_path() -> std::path::PathBuf {
 
 pub struct Server {
     listener: UnixListener,
-    session:  Arc<ActiveSession>,
-    bus:      Bus,
+    session: Arc<ActiveSession>,
+    bus: Bus,
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Server {
-    pub fn bind(session: Arc<ActiveSession>, bus: Bus,
-                shutdown: tokio::sync::watch::Sender<bool>) -> std::io::Result<Self> {
+    pub fn bind(
+        session: Arc<ActiveSession>,
+        bus: Bus,
+        shutdown: tokio::sync::watch::Sender<bool>,
+    ) -> std::io::Result<Self> {
         let path = socket_path();
         let _ = std::fs::remove_file(&path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let listener = UnixListener::bind(&path)?;
-        Ok(Self { listener, session, bus, shutdown })
+        Ok(Self {
+            listener,
+            session,
+            bus,
+            shutdown,
+        })
     }
 
     pub async fn run(self) -> std::io::Result<()> {
@@ -63,7 +71,7 @@ impl Server {
 async fn handle_connection(
     mut stream: UnixStream,
     session: Arc<ActiveSession>,
-    bus:     Bus,
+    bus: Bus,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) {
     if let Err(e) = handle_connection_inner(&mut stream, &session, &bus, &shutdown_tx).await {
@@ -74,7 +82,7 @@ async fn handle_connection(
 async fn handle_connection_inner(
     stream: &mut UnixStream,
     session: &Arc<ActiveSession>,
-    bus:     &Bus,
+    bus: &Bus,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
 ) -> std::io::Result<()> {
     loop {
@@ -90,7 +98,7 @@ async fn handle_connection_inner(
 fn handle_msg(
     msg: ClientToDaemon,
     session: &Arc<ActiveSession>,
-    bus:     &Bus,
+    bus: &Bus,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
 ) -> DaemonToClient {
     match msg {
@@ -101,33 +109,45 @@ fn handle_msg(
                 active_session: session.id(),
             }
         }
-        ClientToDaemon::Emit { source, pid, payload } => {
-            match session.append(source, pid, payload) {
-                Ok(ev) => { bus.publish(ev); DaemonToClient::Ack }
-                Err(e) => DaemonToClient::Error { message: e.to_string() },
+        ClientToDaemon::Emit {
+            source,
+            pid,
+            payload,
+        } => match session.append(source, pid, payload) {
+            Ok(ev) => {
+                bus.publish(ev);
+                DaemonToClient::Ack
             }
-        }
-        ClientToDaemon::ListSessions => {
-            match list_sessions() {
-                Ok(paths) => {
-                    let dirs = paths.iter()
-                        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .collect();
-                    DaemonToClient::SessionList { dirs }
-                }
-                Err(e) => DaemonToClient::Error { message: e.to_string() },
+            Err(e) => DaemonToClient::Error {
+                message: e.to_string(),
+            },
+        },
+        ClientToDaemon::ListSessions => match list_sessions() {
+            Ok(paths) => {
+                let dirs = paths
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .collect();
+                DaemonToClient::SessionList { dirs }
             }
-        }
-        ClientToDaemon::GetSession { id } => {
-            match find_session_dir(id) {
-                Ok(Some(dir)) => match (read_events(&dir), read_metadata(&dir)) {
-                    (Ok(events), Ok(metadata)) => DaemonToClient::SessionEvents { events, metadata },
-                    (Err(e), _) | (_, Err(e)) => DaemonToClient::Error { message: e.to_string() },
+            Err(e) => DaemonToClient::Error {
+                message: e.to_string(),
+            },
+        },
+        ClientToDaemon::GetSession { id } => match find_session_dir(id) {
+            Ok(Some(dir)) => match (read_events(&dir), read_metadata(&dir)) {
+                (Ok(events), Ok(metadata)) => DaemonToClient::SessionEvents { events, metadata },
+                (Err(e), _) | (_, Err(e)) => DaemonToClient::Error {
+                    message: e.to_string(),
                 },
-                Ok(None) => DaemonToClient::Error { message: format!("session {id} not found") },
-                Err(e) => DaemonToClient::Error { message: e.to_string() },
-            }
-        }
+            },
+            Ok(None) => DaemonToClient::Error {
+                message: format!("session {id} not found"),
+            },
+            Err(e) => DaemonToClient::Error {
+                message: e.to_string(),
+            },
+        },
         ClientToDaemon::Shutdown => {
             let _ = shutdown_tx.send(true);
             DaemonToClient::Ack
@@ -135,7 +155,9 @@ fn handle_msg(
     }
 }
 
-async fn read_msg<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> std::io::Result<Option<T>> {
+async fn read_msg<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+) -> std::io::Result<Option<T>> {
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -144,7 +166,10 @@ async fn read_msg<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> st
     }
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > 16 * 1024 * 1024 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
@@ -190,14 +215,29 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let mut s = connect().await;
-        write_msg(&mut s, &ClientToDaemon::Hello { client: "test".into() }).await.unwrap();
+        write_msg(
+            &mut s,
+            &ClientToDaemon::Hello {
+                client: "test".into(),
+            },
+        )
+        .await
+        .unwrap();
         let resp: DaemonToClient = read_msg(&mut s).await.unwrap().unwrap();
         assert!(matches!(resp, DaemonToClient::Welcome { .. }));
 
-        write_msg(&mut s, &ClientToDaemon::Emit {
-            source: Source::Mark, pid: None,
-            payload: Payload::Mark { label: "from-test".into() },
-        }).await.unwrap();
+        write_msg(
+            &mut s,
+            &ClientToDaemon::Emit {
+                source: Source::Mark,
+                pid: None,
+                payload: Payload::Mark {
+                    label: "from-test".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
         let resp: DaemonToClient = read_msg(&mut s).await.unwrap().unwrap();
         assert!(matches!(resp, DaemonToClient::Ack));
 

@@ -3,16 +3,21 @@
 //! Each frame on disk is `u32_le(length) || cbor_bytes`. Sized for sequential
 //! append-only writes and tolerant of partial reads.
 
-use std::io::{self, Read, Write};
 use serde::{de::DeserializeOwned, Serialize};
+use std::io::{self, Read, Write};
 
 #[derive(thiserror::Error, Debug)]
 pub enum CodecError {
-    #[error("io: {0}")]            Io(#[from] io::Error),
-    #[error("cbor encode: {0}")]   CborEncode(#[from] ciborium::ser::Error<io::Error>),
-    #[error("cbor decode: {0}")]   CborDecode(#[from] ciborium::de::Error<io::Error>),
-    #[error("frame too large: {0} bytes (max {1})")] FrameTooLarge(u32, u32),
-    #[error("truncated frame")]    Truncated,
+    #[error("io: {0}")]
+    Io(#[from] io::Error),
+    #[error("cbor encode: {0}")]
+    CborEncode(#[from] ciborium::ser::Error<io::Error>),
+    #[error("cbor decode: {0}")]
+    CborDecode(#[from] ciborium::de::Error<io::Error>),
+    #[error("frame too large: {0} bytes (max {1})")]
+    FrameTooLarge(u32, u32),
+    #[error("truncated frame")]
+    Truncated,
 }
 
 pub const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
@@ -54,7 +59,11 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<Option<T>, 
     }
     let mut payload = vec![0u8; len as usize];
     r.read_exact(&mut payload).map_err(|e| {
-        if e.kind() == io::ErrorKind::UnexpectedEof { CodecError::Truncated } else { e.into() }
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            CodecError::Truncated
+        } else {
+            e.into()
+        }
     })?;
     let value = ciborium::from_reader(&payload[..])?;
     Ok(Some(value))
@@ -68,10 +77,15 @@ mod tests {
 
     fn ev(seq: u64, label: &str) -> Event {
         Event {
-            ts_mono_ns: seq * 1000, ts_wall_ns: 0,
-            session_id: Uuid::nil(), source: Source::Mark,
-            pid: None, seq,
-            payload: Payload::Mark { label: label.into() },
+            ts_mono_ns: seq * 1000,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::Mark,
+            pid: None,
+            seq,
+            payload: Payload::Mark {
+                label: label.into(),
+            },
         }
     }
 

@@ -3,14 +3,19 @@ use smeltr_daemon::server::socket_path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-pub struct Client { stream: UnixStream }
+pub struct Client {
+    stream: UnixStream,
+}
 
 impl Client {
     pub async fn connect() -> anyhow::Result<Self> {
         let stream = UnixStream::connect(socket_path()).await
             .map_err(|e| anyhow::anyhow!("could not connect to smeltrd: {e}. Is the daemon running? Try `smeltr daemon start`."))?;
         let mut c = Self { stream };
-        c.send(&ClientToDaemon::Hello { client: "smeltr-cli".into() }).await?;
+        c.send(&ClientToDaemon::Hello {
+            client: "smeltr-cli".into(),
+        })
+        .await?;
         match c.recv().await? {
             DaemonToClient::Welcome { .. } => Ok(c),
             other => Err(anyhow::anyhow!("unexpected handshake: {other:?}")),

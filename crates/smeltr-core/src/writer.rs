@@ -8,8 +8,8 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 pub struct SessionWriter {
-    dir:      PathBuf,
-    events:   BufWriter<File>,
+    dir: PathBuf,
+    events: BufWriter<File>,
     metadata: SessionMetadata,
 }
 
@@ -18,9 +18,14 @@ impl SessionWriter {
         let dir = session_dir(&metadata);
         create_dir_all(&dir)?;
         let events = OpenOptions::new()
-            .create(true).append(true)
+            .create(true)
+            .append(true)
             .open(events_path(&dir))?;
-        let mut w = Self { dir, events: BufWriter::new(events), metadata };
+        let w = Self {
+            dir,
+            events: BufWriter::new(events),
+            metadata,
+        };
         w.persist_metadata()?;
         Ok(w)
     }
@@ -30,9 +35,15 @@ impl SessionWriter {
         Ok(())
     }
 
-    pub fn dir(&self) -> &std::path::Path { &self.dir }
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
 
-    pub fn finalize(mut self, exit_code: Option<i32>, ended_rfc3339: String) -> std::io::Result<()> {
+    pub fn finalize(
+        mut self,
+        exit_code: Option<i32>,
+        ended_rfc3339: String,
+    ) -> std::io::Result<()> {
         self.events.flush()?;
         self.metadata.exit_code = exit_code;
         self.metadata.ended_rfc3339 = Some(ended_rfc3339);
@@ -66,7 +77,9 @@ mod toml_simple {
         s.push_str(&format!("argv = [{}]\n", args.join(", ")));
         s
     }
-    fn esc(s: &str) -> String { s.replace('\\', "\\\\").replace('"', "\\\"") }
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
 }
 
 #[cfg(test)]
@@ -99,11 +112,17 @@ mod tests {
         let mut w = SessionWriter::create(meta).unwrap();
         for i in 0..3 {
             w.write_event(&Event {
-                ts_mono_ns: i, ts_wall_ns: 0,
-                session_id: Uuid::nil(), source: Source::Mark,
-                pid: None, seq: i,
-                payload: Payload::Mark { label: format!("mk-{i}") },
-            }).unwrap();
+                ts_mono_ns: i,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::Mark,
+                pid: None,
+                seq: i,
+                payload: Payload::Mark {
+                    label: format!("mk-{i}"),
+                },
+            })
+            .unwrap();
         }
         let dir = w.dir().to_path_buf();
         w.finalize(Some(0), "2026-05-13T12:00:00Z".into()).unwrap();

@@ -29,7 +29,9 @@ impl Bus {
 }
 
 impl Default for Bus {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -40,8 +42,12 @@ mod tests {
 
     fn ev(seq: u64) -> Event {
         Event {
-            ts_mono_ns: 0, ts_wall_ns: 0, session_id: Uuid::nil(),
-            source: Source::Mark, pid: None, seq,
+            ts_mono_ns: 0,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::Mark,
+            pid: None,
+            seq,
             payload: Payload::Mark { label: "x".into() },
         }
     }

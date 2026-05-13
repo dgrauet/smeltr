@@ -13,17 +13,24 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Manage the smeltrd daemon.
-    Daemon { #[command(subcommand)] sub: commands::daemon::DaemonCmd },
+    Daemon {
+        #[command(subcommand)]
+        sub: commands::daemon::DaemonCmd,
+    },
     /// Append a marker event to the active session.
     Mark { label: String },
     /// Inspect sessions on disk.
-    Sessions { #[command(subcommand)] sub: commands::sessions::SessionsCmd },
+    Sessions {
+        #[command(subcommand)]
+        sub: commands::sessions::SessionsCmd,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "warn".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
         .init();
     let args = Args::parse();
     let rt = tokio::runtime::Runtime::new()?;

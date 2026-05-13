@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 /// Lists every session directory under `sessions_root()`.
 pub fn list_sessions() -> std::io::Result<Vec<PathBuf>> {
     let root = sessions_root();
-    if !root.exists() { return Ok(Vec::new()); }
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;
@@ -25,7 +27,11 @@ pub fn list_sessions() -> std::io::Result<Vec<PathBuf>> {
 pub fn find_session_dir(id: SessionId) -> std::io::Result<Option<PathBuf>> {
     let short = id.short();
     for dir in list_sessions()? {
-        if dir.file_name().map(|n| n.to_string_lossy().ends_with(&short)).unwrap_or(false) {
+        if dir
+            .file_name()
+            .map(|n| n.to_string_lossy().ends_with(&short))
+            .unwrap_or(false)
+        {
             return Ok(Some(dir));
         }
     }
@@ -34,8 +40,12 @@ pub fn find_session_dir(id: SessionId) -> std::io::Result<Option<PathBuf>> {
 
 pub fn read_metadata(dir: &Path) -> std::io::Result<SessionMetadata> {
     let text = std::fs::read_to_string(metadata_path(dir))?;
-    parse_metadata(&text).ok_or_else(|| std::io::Error::new(
-        std::io::ErrorKind::InvalidData, "could not parse metadata.toml"))
+    parse_metadata(&text).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "could not parse metadata.toml",
+        )
+    })
 }
 
 pub fn read_events(dir: &Path) -> std::io::Result<Vec<Event>> {
@@ -50,7 +60,12 @@ pub fn read_events(dir: &Path) -> std::io::Result<Vec<Event>> {
                 tracing::warn!(path = ?dir, "session truncated mid-frame, returning partial");
                 break;
             }
-            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    e.to_string(),
+                ))
+            }
         }
     }
     Ok(out)
@@ -68,18 +83,20 @@ fn parse_metadata(text: &str) -> Option<SessionMetadata> {
 
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let (k, v) = line.split_once('=')?;
         let k = k.trim();
         let v = v.trim();
         match k {
-            "session_id"      => session_id = Some(unquote(v)?.parse().ok()?),
-            "started_rfc3339" => started    = Some(unquote(v)?),
-            "ended_rfc3339"   => ended      = Some(unquote(v)?),
-            "host"            => host       = Some(unquote(v)?),
-            "mlx_version"     => mlx_version= Some(unquote(v)?),
-            "exit_code"       => exit_code  = v.parse().ok(),
-            "argv"            => argv = parse_argv(v)?,
+            "session_id" => session_id = Some(unquote(v)?.parse().ok()?),
+            "started_rfc3339" => started = Some(unquote(v)?),
+            "ended_rfc3339" => ended = Some(unquote(v)?),
+            "host" => host = Some(unquote(v)?),
+            "mlx_version" => mlx_version = Some(unquote(v)?),
+            "exit_code" => exit_code = v.parse().ok(),
+            "argv" => argv = parse_argv(v)?,
             _ => {}
         }
     }
@@ -97,26 +114,46 @@ fn parse_metadata(text: &str) -> Option<SessionMetadata> {
 fn unquote(v: &str) -> Option<String> {
     let v = v.trim();
     if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
-        Some(v[1..v.len()-1].replace("\\\"", "\"").replace("\\\\", "\\"))
-    } else { None }
+        Some(
+            v[1..v.len() - 1]
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\"),
+        )
+    } else {
+        None
+    }
 }
 
 fn parse_argv(v: &str) -> Option<Vec<String>> {
     let v = v.trim();
-    if !v.starts_with('[') || !v.ends_with(']') { return None; }
-    let inner = &v[1..v.len()-1];
-    if inner.trim().is_empty() { return Some(vec![]); }
+    if !v.starts_with('[') || !v.ends_with(']') {
+        return None;
+    }
+    let inner = &v[1..v.len() - 1];
+    if inner.trim().is_empty() {
+        return Some(vec![]);
+    }
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_str = false;
     let mut prev_escape = false;
     for ch in inner.chars() {
         if in_str {
-            if prev_escape { cur.push(ch); prev_escape = false; }
-            else if ch == '\\' { prev_escape = true; }
-            else if ch == '"' { out.push(cur.clone()); cur.clear(); in_str = false; }
-            else { cur.push(ch); }
-        } else if ch == '"' { in_str = true; }
+            if prev_escape {
+                cur.push(ch);
+                prev_escape = false;
+            } else if ch == '\\' {
+                prev_escape = true;
+            } else if ch == '"' {
+                out.push(cur.clone());
+                cur.clear();
+                in_str = false;
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '"' {
+            in_str = true;
+        }
     }
     Some(out)
 }
@@ -143,11 +180,17 @@ mod tests {
         let mut w = SessionWriter::create(meta).unwrap();
         for i in 0..5 {
             w.write_event(&Event {
-                ts_mono_ns: i*100, ts_wall_ns: 0,
-                session_id: Uuid::nil(), source: Source::Mark,
-                pid: None, seq: i,
-                payload: Payload::Mark { label: format!("m-{i}") },
-            }).unwrap();
+                ts_mono_ns: i * 100,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::Mark,
+                pid: None,
+                seq: i,
+                payload: Payload::Mark {
+                    label: format!("m-{i}"),
+                },
+            })
+            .unwrap();
         }
         let dir = w.dir().to_path_buf();
         w.finalize(Some(0), "2026-05-13T12:00:00Z".into()).unwrap();
