@@ -12,6 +12,7 @@ members = [
     "crates/smeltr-probes-ioreport",
     "crates/smeltr-probes-crash-reports",
     "crates/smeltr-probes-mach-exceptions",
+    "crates/smeltr-metal-ring",
 ]
 
 [workspace.package]

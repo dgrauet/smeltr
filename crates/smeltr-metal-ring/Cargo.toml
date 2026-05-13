@@ -1,0 +1,13 @@
+[package]
+name = "smeltr-metal-ring"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+memmap2 = "0.9"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
