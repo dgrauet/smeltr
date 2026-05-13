@@ -1,5 +1,7 @@
+pub mod probe;
 pub mod raw;
 
+pub use probe::VmProbe;
 pub use raw::{compute_rate, read_sys, VmRaw};
 
 #[cfg(test)]
