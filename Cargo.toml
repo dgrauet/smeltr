@@ -10,6 +10,7 @@ members = [
     "crates/smeltr-probes-thermal",
     "crates/smeltr-probes-oslog",
     "crates/smeltr-probes-ioreport",
+    "crates/smeltr-probes-crash-reports",
 ]
 
 [workspace.package]

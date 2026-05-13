@@ -1,0 +1,2 @@
+{"app_name":"python","app_version":"3.11.5","timestamp":"2026-05-13 14:31:14.0000 +0200","bug_type":"309","os_version":"macOS 14.4.1 (23E224)","incident_id":"ABC123"}
+{"crashReporterKey":"k","pid":38291,"procName":"python","exception":{"type":"EXC_BAD_ACCESS","codes":"KERN_INVALID_ADDRESS at 0x0","signal":"SIGABRT","subtype":"kIOGPUCommandBufferCallbackErrorImpactingInteractivity (0x0000000e)"},"termination":{"signal":"SIGABRT","code":6}}

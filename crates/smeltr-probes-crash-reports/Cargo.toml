@@ -1,0 +1,21 @@
+[package]
+name = "smeltr-probes-crash-reports"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+smeltr-core = { path = "../smeltr-core" }
+smeltr-probes-core = { path = "../smeltr-probes-core" }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = "1"
+notify = "6"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }
