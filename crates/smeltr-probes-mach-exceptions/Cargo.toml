@@ -1,0 +1,21 @@
+[package]
+name = "smeltr-probes-mach-exceptions"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+smeltr-core = { path = "../smeltr-core" }
+smeltr-probes-core = { path = "../smeltr-probes-core" }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.4"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
