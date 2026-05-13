@@ -1,3 +1,4 @@
+mod bus;
 mod protocol;
 
 fn main() {
