@@ -1,0 +1,19 @@
+[package]
+name = "smeltr-probes-metal-hook"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+smeltr-core = { path = "../smeltr-core" }
+smeltr-probes-core = { path = "../smeltr-probes-core" }
+smeltr-metal-ring = { path = "../smeltr-metal-ring" }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }
