@@ -3,6 +3,7 @@
 pub mod clock;
 pub mod codec;
 pub mod event;
+pub mod reader;
 pub mod session;
 pub mod writer;
 
