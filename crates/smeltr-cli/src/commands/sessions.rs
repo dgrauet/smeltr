@@ -108,6 +108,7 @@ fn print_session(
             smeltr_core::event::Payload::SessionEnded { reason, .. } => {
                 format!("session-ended ({reason})")
             }
+            other => format!("{:?}", std::mem::discriminant(other)),
         };
         println!(
             "  +{:>10}ns  seq={:>4}  src={:?}  {kind}",
