@@ -93,3 +93,27 @@ fn end_to_end_mark_then_show() {
     assert!(shown.contains("world"), "stdout was:\n{shown}");
     assert!(shown.contains("session-started"), "stdout was:\n{shown}");
 }
+
+#[test]
+fn doctor_prints_probe_status() {
+    let out = Command::cargo_bin("smeltr")
+        .unwrap()
+        .arg("doctor")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8_lossy(&out);
+    for probe in [
+        "vm",
+        "proc",
+        "thermal",
+        "oslog",
+        "ioreport",
+        "crash-reports",
+        "mach-exceptions",
+    ] {
+        assert!(s.contains(probe), "doctor output missing {probe}:\n{s}");
+    }
+}

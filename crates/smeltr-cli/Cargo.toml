@@ -10,6 +10,11 @@ path = "src/main.rs"
 [dependencies]
 smeltr-core = { path = "../smeltr-core" }
 smeltr-daemon = { path = "../smeltr-daemon" }
+smeltr-probes-vm = { path = "../smeltr-probes-vm" }
+smeltr-probes-proc = { path = "../smeltr-probes-proc" }
+smeltr-probes-thermal = { path = "../smeltr-probes-thermal" }
+smeltr-probes-ioreport = { path = "../smeltr-probes-ioreport" }
+smeltr-probes-mach-exceptions = { path = "../smeltr-probes-mach-exceptions" }
 anyhow.workspace = true
 tokio.workspace = true
 serde.workspace = true

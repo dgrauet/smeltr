@@ -24,6 +24,8 @@ enum Cmd {
         #[command(subcommand)]
         sub: commands::sessions::SessionsCmd,
     },
+    /// Audit probe availability and permissions.
+    Doctor,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -39,6 +41,7 @@ fn main() -> anyhow::Result<()> {
             Cmd::Daemon { sub } => commands::daemon::run(sub).await,
             Cmd::Mark { label } => commands::mark::run(label).await,
             Cmd::Sessions { sub } => commands::sessions::run(sub).await,
+            Cmd::Doctor => commands::doctor::run(),
         }
     })
 }
