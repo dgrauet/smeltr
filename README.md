@@ -25,8 +25,10 @@ Inspect with `smeltr doctor`. Spawn a watched child with `smeltr record <cmd>`.
 When `smeltr record <cmd>` is invoked (without `--no-hook`):
 
 1. A 16 MiB ring file is created at `$SMELTR_HOME/rings/<uuid>.ring`.
-2. `DYLD_INSERT_LIBRARIES=metal-hook/build/libmetal_hook.dylib` and
-   `SMELTR_RING_PATH=<ring>` are set in the child environment.
+2. `DYLD_INSERT_LIBRARIES` points to `libmetal_hook.dylib` (embedded in the
+   `smeltr` binary and extracted to `$TMPDIR` on first use; overridable with
+   `SMELTR_DYLIB=/path/to/libmetal_hook.dylib` for dev builds) and
+   `SMELTR_RING_PATH=<ring>` is set in the child environment.
 3. The dylib swizzles `MTLDevice.newCommandQueue`, `MTLCommandQueue.commandBuffer`,
    `MTLCommandBuffer.commit`, scheduled / completed handlers, and the
    alloc/dealloc paths of `MTLHeap`, `MTLBuffer`, `MTLTexture`.
@@ -45,5 +47,12 @@ flag) and falls back to no-hook automatically with a stderr warning. Use
 
 Kill switch: `SMELTR_HOOK_DISABLE=1` makes the loaded dylib inert.
 
-Build the dylib with `make -C metal-hook`. Output:
-`metal-hook/build/libmetal_hook.dylib` (ad-hoc signed).
+The dylib is built and embedded automatically as part of `cargo build`
+(via `crates/smeltr-cli/build.rs`, which invokes `make -C metal-hook all`).
+End users never need to touch it. To rebuild the dylib alone during
+development: `make -C metal-hook clean all` — output at
+`metal-hook/build/libmetal_hook.dylib` (ad-hoc signed). Set
+`SMELTR_SKIP_DYLIB_BUILD=1` to skip the make invocation from `build.rs`
+(useful for cross-compile / CI with a pre-built dylib).
+
+See `docs/usage.md` for the user-facing usage guide.
