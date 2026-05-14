@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -72,16 +73,24 @@ def test_python_sidecar_emits_to_real_daemon(short_tmp_dir):
 
         # Stop the daemon so the active session is finalized and the event
         # buffer flushed to disk before we read it back via the CLI.
-        # `smeltr daemon stop` polls only ~2s; the daemon's clean shutdown can
-        # take longer when probes are draining, so we send SIGTERM ourselves
-        # and wait with a generous timeout.
-        daemon.terminate()
+        # Plan 5 Task 1 bumped `daemon stop` timeout to 10s, so it can
+        # complete full session finalisation. Fall back to SIGTERM if it
+        # fails.
         try:
-            daemon.wait(timeout=20)
+            stop = subprocess.run(
+                [str(smeltr_cli), "daemon", "stop"],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            if stop.returncode != 0:
+                daemon.send_signal(signal.SIGTERM)
+        except subprocess.TimeoutExpired:
+            daemon.send_signal(signal.SIGTERM)
+        try:
+            daemon.wait(timeout=15)
         except subprocess.TimeoutExpired:
             daemon.kill()
             daemon.wait(timeout=5)
-            pytest.fail("smeltrd did not exit within 20s after SIGTERM")
+            pytest.fail("smeltrd did not exit within 15s after stop")
 
         sessions = subprocess.run(
             [str(smeltr_cli), "sessions", "ls"],
