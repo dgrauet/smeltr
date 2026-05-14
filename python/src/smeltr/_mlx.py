@@ -282,7 +282,7 @@ def decorate_eval() -> None:
 
     wrapped._smeltr_wrapped = True  # type: ignore[attr-defined]
     wrapped._smeltr_original = original  # type: ignore[attr-defined]
-    mx_core.eval = wrapped
+    setattr(mx_core, "eval", wrapped)
     _eval_decorated = True
 
 
