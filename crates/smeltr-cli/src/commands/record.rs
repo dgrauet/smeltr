@@ -3,25 +3,30 @@ use smeltr_daemon::protocol::{ClientToDaemon, DaemonToClient};
 use std::path::PathBuf;
 use std::process::Stdio;
 
-fn dylib_path() -> Option<PathBuf> {
+/// Resolve the path to libmetal_hook.dylib for DYLD_INSERT_LIBRARIES.
+///
+/// Order (first hit wins):
+///   1. `$SMELTR_DYLIB` — explicit dev override, lets you point at a
+///      freshly-built dylib without reinstalling smeltr.
+///   2. Embedded bytes extracted to `$TMPDIR/libmetal_hook-<fp>.dylib`
+///      — the default path for end users.
+///
+/// Returns `None` only if both extraction fails AND no override is set
+/// (i.e. genuine I/O failure on /tmp), which `run()` reports clearly.
+fn resolve_dylib_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("SMELTR_DYLIB") {
         let pb = PathBuf::from(p);
         if pb.exists() {
             return std::fs::canonicalize(pb).ok();
         }
     }
-    let cwd = std::env::current_dir().ok()?;
-    for rel in &[
-        "metal-hook/build/libmetal_hook.dylib",
-        "../metal-hook/build/libmetal_hook.dylib",
-        "../../metal-hook/build/libmetal_hook.dylib",
-    ] {
-        let candidate = cwd.join(rel);
-        if candidate.exists() {
-            return std::fs::canonicalize(candidate).ok();
+    match smeltr_cli::embedded_dylib::extract() {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("smeltr: failed to extract embedded dylib: {e}");
+            None
         }
     }
-    None
 }
 
 fn is_hardened_binary(cmd: &str) -> bool {
@@ -62,7 +67,7 @@ pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i3
                  Skipping Metal hook. Use brew Python to keep the hook, \
                  or pass --no-hook to silence this."
             );
-        } else if let Some(dylib) = dylib_path() {
+        } else if let Some(dylib) = resolve_dylib_path() {
             let rings_dir = smeltr_home().join("rings");
             std::fs::create_dir_all(&rings_dir)?;
             let ring_path = rings_dir.join(format!("{}.ring", uuid::Uuid::new_v4().simple()));
@@ -71,8 +76,9 @@ pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i3
             hook_decision = Some((dylib, ring_path));
         } else {
             eprintln!(
-                "smeltr: metal-hook dylib not found (set SMELTR_DYLIB or build \
-                 with `make -C metal-hook`). Continuing without hook."
+                "smeltr: could not provision metal-hook dylib (embedded extraction \
+                 failed). Set SMELTR_DYLIB=/path/to/libmetal_hook.dylib to override. \
+                 Continuing without hook."
             );
         }
     }
@@ -151,4 +157,29 @@ pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i3
     }
 
     Ok(exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_prefers_env_override() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::env::set_var("SMELTR_DYLIB", &path);
+        let resolved = resolve_dylib_path().expect("env override should win");
+        assert_eq!(resolved, std::fs::canonicalize(&path).unwrap());
+        std::env::remove_var("SMELTR_DYLIB");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_falls_back_to_embedded_when_no_env() {
+        std::env::remove_var("SMELTR_DYLIB");
+        let resolved = resolve_dylib_path().expect("embedded must always resolve");
+        assert!(resolved.exists());
+        assert!(resolved.to_string_lossy().contains("libmetal_hook"));
+    }
 }
