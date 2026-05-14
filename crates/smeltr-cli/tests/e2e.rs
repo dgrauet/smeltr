@@ -154,22 +154,11 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
     };
     let dylib_abs = std::fs::canonicalize(&dylib).unwrap();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path().to_path_buf();
-    let sock = tmp.path().join("smeltr.sock");
-
-    let mut daemon = StdCommand::new(smeltrd_path())
-        .env("SMELTR_HOME", &home)
-        .env("SMELTR_SOCKET", &sock)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn smeltrd");
-    assert!(wait_for_socket(&sock), "daemon never created its socket");
-
-    // assert_cmd 2.2.2 only resolves CARGO_BIN_EXE_<name> for binaries in
-    // the same package. The harness lives in a sibling crate, so we walk up
-    // from the running test binary to the workspace target dir and locate it.
+    // Locate the harness binary BEFORE spawning the daemon, so an early
+    // soft-skip doesn't leak a child process. assert_cmd 2.2.2 only resolves
+    // CARGO_BIN_EXE_<name> for binaries in the same package; the harness
+    // lives in a sibling crate, so we walk up from the running test binary
+    // to the workspace target dir and locate it.
     let harness = {
         let exe = std::env::current_exe().expect("test exe path");
         let mut dir = exe.parent().expect("test exe parent").to_path_buf();
@@ -194,6 +183,20 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
         }
         candidate
     };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    let sock = tmp.path().join("smeltr.sock");
+
+    let mut daemon = StdCommand::new(smeltrd_path())
+        .env("SMELTR_HOME", &home)
+        .env("SMELTR_SOCKET", &sock)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn smeltrd");
+    assert!(wait_for_socket(&sock), "daemon never created its socket");
+
     Command::cargo_bin("smeltr")
         .unwrap()
         .env("SMELTR_HOME", &home)

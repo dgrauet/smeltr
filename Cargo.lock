@@ -2056,7 +2056,6 @@ dependencies = [
  "smeltr-core",
  "smeltr-daemon",
  "smeltr-mcp",
- "smeltr-metal-harness",
  "smeltr-metal-ring",
  "smeltr-probes-ioreport",
  "smeltr-probes-mach-exceptions",
