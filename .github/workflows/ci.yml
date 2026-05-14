@@ -91,7 +91,9 @@ jobs:
           python-version: "3.13"
 
       - name: Install intendant
-        run: pipx install intendant
+        # The runner's pre-installed pipx uses Python <3.13; force it to use
+        # the 3.13 we just set up so it can resolve intendant 4.0.0+.
+        run: pipx install --python "$(which python3)" intendant
 
       - name: Audit
         run: intendant audit . --severity required
