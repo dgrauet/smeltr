@@ -16,3 +16,6 @@ serde = { workspace = true }
 
 [dev-dependencies]
 uuid = { workspace = true }
+tempfile = "3"
+serial_test = "3"
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "rt-multi-thread", "net", "io-util"] }
