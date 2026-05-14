@@ -255,3 +255,74 @@ def test_decorate_eval_was_async_reflects_duration(fake_daemon, monkeypatch):
     assert fast["was_async"] is True, f"fast call should be async, got {fast}"
     assert slow["was_async"] is False, f"slow call should be sync, got {slow}"
     assert slow["duration_ns"] >= 50_000_000
+
+
+def test_snapshot_includes_mlx_streams_when_available(fake_daemon, monkeypatch):
+    """When mx.default_stream / mx.cpu_stream / mx.gpu_stream exist,
+    their reprs appear in MlxSnapshot.streams (in addition to observed)."""
+    import types
+    import sys as _sys
+
+    class FakeStream:
+        def __init__(self, name):
+            self._name = name
+        def __repr__(self):
+            return f"Stream(device={self._name})"
+
+    fake_core = types.ModuleType("mlx.core")
+    fake_core.default_stream = lambda: FakeStream("gpu")
+    fake_core.cpu_stream = lambda: FakeStream("cpu")
+    fake_core.gpu_stream = lambda: FakeStream("gpu")
+    fake_root = types.ModuleType("mlx")
+    fake_root.core = fake_core
+    monkeypatch.setitem(_sys.modules, "mlx", fake_root)
+    monkeypatch.setitem(_sys.modules, "mlx.core", fake_core)
+
+    smeltr.attach(poll_hz=0)
+    try:
+        smeltr.snapshot()
+    finally:
+        smeltr.detach()
+
+    snaps = [m for m in fake_daemon.received
+             if m["payload"]["kind"] == "MlxSnapshot"]
+    assert len(snaps) == 1
+    streams = snaps[0]["payload"]["streams"]
+    assert any("gpu" in s.lower() for s in streams), f"no gpu stream in {streams}"
+    assert any("cpu" in s.lower() for s in streams), f"no cpu stream in {streams}"
+
+
+def test_snapshot_streams_falls_back_to_observed_when_mlx_missing(fake_daemon, monkeypatch):
+    """If mx.core has no stream factories, streams comes from track() only."""
+    import types
+    import sys as _sys
+
+    fake_core = types.ModuleType("mlx.core")  # No default_stream / cpu_stream / gpu_stream
+    fake_root = types.ModuleType("mlx")
+    fake_root.core = fake_core
+    monkeypatch.setitem(_sys.modules, "mlx", fake_root)
+    monkeypatch.setitem(_sys.modules, "mlx.core", fake_core)
+
+    from smeltr import _mlx as _mlxmod
+
+    smeltr.attach(poll_hz=0)
+    try:
+        class _FakeArr:
+            def __init__(self):
+                class _DT:
+                    name = "float32"
+                    itemsize = 4
+                self.size = 16
+                self.dtype = _DT()
+                self.shape = (4, 4)
+        a = _FakeArr()
+        _mlxmod.track(a, stream="gpu")
+        smeltr.snapshot()
+    finally:
+        smeltr.detach()
+
+    snaps = [m for m in fake_daemon.received
+             if m["payload"]["kind"] == "MlxSnapshot"]
+    assert len(snaps) == 1
+    streams = snaps[0]["payload"]["streams"]
+    assert "gpu" in streams

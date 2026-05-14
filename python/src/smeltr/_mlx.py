@@ -75,7 +75,9 @@ def snapshot() -> None:
     with _tracked_lock:
         records = list(_tracked.values())
     total = sum(r[0] for r in records)
-    streams = sorted({r[3] for r in records})
+    observed_streams = {r[3] for r in records}
+    introspected = _introspect_mlx_streams()
+    streams = sorted(observed_streams | introspected)
     try:
         _emit({
             "kind": "MlxSnapshot",
@@ -86,6 +88,35 @@ def snapshot() -> None:
         })
     except Exception:
         pass
+
+
+def _introspect_mlx_streams() -> set[str]:
+    """Returns the names of MLX streams discoverable via mlx.core factories.
+
+    MLX exposes `default_stream()`, and optionally `cpu_stream()` /
+    `gpu_stream()` factories on the `mlx.core` module. Each is called and
+    the result converted to a label via `repr()`. MLX does not expose
+    per-stream queue depth, so this is purely an enumeration of which
+    streams exist.
+
+    Returns an empty set if mlx is not importable or none of the factories
+    exist.
+    """
+    try:
+        import mlx.core as mx_core
+    except ImportError:
+        return set()
+    out: set[str] = set()
+    for factory_name in ("default_stream", "cpu_stream", "gpu_stream"):
+        factory = getattr(mx_core, factory_name, None)
+        if factory is None:
+            continue
+        try:
+            stream = factory()
+        except Exception:
+            continue
+        out.add(repr(stream))
+    return out
 
 
 def _reset_for_tests() -> None:
