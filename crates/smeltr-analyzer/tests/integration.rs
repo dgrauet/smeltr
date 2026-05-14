@@ -65,3 +65,162 @@ fn synthetic_watchdog_yields_all_four_done_items() {
     assert!(text.contains("TIMING"));
     assert!(text.contains("SYSTEM PRESSURE"));
 }
+
+#[test]
+fn queue_pressure_fires_on_no_crash_high_depth() {
+    use smeltr_analyzer::{analyze, Category, Severity};
+    use smeltr_core::event::{Event, Payload, Source};
+    use uuid::Uuid;
+
+    let mut events: Vec<Event> = (1u32..=40)
+        .map(|d| Event {
+            ts_mono_ns: (d as u64) * 100_000_000,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::MetalHook,
+            pid: None,
+            seq: d as u64,
+            payload: Payload::MetalCbCommitted {
+                cb_id: d as u64,
+                queue_id: 1,
+                queue_depth: d,
+                label: None,
+            },
+        })
+        .collect();
+    events.push(Event {
+        ts_mono_ns: 50 * 100_000_000,
+        ts_wall_ns: 0,
+        session_id: Uuid::nil(),
+        source: Source::MetalHook,
+        pid: None,
+        seq: 999,
+        payload: Payload::MetalCbCompleted {
+            cb_id: 40,
+            queue_id: 1,
+            status: 4,
+            error_code: None,
+            error_domain: None,
+            in_flight_ns: 1_500_000_000,
+        },
+    });
+
+    let report = analyze(&events);
+    let pressure = report
+        .contributing_factors()
+        .find(|f| f.title.contains("Queue pressure"));
+    assert!(pressure.is_some(), "expected Queue pressure finding");
+    let p = pressure.unwrap();
+    assert_eq!(p.category, Category::ContributingFactor);
+    assert_eq!(p.severity, Severity::Warning);
+}
+
+#[test]
+fn queue_pressure_silent_on_modest_workload() {
+    use smeltr_analyzer::analyze;
+    use smeltr_core::event::{Event, Payload, Source};
+    use uuid::Uuid;
+
+    let events: Vec<Event> = (1u32..=5)
+        .flat_map(|d| {
+            vec![
+                Event {
+                    ts_mono_ns: (d as u64) * 1_000_000,
+                    ts_wall_ns: 0,
+                    session_id: Uuid::nil(),
+                    source: Source::MetalHook,
+                    pid: None,
+                    seq: d as u64,
+                    payload: Payload::MetalCbCommitted {
+                        cb_id: d as u64,
+                        queue_id: 1,
+                        queue_depth: d,
+                        label: None,
+                    },
+                },
+                Event {
+                    ts_mono_ns: (d as u64) * 1_000_000 + 500_000,
+                    ts_wall_ns: 0,
+                    session_id: Uuid::nil(),
+                    source: Source::MetalHook,
+                    pid: None,
+                    seq: 100 + d as u64,
+                    payload: Payload::MetalCbCompleted {
+                        cb_id: d as u64,
+                        queue_id: 1,
+                        status: 4,
+                        error_code: None,
+                        error_domain: None,
+                        in_flight_ns: 100_000_000,
+                    },
+                },
+            ]
+        })
+        .collect();
+
+    let report = analyze(&events);
+    let pressure = report
+        .contributing_factors()
+        .find(|f| f.title.contains("Queue pressure"));
+    assert!(
+        pressure.is_none(),
+        "unexpected Queue pressure finding on modest workload"
+    );
+}
+
+#[test]
+fn queue_pressure_defers_to_queue_depth_on_crash() {
+    use smeltr_analyzer::analyze;
+    use smeltr_core::event::{Event, Payload, Source};
+    use uuid::Uuid;
+
+    let mut events: Vec<Event> = (1u32..=40)
+        .map(|d| Event {
+            ts_mono_ns: (d as u64) * 100_000_000,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::MetalHook,
+            pid: None,
+            seq: d as u64,
+            payload: Payload::MetalCbCommitted {
+                cb_id: d as u64,
+                queue_id: 1,
+                queue_depth: d,
+                label: None,
+            },
+        })
+        .collect();
+    events.push(Event {
+        ts_mono_ns: 50 * 100_000_000,
+        ts_wall_ns: 0,
+        session_id: Uuid::nil(),
+        source: Source::MetalHook,
+        pid: None,
+        seq: 999,
+        payload: Payload::MetalCbCompleted {
+            cb_id: 40,
+            queue_id: 1,
+            status: 4,
+            error_code: Some(14),
+            error_domain: Some("IOGPU".into()),
+            in_flight_ns: 1_500_000_000,
+        },
+    });
+
+    let report = analyze(&events);
+    let queue_depth = report
+        .contributing_factors()
+        .find(|f| f.title.contains("Queue depth peaked"));
+    assert!(
+        queue_depth.is_some(),
+        "QueueDepthRule should still fire on crash"
+    );
+    let pressure = report
+        .contributing_factors()
+        .find(|f| f.title.contains("Queue pressure"));
+    assert!(
+        pressure.is_none(),
+        "QueuePressureRule should defer when crash present, got: {:?}",
+        pressure
+    );
+}
