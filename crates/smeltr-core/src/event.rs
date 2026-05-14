@@ -141,6 +141,45 @@ pub enum Payload {
     MetalHookSkipped {
         reason: String,
     },
+    MlxEvalEntered {
+        call_id: u64,
+        array_count: u32,
+        stream: String,
+    },
+    MlxEvalReturned {
+        call_id: u64,
+        duration_ns: u64,
+        was_async: bool,
+    },
+    MlxMemoryPoll {
+        active_bytes: u64,
+        peak_bytes: u64,
+        cache_bytes: u64,
+    },
+    MlxArrayAlive {
+        array_id: u64,
+        size_bytes: u64,
+        dtype: String,
+        shape: Vec<u64>,
+        stream: String,
+    },
+    MlxArrayFreed {
+        array_id: u64,
+    },
+    MlxSnapshot {
+        live_arrays: u32,
+        total_array_bytes: u64,
+        streams: Vec<String>,
+        mlx_version: Option<String>,
+    },
+    MlxPanicTriggered {
+        condition: String,
+    },
+    PythonSidecarHello {
+        python_version: String,
+        mlx_version: Option<String>,
+        argv: Vec<String>,
+    },
     ProbeHealth {
         probe: String,
         state: ProbeHealthState,
@@ -425,6 +464,101 @@ mod tests {
                 reason: "macOS 27 untested".into(),
             },
             Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_mlx_eval_entered() {
+        round_trip(
+            Payload::MlxEvalEntered {
+                call_id: 17,
+                array_count: 3,
+                stream: "gpu".into(),
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_mlx_eval_returned() {
+        round_trip(
+            Payload::MlxEvalReturned {
+                call_id: 17,
+                duration_ns: 4_200_000,
+                was_async: true,
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_mlx_memory_poll() {
+        round_trip(
+            Payload::MlxMemoryPoll {
+                active_bytes: 12_345,
+                peak_bytes: 99_999,
+                cache_bytes: 4_096,
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_mlx_array_alive() {
+        round_trip(
+            Payload::MlxArrayAlive {
+                array_id: 0xdead_beef,
+                size_bytes: 1024,
+                dtype: "float16".into(),
+                shape: vec![1, 64, 64, 3],
+                stream: "gpu".into(),
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_mlx_array_freed() {
+        round_trip(
+            Payload::MlxArrayFreed {
+                array_id: 0xdead_beef,
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_mlx_snapshot() {
+        round_trip(
+            Payload::MlxSnapshot {
+                live_arrays: 42,
+                total_array_bytes: 16_777_216,
+                streams: vec!["gpu".into(), "cpu".into()],
+                mlx_version: Some("0.18.1".into()),
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_mlx_panic_triggered() {
+        round_trip(
+            Payload::MlxPanicTriggered {
+                condition: "active_bytes > 20GiB".into(),
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_python_sidecar_hello() {
+        round_trip(
+            Payload::PythonSidecarHello {
+                python_version: "3.12.1".into(),
+                mlx_version: Some("0.18.1".into()),
+                argv: vec!["python".into(), "my_script.py".into()],
+            },
+            Source::PythonSidecar,
         );
     }
 }
