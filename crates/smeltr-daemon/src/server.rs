@@ -107,7 +107,7 @@ async fn handle_connection_inner(
 async fn handle_msg(
     msg: ClientToDaemon,
     session: &Arc<ActiveSession>,
-    bus: &Bus,
+    _bus: &Bus,
     probe_runtime: &Arc<ProbeRuntime>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
 ) -> DaemonToClient {
@@ -124,10 +124,7 @@ async fn handle_msg(
             pid,
             payload,
         } => match session.append(source, pid, payload) {
-            Ok(ev) => {
-                bus.publish(ev);
-                DaemonToClient::Ack
-            }
+            Ok(_ev) => DaemonToClient::Ack,
             Err(e) => DaemonToClient::Error {
                 message: e.to_string(),
             },
@@ -172,15 +169,12 @@ async fn handle_msg(
                 Some(c) => format!("record:exit pid={pid} code={c}"),
                 None => format!("record:exit pid={pid} code=none"),
             };
-            match session.append(
+            if let Err(e) = session.append(
                 smeltr_core::event::Source::Mark,
                 Some(pid),
                 smeltr_core::event::Payload::Mark { label },
             ) {
-                Ok(ev) => {
-                    bus.publish(ev);
-                }
-                Err(e) => tracing::warn!(error = %e, "failed to append detach mark"),
+                tracing::warn!(error = %e, "failed to append detach mark");
             }
             DaemonToClient::Ack
         }

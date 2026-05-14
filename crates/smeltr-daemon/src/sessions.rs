@@ -1,5 +1,6 @@
 //! Active session bookkeeping inside the daemon.
 
+use crate::bus::Bus;
 use crate::flight_recorder::FlightRecorder;
 use smeltr_core::clock::MonoClock;
 use smeltr_core::event::{Event, Payload, Source};
@@ -12,6 +13,7 @@ use uuid::Uuid;
 pub struct ActiveSession {
     inner: Mutex<Option<Inner>>,
     flight_recorder: Option<Arc<FlightRecorder>>,
+    bus: Option<Bus>,
 }
 
 struct Inner {
@@ -24,11 +26,18 @@ struct Inner {
 
 impl ActiveSession {
     pub fn open_new() -> std::io::Result<Self> {
-        Self::open_new_with_recorder(None)
+        Self::open_new_full(None, None)
     }
 
     pub fn open_new_with_recorder(
         flight_recorder: Option<Arc<FlightRecorder>>,
+    ) -> std::io::Result<Self> {
+        Self::open_new_full(flight_recorder, None)
+    }
+
+    pub fn open_new_full(
+        flight_recorder: Option<Arc<FlightRecorder>>,
+        bus: Option<Bus>,
     ) -> std::io::Result<Self> {
         let id = SessionId::new();
         let meta = SessionMetadata::now_starting(id);
@@ -44,6 +53,7 @@ impl ActiveSession {
                 seq: 0,
             })),
             flight_recorder,
+            bus,
         };
         s.append_internal(
             Source::System,
@@ -102,6 +112,9 @@ impl ActiveSession {
         drop(guard);
         if let Some(fr) = &self.flight_recorder {
             fr.push(ev.clone());
+        }
+        if let Some(b) = &self.bus {
+            b.publish(ev.clone());
         }
         Ok(ev)
     }

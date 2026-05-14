@@ -20,14 +20,15 @@ async fn main() -> anyhow::Result<()> {
 
     let _args = Args::parse();
 
-    let _flight_recorder = Arc::new(smeltr_daemon::flight_recorder::FlightRecorder::new(
+    let flight_recorder = Arc::new(smeltr_daemon::flight_recorder::FlightRecorder::new(
         std::time::Duration::from_secs(60),
     ));
-    let session = Arc::new(sessions::ActiveSession::open_new_with_recorder(Some(
-        _flight_recorder.clone(),
-    ))?);
-    tracing::info!(session = %session.id(), "active session opened");
     let bus = bus::Bus::new();
+    let session = Arc::new(sessions::ActiveSession::open_new_full(
+        Some(flight_recorder.clone()),
+        Some(bus.clone()),
+    )?);
+    tracing::info!(session = %session.id(), "active session opened");
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Write PID file for `smeltr daemon stop`.
@@ -52,6 +53,59 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _ = flush_shutdown.changed() => {
                     if *flush_shutdown.borrow() { break; }
+                }
+            }
+        }
+    });
+
+    // Post-mortem trigger watcher: subscribe to bus, flush flight recorder on
+    // crash-like events, and emit a PostMortemFlushed event back into the
+    // active session.
+    let trigger_session = session.clone();
+    let trigger_fr = flight_recorder.clone();
+    let mut bus_rx = bus.subscribe();
+    let mut trigger_shutdown = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                msg = bus_rx.recv() => {
+                    match msg {
+                        Ok(ev) => {
+                            if let Some(reason) = smeltr_daemon::triggers::classify(&ev) {
+                                tracing::warn!(reason = ?reason, "post-mortem trigger fired");
+                                match smeltr_daemon::triggers::flush_post_mortem(&trigger_fr, &reason) {
+                                    Ok(summary) => {
+                                        tracing::info!(
+                                            dir = ?summary.session_dir,
+                                            count = summary.event_count,
+                                            "post-mortem session written"
+                                        );
+                                        let short = summary.session_dir.file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("unknown")
+                                            .to_string();
+                                        let _ = trigger_session.append(
+                                            smeltr_core::event::Source::System,
+                                            None,
+                                            smeltr_core::event::Payload::PostMortemFlushed {
+                                                reason: reason.label(),
+                                                source_session: short,
+                                                event_count: summary.event_count as u32,
+                                            },
+                                        );
+                                    }
+                                    Err(e) => tracing::error!(error = %e, "post-mortem flush failed"),
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "trigger watcher lagged behind bus");
+                        }
+                        Err(_) => break,
+                    }
+                }
+                _ = trigger_shutdown.changed() => {
+                    if *trigger_shutdown.borrow() { break; }
                 }
             }
         }

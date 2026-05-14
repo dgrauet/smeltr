@@ -9,6 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Bridges probe emissions into the active session + broadcast bus.
+///
+/// Note: `ActiveSession::append` itself publishes to the bus when constructed
+/// via `open_new_full(..., Some(bus))`, so this sink only needs to call
+/// `append`. The `bus` field is retained for use by the server (e.g. live
+/// subscribers, scope attach paths).
 pub struct DaemonSink {
     pub session: Arc<ActiveSession>,
     pub bus: Bus,
@@ -16,11 +21,8 @@ pub struct DaemonSink {
 
 impl EventSink for DaemonSink {
     fn emit(&self, source: Source, pid: Option<u32>, payload: Payload) {
-        match self.session.append(source, pid, payload) {
-            Ok(ev) => {
-                self.bus.publish(ev);
-            }
-            Err(e) => tracing::warn!(error = %e, "session append failed"),
+        if let Err(e) = self.session.append(source, pid, payload) {
+            tracing::warn!(error = %e, "session append failed");
         }
     }
 }
