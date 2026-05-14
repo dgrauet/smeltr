@@ -99,8 +99,56 @@ async fn handle_connection_inner(
             Some(m) => m,
             None => return Ok(()),
         };
+        if matches!(msg, ClientToDaemon::SubscribeEvents) {
+            write_msg(stream, &DaemonToClient::Ack).await?;
+            stream_events(stream, bus, shutdown_tx).await?;
+            return Ok(());
+        }
         let resp = handle_msg(msg, session, bus, probe_runtime, shutdown_tx).await;
         write_msg(stream, &resp).await?;
+    }
+}
+
+async fn stream_events(
+    stream: &mut UnixStream,
+    bus: &Bus,
+    shutdown_tx: &tokio::sync::watch::Sender<bool>,
+) -> std::io::Result<()> {
+    let mut bus_rx = bus.subscribe();
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    loop {
+        tokio::select! {
+            biased;
+            ev = bus_rx.recv() => {
+                match ev {
+                    Ok(event) => {
+                        let notif = DaemonToClient::EventNotification { event };
+                        if write_msg(stream, &notif).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "subscriber lagged behind bus");
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
+            r = stream.readable() => {
+                if r.is_err() {
+                    return Ok(());
+                }
+                let mut tmp = [0u8; 16];
+                match stream.try_read(&mut tmp) {
+                    Ok(0) => return Ok(()),
+                    Ok(_) => continue,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(_) => return Ok(()),
+                }
+            }
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() { return Ok(()); }
+            }
+        }
     }
 }
 
@@ -188,9 +236,9 @@ async fn handle_msg(
             probe_runtime.detach_metal_hook(pid).await;
             DaemonToClient::Ack
         }
-        ClientToDaemon::SubscribeEvents => DaemonToClient::Error {
-            message: "SubscribeEvents not yet implemented".into(),
-        },
+        ClientToDaemon::SubscribeEvents => {
+            unreachable!("SubscribeEvents handled by handle_connection_inner directly")
+        }
     }
 }
 
