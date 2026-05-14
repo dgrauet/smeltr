@@ -2,7 +2,7 @@
 
 use crate::codec::read_frame;
 use crate::event::Event;
-use crate::session::{events_path, metadata_path, sessions_root, SessionId, SessionMetadata};
+use crate::session::{metadata_path, sessions_root, SessionId, SessionMetadata};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -49,15 +49,32 @@ pub fn read_metadata(dir: &Path) -> std::io::Result<SessionMetadata> {
 }
 
 pub fn read_events(dir: &Path) -> std::io::Result<Vec<Event>> {
-    let f = File::open(events_path(dir))?;
-    let mut r = BufReader::new(f);
+    let path = crate::session::events_path_for_read(dir);
+    let f = File::open(&path)?;
+    if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+        let mut r = zstd::stream::Decoder::new(f)?;
+        read_loop(&mut r, &path)
+    } else {
+        let mut r = BufReader::new(f);
+        read_loop(&mut r, &path)
+    }
+}
+
+fn read_loop<R: std::io::Read>(r: &mut R, path: &Path) -> std::io::Result<Vec<Event>> {
     let mut out = Vec::new();
     loop {
-        match read_frame::<_, Event>(&mut r) {
+        match read_frame::<_, Event>(r) {
             Ok(Some(e)) => out.push(e),
             Ok(None) => break,
             Err(crate::codec::CodecError::Truncated) => {
-                tracing::warn!(path = ?dir, "session truncated mid-frame, returning partial");
+                tracing::warn!(path = ?path, "session truncated mid-frame, returning partial");
+                break;
+            }
+            Err(crate::codec::CodecError::Io(io_err))
+                if io_err.to_string().contains("incomplete frame") =>
+            {
+                // Zstd stream not sealed (mid-write flush). Treat as truncation.
+                tracing::warn!(path = ?path, "zstd stream not sealed, returning partial");
                 break;
             }
             Err(e) => {
@@ -214,5 +231,45 @@ mod tests {
     fn empty_root_lists_nothing() {
         let _home = temp_home();
         assert!(list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn reader_falls_back_to_legacy_cbor() {
+        let _home = temp_home();
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let dir = crate::session::session_dir(&meta);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            crate::session::metadata_path(&dir),
+            format!(
+                "session_id = \"{}\"\nstarted_rfc3339 = \"2026-05-14T00:00:00Z\"\nhost = \"x\"\nargv = []\n",
+                id
+            ),
+        )
+        .unwrap();
+
+        let mut buf = Vec::new();
+        crate::codec::write_frame(
+            &mut buf,
+            &Event {
+                ts_mono_ns: 1,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::Mark,
+                pid: None,
+                seq: 1,
+                payload: Payload::Mark {
+                    label: "legacy".into(),
+                },
+            },
+        )
+        .unwrap();
+        std::fs::write(dir.join("events.cbor"), &buf).unwrap();
+
+        let events = read_events(&dir).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].payload, Payload::Mark { ref label } if label == "legacy"));
     }
 }

@@ -112,6 +112,22 @@ pub fn events_path(dir: &Path) -> PathBuf {
     dir.join("events.cbor")
 }
 
+/// New format: zstd-compressed CBOR stream.
+pub fn events_path_zst(dir: &Path) -> PathBuf {
+    dir.join("events.cbor.zst")
+}
+
+/// Returns the path to use for reading events. Prefers `.zst`, falls back
+/// to legacy uncompressed `.cbor` for sessions written before zstd support.
+pub fn events_path_for_read(dir: &Path) -> PathBuf {
+    let zst = events_path_zst(dir);
+    if zst.exists() {
+        zst
+    } else {
+        events_path(dir)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

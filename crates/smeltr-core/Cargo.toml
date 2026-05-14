@@ -13,6 +13,7 @@ ciborium.workspace = true
 uuid.workspace = true
 time.workspace = true
 tracing.workspace = true
+zstd = "0.13"
 
 [dev-dependencies]
 tempfile.workspace = true
