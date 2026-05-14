@@ -130,10 +130,12 @@ fn record_captures_child_lifecycle() {
         .filter_map(|e| e.ok())
         .collect();
     assert_eq!(entries.len(), 1, "expected exactly one session directory");
-    let events_path = entries[0].path().join("events.cbor");
-    let bytes = std::fs::read(events_path).unwrap();
-    let s = String::from_utf8_lossy(&bytes);
-    assert!(s.contains("record:exit"), "expected record:exit marker");
+    let events = smeltr_core::reader::read_events(&entries[0].path()).unwrap();
+    let saw_exit = events.iter().any(|ev| match &ev.payload {
+        smeltr_core::event::Payload::Mark { label } => label.contains("record:exit"),
+        _ => false,
+    });
+    assert!(saw_exit, "expected record:exit marker in session events");
 }
 
 #[test]
