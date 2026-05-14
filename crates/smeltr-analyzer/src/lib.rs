@@ -3,6 +3,7 @@
 pub mod finding;
 pub mod report;
 pub mod rule;
+pub mod rules;
 
 pub use finding::{Category, EvidenceRef, Finding, Severity};
 pub use report::Report;

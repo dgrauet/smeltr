@@ -9,6 +9,10 @@ pub trait Rule: Send + Sync {
 }
 
 pub fn all_rules() -> Vec<Box<dyn Rule>> {
-    // Populated in Task 6.
-    Vec::new()
+    vec![
+        Box::new(crate::rules::metal_error::MetalErrorRule),
+        Box::new(crate::rules::queue_depth::QueueDepthRule),
+        Box::new(crate::rules::mlx_timing::MlxTimingRule),
+        Box::new(crate::rules::system_pressure::SystemPressureRule),
+    ]
 }
