@@ -180,6 +180,11 @@ pub enum Payload {
         mlx_version: Option<String>,
         argv: Vec<String>,
     },
+    PostMortemFlushed {
+        reason: String,
+        source_session: String,
+        event_count: u32,
+    },
     ProbeHealth {
         probe: String,
         state: ProbeHealthState,
@@ -547,6 +552,18 @@ mod tests {
                 condition: "active_bytes > 20GiB".into(),
             },
             Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_post_mortem_flushed() {
+        round_trip(
+            Payload::PostMortemFlushed {
+                reason: "MetalCbCompleted error=14".into(),
+                source_session: "abcdef12".into(),
+                event_count: 1234,
+            },
+            Source::System,
         );
     }
 
