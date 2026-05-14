@@ -10,6 +10,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "smeltr_ring.h"
+#include "smeltr_ring_writer.h"
+
+static smeltr_ring_t *g_ring = NULL;
 
 static int smeltr_log(const char *fmt, ...) {
     va_list ap;
@@ -33,10 +36,17 @@ static void smeltr_hook_init(void) {
         smeltr_log("no SMELTR_RING_PATH set; remaining inert");
         return;
     }
-    struct stat st;
-    if (stat(ring_path, &st) != 0) {
-        smeltr_log("SMELTR_RING_PATH=%s does not exist (errno=%d)", ring_path, errno);
+    g_ring = smeltr_ring_open(ring_path);
+    if (!g_ring) {
+        smeltr_log("failed to open ring at %s (errno=%d)", ring_path, errno);
         return;
     }
-    smeltr_log("loaded; ring=%s size=%lld", ring_path, (long long)st.st_size);
+    smeltr_log("loaded; ring=%s", ring_path);
+    // Demo write — validates the C writer end-to-end. To be removed in Task 8.
+    smeltr_write_cb_scheduled(g_ring, smeltr_mono_ns(), 0xdead, 0xbeef);
+}
+
+__attribute__((destructor))
+static void smeltr_hook_fini(void) {
+    if (g_ring) { smeltr_ring_close(g_ring); g_ring = NULL; }
 }
