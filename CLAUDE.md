@@ -40,7 +40,7 @@ pip install -e 'python/[mlx,dev]' # Python sidecar (or uv pip install)
 ```bash
 cargo test --workspace
 python -m pytest python/tests/
-intendant audit /Users/dgrauet/Work/mlx/tools/smeltr  # governance audit
+intendant audit .                                    # governance audit
 ```
 
 ## Wire protocol
