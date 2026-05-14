@@ -47,7 +47,7 @@ class FakeDaemon:
             try:
                 assert self._listener is not None
                 conn, _ = self._listener.accept()
-            except (socket.timeout, OSError):
+            except (TimeoutError, OSError):
                 continue
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
@@ -62,18 +62,20 @@ class FakeDaemon:
                 if op == "Hello":
                     with self._lock:
                         self.hello_seen = True
-                    self._write_frame(conn, {
-                        "kind": "Welcome",
-                        "daemon_version": "fake-0.0.1",
-                        "active_session": "00000000000000000000000000000001",
-                    })
+                    self._write_frame(
+                        conn,
+                        {
+                            "kind": "Welcome",
+                            "daemon_version": "fake-0.0.1",
+                            "active_session": "00000000000000000000000000000001",
+                        },
+                    )
                 elif op == "Emit":
                     with self._lock:
                         self.received.append(msg)
                     self._write_frame(conn, {"kind": "Ack"})
                 else:
-                    self._write_frame(conn, {"kind": "Error",
-                                             "message": f"unknown op {op}"})
+                    self._write_frame(conn, {"kind": "Error", "message": f"unknown op {op}"})
         except (ConnectionError, OSError):
             return
         finally:
@@ -129,12 +131,14 @@ def _reset_mlx_state():
     # Imported lazily so this fixture survives even before _mlx exists.
     try:
         from smeltr import _mlx
+
         _mlx._reset_for_tests()
     except (ImportError, AttributeError):
         pass
     yield
     try:
         from smeltr import _mlx
+
         _mlx._reset_for_tests()
     except (ImportError, AttributeError):
         pass

@@ -59,8 +59,13 @@ class _Client:
             raise ClientError(f"unexpected handshake response: {resp!r}")
         self.active_session = resp.get("active_session")
 
-    def emit(self, payload: dict[str, Any], *, pid: int | None = None,
-             source: str = SOURCE_PYTHON_SIDECAR) -> None:
+    def emit(
+        self,
+        payload: dict[str, Any],
+        *,
+        pid: int | None = None,
+        source: str = SOURCE_PYTHON_SIDECAR,
+    ) -> None:
         if self._sock is None:
             raise ClientError("client is not connected")
         with self._lock:

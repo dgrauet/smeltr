@@ -36,6 +36,7 @@ def test_emit_without_connect_raises():
 
 def test_connect_without_server_raises(short_tmp_dir, monkeypatch):
     import os as _os
+
     monkeypatch.setenv("SMELTR_SOCKET", _os.path.join(short_tmp_dir, "nope.sock"))
     c = _Client()
     with pytest.raises(ClientError):

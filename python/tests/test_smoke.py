@@ -9,6 +9,14 @@ def test_version_is_string():
 
 
 def test_public_api_placeholders_exist():
-    for name in ("attach", "detach", "session", "mark", "now", "snapshot",
-                 "decorate_eval", "panic_on"):
+    for name in (
+        "attach",
+        "detach",
+        "session",
+        "mark",
+        "now",
+        "snapshot",
+        "decorate_eval",
+        "panic_on",
+    ):
         assert hasattr(smeltr, name), f"missing public symbol: {name}"

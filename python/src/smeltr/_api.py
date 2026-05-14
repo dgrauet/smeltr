@@ -8,7 +8,7 @@ import platform
 import sys
 import threading
 import time
-from typing import Generator
+from collections.abc import Generator
 
 from smeltr._client import ClientError, _Client
 from smeltr._proto import SOURCE_PYTHON_SIDECAR
@@ -29,18 +29,19 @@ def _detect_mlx_version() -> str | None:
         return None
     try:
         import importlib.metadata as _md
+
         return _md.version("mlx")
     except Exception:  # PackageNotFoundError or other
         pass
     try:
         import mlx as _mlx_module
+
         return getattr(_mlx_module, "__version__", None)
     except ImportError:
         return None
 
 
-def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0,
-           poll_hz: float = 1.0) -> None:
+def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0, poll_hz: float = 1.0) -> None:
     """Connect to smeltrd. poll_hz is wired up in a later task; accept it now
     so callers don't need to change later."""
     global _client
@@ -51,25 +52,31 @@ def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0,
         c.connect(timeout_s=timeout_s)
         _client = c
     try:
-        _emit({
-            "kind": "PythonSidecarHello",
-            "python_version": platform.python_version(),
-            "mlx_version": _detect_mlx_version(),
-            "argv": list(sys.argv),
-        })
+        _emit(
+            {
+                "kind": "PythonSidecarHello",
+                "python_version": platform.python_version(),
+                "mlx_version": _detect_mlx_version(),
+                "argv": list(sys.argv),
+            }
+        )
     except ClientError:
         pass
     from smeltr._mlx import start_polling
+
     start_polling(poll_hz)
     from smeltr._shutdown import install_hooks
+
     install_hooks()
 
 
 def detach() -> None:
     """Close the daemon connection. Idempotent."""
     from smeltr._shutdown import remove_hooks
+
     remove_hooks()
     from smeltr._mlx import stop_polling
+
     stop_polling()
     global _client
     with _client_lock:

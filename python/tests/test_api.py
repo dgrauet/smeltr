@@ -52,8 +52,7 @@ def test_session_context_emits_open_and_close(fake_daemon):
             pass
     finally:
         smeltr.detach()
-    labels = [m["payload"]["label"]
-              for m in fake_daemon.received if m["payload"]["kind"] == "Mark"]
+    labels = [m["payload"]["label"] for m in fake_daemon.received if m["payload"]["kind"] == "Mark"]
     assert "session-open: gemma-run" in labels
     assert "session-close: gemma-run" in labels
 
@@ -66,8 +65,7 @@ def test_session_context_emits_close_on_exception(fake_daemon):
                 raise ValueError("boom")
     finally:
         smeltr.detach()
-    labels = [m["payload"]["label"]
-              for m in fake_daemon.received if m["payload"]["kind"] == "Mark"]
+    labels = [m["payload"]["label"] for m in fake_daemon.received if m["payload"]["kind"] == "Mark"]
     assert "session-close: crashy" in labels
 
 
@@ -85,6 +83,7 @@ def test_now_returns_monotonic_ns():
 
 def test_attach_when_daemon_absent_raises(short_tmp_dir, monkeypatch):
     import os
+
     monkeypatch.setenv("SMELTR_SOCKET", os.path.join(short_tmp_dir, "nope.sock"))
     with pytest.raises(ClientError):
         smeltr.attach(timeout_s=0.5, poll_hz=0)

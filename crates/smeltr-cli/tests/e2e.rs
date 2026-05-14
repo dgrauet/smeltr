@@ -167,7 +167,33 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
         .expect("spawn smeltrd");
     assert!(wait_for_socket(&sock), "daemon never created its socket");
 
-    let harness = assert_cmd::cargo::cargo_bin("smeltr-metal-harness");
+    // assert_cmd 2.2.2 only resolves CARGO_BIN_EXE_<name> for binaries in
+    // the same package. The harness lives in a sibling crate, so we walk up
+    // from the running test binary to the workspace target dir and locate it.
+    let harness = {
+        let exe = std::env::current_exe().expect("test exe path");
+        let mut dir = exe.parent().expect("test exe parent").to_path_buf();
+        while dir.file_name().is_some_and(|n| n != "target") {
+            if !dir.pop() {
+                panic!("could not find workspace target/ above {}", exe.display());
+            }
+        }
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        let candidate = dir.join(profile).join("smeltr-metal-harness");
+        if !candidate.exists() {
+            eprintln!(
+                "smeltr-metal-harness binary not found at {} — soft-skipping. \
+                 Run `cargo build -p smeltr-metal-harness` first.",
+                candidate.display()
+            );
+            return;
+        }
+        candidate
+    };
     Command::cargo_bin("smeltr")
         .unwrap()
         .env("SMELTR_HOME", &home)

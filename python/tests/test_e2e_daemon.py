@@ -22,7 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _cargo_build() -> tuple[Path, Path]:
     subprocess.run(
         ["cargo", "build", "-p", "smeltr-daemon", "-p", "smeltr-cli"],
-        cwd=REPO_ROOT, check=True,
+        cwd=REPO_ROOT,
+        check=True,
     )
     target = REPO_ROOT / "target" / "debug"
     return target / "smeltrd", target / "smeltr"
@@ -46,7 +47,9 @@ def test_python_sidecar_emits_to_real_daemon(short_tmp_dir):
 
     daemon = subprocess.Popen(
         [str(smeltrd), "--foreground"],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         for _ in range(50):
@@ -65,7 +68,10 @@ def test_python_sidecar_emits_to_real_daemon(short_tmp_dir):
         )
         result = subprocess.run(
             [sys.executable, "-c", script],
-            env=env, capture_output=True, text=True, timeout=10,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0, (
             f"sidecar failed: stdout={result.stdout!r} stderr={result.stderr!r}"
@@ -79,7 +85,10 @@ def test_python_sidecar_emits_to_real_daemon(short_tmp_dir):
         try:
             stop = subprocess.run(
                 [str(smeltr_cli), "daemon", "stop"],
-                env=env, capture_output=True, text=True, timeout=15,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
             if stop.returncode != 0:
                 daemon.send_signal(signal.SIGTERM)
@@ -94,7 +103,10 @@ def test_python_sidecar_emits_to_real_daemon(short_tmp_dir):
 
         sessions = subprocess.run(
             [str(smeltr_cli), "sessions", "ls"],
-            env=env, capture_output=True, text=True, check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         assert sessions.stdout.strip(), f"no sessions: {sessions.stdout!r}"
         first_line = sessions.stdout.strip().splitlines()[0]
@@ -102,7 +114,10 @@ def test_python_sidecar_emits_to_real_daemon(short_tmp_dir):
 
         show = subprocess.run(
             [str(smeltr_cli), "sessions", "show", sid],
-            env=env, capture_output=True, text=True, check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         text = show.stdout
         assert "PythonSidecarHello" in text, f"missing PythonSidecarHello in:\n{text}"

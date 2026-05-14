@@ -5,8 +5,14 @@ from smeltr._mlx import decorate_eval, snapshot
 from smeltr._shutdown import panic_on
 from smeltr._version import __version__
 
-
 __all__ = [
-    "__version__", "attach", "detach", "session", "mark", "now",
-    "snapshot", "decorate_eval", "panic_on",
+    "__version__",
+    "attach",
+    "decorate_eval",
+    "detach",
+    "mark",
+    "now",
+    "panic_on",
+    "session",
+    "snapshot",
 ]

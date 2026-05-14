@@ -37,6 +37,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Build metal harness for e2e tests
+        run: cargo build -p smeltr-metal-harness
+
       - name: cargo test
         run: cargo test --workspace
 
@@ -77,6 +80,9 @@ jobs:
   intendant:
     name: intendant audit
     runs-on: ubuntu-latest
+    # Optional governance audit. `intendant` is not (yet) on PyPI; skip until
+    # it's published. Re-enable by removing this `if: false` once available.
+    if: false
     steps:
       - uses: actions/checkout@v4
         with:

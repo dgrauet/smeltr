@@ -6,7 +6,7 @@ import threading
 import weakref
 from typing import Any
 
-from smeltr._api import _emit, _require_attached, _detect_mlx_version  # type: ignore
+from smeltr._api import _detect_mlx_version, _emit, _require_attached  # type: ignore
 
 # array_id -> (size_bytes, dtype, shape, stream)
 _tracked: dict[int, tuple[int, str, list[int], str]] = {}
@@ -46,14 +46,16 @@ def track(array: Any, *, stream: str = "gpu") -> None:
     except TypeError:
         pass
     try:
-        _emit({
-            "kind": "MlxArrayAlive",
-            "array_id": aid,
-            "size_bytes": record[0],
-            "dtype": record[1],
-            "shape": record[2],
-            "stream": record[3],
-        })
+        _emit(
+            {
+                "kind": "MlxArrayAlive",
+                "array_id": aid,
+                "size_bytes": record[0],
+                "dtype": record[1],
+                "shape": record[2],
+                "stream": record[3],
+            }
+        )
     except Exception:
         pass
 
@@ -79,13 +81,15 @@ def snapshot() -> None:
     introspected = _introspect_mlx_streams()
     streams = sorted(observed_streams | introspected)
     try:
-        _emit({
-            "kind": "MlxSnapshot",
-            "live_arrays": len(records),
-            "total_array_bytes": total,
-            "streams": streams,
-            "mlx_version": _detect_mlx_version(),
-        })
+        _emit(
+            {
+                "kind": "MlxSnapshot",
+                "live_arrays": len(records),
+                "total_array_bytes": total,
+                "streams": streams,
+                "mlx_version": _detect_mlx_version(),
+            }
+        )
     except Exception:
         pass
 
@@ -191,12 +195,14 @@ def start_polling(poll_hz: float) -> None:
                 _poll_stop.wait(period)
                 continue
             try:
-                _emit({
-                    "kind": "MlxMemoryPoll",
-                    "active_bytes": active,
-                    "peak_bytes": peak,
-                    "cache_bytes": cache,
-                })
+                _emit(
+                    {
+                        "kind": "MlxMemoryPoll",
+                        "active_bytes": active,
+                        "peak_bytes": peak,
+                        "cache_bytes": cache,
+                    }
+                )
             except Exception:
                 pass
             _poll_stop.wait(period)
@@ -255,12 +261,14 @@ def decorate_eval() -> None:
     def wrapped(*args, **kwargs):
         call_id = _next_call_id()
         try:
-            _emit({
-                "kind": "MlxEvalEntered",
-                "call_id": call_id,
-                "array_count": len(args),
-                "stream": "gpu",
-            })
+            _emit(
+                {
+                    "kind": "MlxEvalEntered",
+                    "call_id": call_id,
+                    "array_count": len(args),
+                    "stream": "gpu",
+                }
+            )
         except Exception:
             pass
         start = _time.monotonic_ns()
@@ -268,21 +276,25 @@ def decorate_eval() -> None:
             return original(*args, **kwargs)
         finally:
             end = _time.monotonic_ns()
-            ASYNC_THRESHOLD_NS = 10_000_000  # 10 ms — empirical: faster returns are almost certainly async
+            ASYNC_THRESHOLD_NS = (
+                10_000_000  # 10 ms — empirical: faster returns are almost certainly async
+            )
             duration = end - start
             try:
-                _emit({
-                    "kind": "MlxEvalReturned",
-                    "call_id": call_id,
-                    "duration_ns": duration,
-                    "was_async": duration < ASYNC_THRESHOLD_NS,
-                })
+                _emit(
+                    {
+                        "kind": "MlxEvalReturned",
+                        "call_id": call_id,
+                        "duration_ns": duration,
+                        "was_async": duration < ASYNC_THRESHOLD_NS,
+                    }
+                )
             except Exception:
                 pass
 
     wrapped._smeltr_wrapped = True  # type: ignore[attr-defined]
     wrapped._smeltr_original = original  # type: ignore[attr-defined]
-    setattr(mx_core, "eval", wrapped)
+    mx_core.eval = wrapped
     _eval_decorated = True
 
 

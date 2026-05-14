@@ -8,7 +8,7 @@ import queue
 import signal
 import sys
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 _atexit_registered = False
 _original_excepthook = None
@@ -21,11 +21,13 @@ _panic_queue: queue.Queue = queue.Queue()
 def _atexit_handler() -> None:
     try:
         from smeltr._mlx import snapshot
+
         snapshot()
     except Exception:
         pass
     try:
         from smeltr._api import detach
+
         detach()
     except Exception:
         pass
@@ -34,8 +36,10 @@ def _atexit_handler() -> None:
 def _excepthook(exc_type, exc_value, exc_tb) -> None:
     try:
         from smeltr._api import mark
+
         mark(f"uncaught: {exc_type.__name__}: {exc_value}")
         from smeltr._mlx import snapshot
+
         snapshot()
     except Exception:
         pass
@@ -78,9 +82,9 @@ def remove_hooks() -> None:
     stop_panic()
 
 
-def panic_on(predicate: Callable[[], bool], *,
-             check_every_s: float = 0.5,
-             _exit_via_os: bool = True) -> None:
+def panic_on(
+    predicate: Callable[[], bool], *, check_every_s: float = 0.5, _exit_via_os: bool = True
+) -> None:
     """Watchdog: when predicate() is True, snapshot and exit(99).
 
     _exit_via_os=False is for tests; the SystemExit is queued instead of
@@ -93,6 +97,7 @@ def panic_on(predicate: Callable[[], bool], *,
     def _loop():
         from smeltr._api import _emit
         from smeltr._mlx import snapshot as _snap
+
         while not _panic_stop.is_set():
             try:
                 fired = bool(predicate())
@@ -100,8 +105,12 @@ def panic_on(predicate: Callable[[], bool], *,
                 fired = False
             if fired:
                 try:
-                    _emit({"kind": "MlxPanicTriggered",
-                           "condition": getattr(predicate, "__name__", repr(predicate))})
+                    _emit(
+                        {
+                            "kind": "MlxPanicTriggered",
+                            "condition": getattr(predicate, "__name__", repr(predicate)),
+                        }
+                    )
                     _snap()
                 except Exception:
                     pass
