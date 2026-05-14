@@ -75,14 +75,14 @@ async fn stop() -> anyhow::Result<()> {
             anyhow::bail!("kill failed: {}", std::io::Error::last_os_error());
         }
     }
-    for _ in 0..40 {
+    for _ in 0..50 {
         if !process_alive(pid) {
             println!("smeltrd stopped");
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    anyhow::bail!("smeltrd still alive after 2s")
+    anyhow::bail!("smeltrd still alive after 10s")
 }
 
 async fn status() -> anyhow::Result<()> {
