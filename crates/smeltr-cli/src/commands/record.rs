@@ -43,6 +43,29 @@ fn is_hardened_binary(cmd: &str) -> bool {
     s.contains("flags=") && s.contains("runtime")
 }
 
+/// Returns true if the target binary is arm64e-only (no plain arm64 slice).
+/// Our metal-hook dylib is plain arm64; dyld refuses to inject across the
+/// arm64 / arm64e boundary, so we must skip the hook when the target is
+/// strict-arm64e. Most Apple-shipped system binaries (`/bin/sleep`,
+/// `/usr/bin/whoami`, etc.) ship as arm64e + x86_64 with no arm64 slice.
+fn is_arm64e_only_binary(cmd: &str) -> bool {
+    let out = std::process::Command::new("/usr/bin/lipo")
+        .args(["-archs", cmd])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    let Ok(out) = out else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let archs = String::from_utf8_lossy(&out.stdout);
+    let has_arm64e = archs.split_whitespace().any(|a| a == "arm64e");
+    let has_arm64 = archs.split_whitespace().any(|a| a == "arm64");
+    has_arm64e && !has_arm64
+}
+
 fn smeltr_home() -> PathBuf {
     std::env::var_os("SMELTR_HOME")
         .map(PathBuf::from)
@@ -66,6 +89,13 @@ pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i3
                  DYLD_INSERT_LIBRARIES will be stripped by SIP. \
                  Skipping Metal hook. Use brew Python to keep the hook, \
                  or pass --no-hook to silence this."
+            );
+        } else if is_arm64e_only_binary(cmd) {
+            eprintln!(
+                "smeltr: target binary `{cmd}` is arm64e-only; the metal-hook \
+                 dylib is plain arm64. Skipping Metal hook. \
+                 (Most Apple system binaries are arm64e; use a Homebrew Python \
+                 or any arm64 binary to keep the hook.)"
             );
         } else if let Some(dylib) = resolve_dylib_path() {
             let rings_dir = smeltr_home().join("rings");

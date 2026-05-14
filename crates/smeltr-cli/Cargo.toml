@@ -37,6 +37,7 @@ hex = "0.4"
 
 [dev-dependencies]
 smeltr-core = { path = "../smeltr-core" }
+smeltr-metal-harness = { path = "../smeltr-metal-harness" }
 tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true

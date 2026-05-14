@@ -52,25 +52,27 @@ jobs:
       - name: Install Python
         run: uv python install $(cat .python-version)
 
-      - name: Install package + dev deps
+      - name: Create venv + install package
         working-directory: python
-        run: uv pip install --system -e '.[dev]'
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python -e '.[dev]'
 
       - name: ruff lint
         working-directory: python
-        run: ruff check .
+        run: .venv/bin/ruff check .
 
       - name: ruff format check
         working-directory: python
-        run: ruff format --check .
+        run: .venv/bin/ruff format --check .
 
       - name: ty check
         working-directory: python
-        run: ty check
+        run: .venv/bin/ty check
 
       - name: pytest
         working-directory: python
-        run: pytest tests --ignore=tests/test_e2e_daemon.py
+        run: .venv/bin/pytest tests --ignore=tests/test_e2e_daemon.py
 
   intendant:
     name: intendant audit
