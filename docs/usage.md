@@ -141,23 +141,17 @@ From any Claude session, you can then ask things like:
 
 ## Common pitfalls
 
-### Empty log feed in the TUI, "frame truncated" errors in the daemon log
+### Dev dylib override
 
-Symptom in `~/.smeltr/smeltrd.log`:
-```
-WARN ring decode error; draining halted this tick error=frame truncated at offset 24
-```
-
-Cause: **version skew** between `libmetal_hook.dylib` (the producer) and `smeltrd` (the consumer). The ring frame format changed in one but not the other.
-
-Fix: rebuild everything from a clean tree.
+For development against an uninstalled dylib build:
 
 ```bash
-cargo build --release
-launchctl kickstart -k gui/$UID/com.smeltr.daemon
+SMELTR_DYLIB=$(pwd)/metal-hook/build/libmetal_hook.dylib smeltr record python my_inference.py
 ```
 
-If you only rebuild the dylib (e.g. via `make` inside `metal-hook/`), the daemon binary will lag behind. Stick to top-level `cargo build --release`.
+`smeltr` ships its own copy of `libmetal_hook.dylib` embedded in the binary,
+so end users never need to set `SMELTR_DYLIB`. A `cargo build --release`
+rebuilds both halves together — no version skew is possible.
 
 ### Two `smeltrd` processes running
 
