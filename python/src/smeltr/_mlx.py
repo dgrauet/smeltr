@@ -174,6 +174,12 @@ def decorate_eval() -> None:
     """Monkey-patch mx.core.eval to emit MlxEvalEntered/Returned events.
 
     No-op if MLX is not importable or if already decorated.
+
+    The `was_async` field on MlxEvalReturned is a heuristic: calls returning
+    in less than 10 ms are flagged async (work queued but not awaited),
+    longer calls are flagged sync (presumably blocked on a backend sync).
+    MLX does not expose a public API to know whether a sync actually
+    happened, so this is the best available signal.
     """
     global _eval_decorated
     if _eval_decorated:
@@ -204,12 +210,14 @@ def decorate_eval() -> None:
             return original(*args, **kwargs)
         finally:
             end = _time.monotonic_ns()
+            ASYNC_THRESHOLD_NS = 10_000_000  # 10 ms — empirical: faster returns are almost certainly async
+            duration = end - start
             try:
                 _emit({
                     "kind": "MlxEvalReturned",
                     "call_id": call_id,
-                    "duration_ns": end - start,
-                    "was_async": True,
+                    "duration_ns": duration,
+                    "was_async": duration < ASYNC_THRESHOLD_NS,
                 })
             except Exception:
                 pass

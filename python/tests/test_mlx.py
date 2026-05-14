@@ -208,3 +208,50 @@ def test_decorate_eval_noop_without_mlx(fake_daemon, monkeypatch):
         smeltr.decorate_eval()  # must not raise
     finally:
         smeltr.detach()
+
+
+def test_decorate_eval_was_async_reflects_duration(fake_daemon, monkeypatch):
+    """Short calls report was_async=True, long calls was_async=False."""
+    import time as _time
+    import types
+    import sys as _sys
+
+    fake_core = types.ModuleType("mlx.core")
+
+    def slow_fn(*args, **kwargs):
+        _time.sleep(0.05)  # 50ms — exceeds 10ms threshold
+        return None
+
+    def fast_fn(*args, **kwargs):
+        return None  # essentially instant
+
+    fake_root = types.ModuleType("mlx")
+    fake_root.core = fake_core
+    monkeypatch.setitem(_sys.modules, "mlx", fake_root)
+    monkeypatch.setitem(_sys.modules, "mlx.core", fake_core)
+
+    smeltr.attach(poll_hz=0)
+    try:
+        # First call: fast → should report was_async=True
+        fake_core.eval = fast_fn
+        smeltr.decorate_eval()
+        import mlx.core as mx_core
+        mx_core.eval("a1")
+
+        # Undecorate, swap, redecorate, slow call
+        from smeltr._mlx import _undecorate_eval_for_tests
+        _undecorate_eval_for_tests()
+        fake_core.eval = slow_fn
+        smeltr.decorate_eval()
+        mx_core.eval("a2")
+    finally:
+        smeltr.detach()
+
+    returns = [m for m in fake_daemon.received
+               if m["payload"]["kind"] == "MlxEvalReturned"]
+    assert len(returns) == 2
+    fast = returns[0]["payload"]
+    slow = returns[1]["payload"]
+    assert fast["was_async"] is True, f"fast call should be async, got {fast}"
+    assert slow["was_async"] is False, f"slow call should be sync, got {slow}"
+    assert slow["duration_ns"] >= 50_000_000
