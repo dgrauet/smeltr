@@ -315,3 +315,92 @@ fn sessions_open_help_lists_speed_flag() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--speed"), "stdout was:\n{stdout}");
 }
+
+#[test]
+#[serial_test::serial]
+fn sessions_show_renders_metal_and_mlx_variants_readably() {
+    use smeltr_core::event::{Event, Payload, Source};
+    use smeltr_core::session::{SessionId, SessionMetadata};
+    use smeltr_core::writer::SessionWriter;
+    use uuid::Uuid;
+
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("SMELTR_HOME", home.path());
+
+    let id = SessionId::new();
+    let meta = SessionMetadata::now_starting(id);
+    let mut w = SessionWriter::create(meta).unwrap();
+    w.write_event(&Event {
+        ts_mono_ns: 1,
+        ts_wall_ns: 1,
+        session_id: Uuid::nil(),
+        source: Source::MetalHook,
+        pid: None,
+        seq: 1,
+        payload: Payload::MetalCbCommitted {
+            cb_id: 0x1438e0,
+            queue_id: 1,
+            queue_depth: 23,
+            label: None,
+        },
+    })
+    .unwrap();
+    w.write_event(&Event {
+        ts_mono_ns: 2,
+        ts_wall_ns: 2,
+        session_id: Uuid::nil(),
+        source: Source::MetalHook,
+        pid: None,
+        seq: 2,
+        payload: Payload::MetalCbCompleted {
+            cb_id: 0x1438e0,
+            queue_id: 1,
+            status: 4,
+            error_code: Some(14),
+            error_domain: Some("IOGPU".into()),
+            in_flight_ns: 9_000_000_000,
+        },
+    })
+    .unwrap();
+    w.write_event(&Event {
+        ts_mono_ns: 3,
+        ts_wall_ns: 3,
+        session_id: Uuid::nil(),
+        source: Source::PythonSidecar,
+        pid: None,
+        seq: 3,
+        payload: Payload::MlxMemoryPoll {
+            active_bytes: 14 * 1024 * 1024 * 1024,
+            peak_bytes: 18 * 1024 * 1024 * 1024,
+            cache_bytes: 2 * 1024 * 1024 * 1024,
+        },
+    })
+    .unwrap();
+    w.finalize(Some(0), "2026-05-14T00:00:00Z".into()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_smeltr");
+    let out = std::process::Command::new(bin)
+        .env("SMELTR_HOME", home.path())
+        .args(["sessions", "show", &id.short()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for marker in [
+        "MetalCbCommitted",
+        "MetalCbCompleted",
+        "cb_id=0x1438e0",
+        "queue_depth=23",
+        "error_code=14",
+        "MlxMemoryPoll",
+        "active=",
+    ] {
+        assert!(stdout.contains(marker), "missing {marker:?} in:\n{stdout}");
+    }
+    assert!(!stdout.contains("Payload {"));
+}

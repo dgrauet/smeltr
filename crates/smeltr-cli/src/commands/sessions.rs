@@ -124,6 +124,169 @@ fn print_session(
                 let mlx = mlx_version.as_deref().unwrap_or("none");
                 format!("PythonSidecarHello python={python_version} mlx={mlx} argv={argv:?}")
             }
+            smeltr_core::event::Payload::MetalCbCommitted {
+                cb_id,
+                queue_id,
+                queue_depth,
+                label,
+            } => {
+                format!(
+                    "MetalCbCommitted cb_id=0x{cb_id:x} queue_id={queue_id} queue_depth={queue_depth} label={}",
+                    label.as_deref().unwrap_or("-")
+                )
+            }
+            smeltr_core::event::Payload::MetalCbScheduled { cb_id, queue_id } => {
+                format!("MetalCbScheduled cb_id=0x{cb_id:x} queue_id={queue_id}")
+            }
+            smeltr_core::event::Payload::MetalCbCompleted {
+                cb_id,
+                queue_id,
+                status,
+                error_code,
+                error_domain,
+                in_flight_ns,
+            } => {
+                format!(
+                    "MetalCbCompleted cb_id=0x{cb_id:x} queue_id={queue_id} status={status} error_code={} domain={} in_flight={}ms",
+                    error_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+                    error_domain.as_deref().unwrap_or("-"),
+                    in_flight_ns / 1_000_000
+                )
+            }
+            smeltr_core::event::Payload::MetalCbWarning {
+                cb_id,
+                queue_id,
+                elapsed_ns,
+            } => {
+                format!(
+                    "MetalCbWarning cb_id=0x{cb_id:x} queue_id={queue_id} elapsed={}ms",
+                    elapsed_ns / 1_000_000
+                )
+            }
+            smeltr_core::event::Payload::MetalHeapAlloc {
+                heap_id,
+                size_bytes,
+                label,
+            } => {
+                format!(
+                    "MetalHeapAlloc heap_id=0x{heap_id:x} size={} label={}",
+                    human_bytes(*size_bytes),
+                    label.as_deref().unwrap_or("-")
+                )
+            }
+            smeltr_core::event::Payload::MetalHeapFree { heap_id } => {
+                format!("MetalHeapFree heap_id=0x{heap_id:x}")
+            }
+            smeltr_core::event::Payload::MetalBufferAlloc {
+                buffer_id,
+                heap_id,
+                size_bytes,
+                label,
+            } => {
+                format!(
+                    "MetalBufferAlloc buf=0x{buffer_id:x} heap={} size={} label={}",
+                    heap_id
+                        .map(|h| format!("0x{h:x}"))
+                        .unwrap_or_else(|| "-".into()),
+                    human_bytes(*size_bytes),
+                    label.as_deref().unwrap_or("-")
+                )
+            }
+            smeltr_core::event::Payload::MetalBufferFree { buffer_id } => {
+                format!("MetalBufferFree buf=0x{buffer_id:x}")
+            }
+            smeltr_core::event::Payload::MetalTextureAlloc {
+                texture_id,
+                heap_id,
+                size_bytes,
+                label,
+            } => {
+                format!(
+                    "MetalTextureAlloc tex=0x{texture_id:x} heap={} size={} label={}",
+                    heap_id
+                        .map(|h| format!("0x{h:x}"))
+                        .unwrap_or_else(|| "-".into()),
+                    human_bytes(*size_bytes),
+                    label.as_deref().unwrap_or("-")
+                )
+            }
+            smeltr_core::event::Payload::MetalTextureFree { texture_id } => {
+                format!("MetalTextureFree tex=0x{texture_id:x}")
+            }
+            smeltr_core::event::Payload::MetalHookDropped { count } => {
+                format!("MetalHookDropped count={count}")
+            }
+            smeltr_core::event::Payload::MetalHookSkipped { reason } => {
+                format!("MetalHookSkipped reason={reason}")
+            }
+            smeltr_core::event::Payload::MlxEvalEntered {
+                call_id,
+                array_count,
+                stream,
+            } => {
+                format!("MlxEvalEntered call_id={call_id} arrays={array_count} stream={stream}")
+            }
+            smeltr_core::event::Payload::MlxEvalReturned {
+                call_id,
+                duration_ns,
+                was_async,
+            } => {
+                format!(
+                    "MlxEvalReturned call_id={call_id} duration={}ms async={was_async}",
+                    duration_ns / 1_000_000
+                )
+            }
+            smeltr_core::event::Payload::MlxMemoryPoll {
+                active_bytes,
+                peak_bytes,
+                cache_bytes,
+            } => {
+                format!(
+                    "MlxMemoryPoll active={} peak={} cache={}",
+                    human_bytes(*active_bytes),
+                    human_bytes(*peak_bytes),
+                    human_bytes(*cache_bytes)
+                )
+            }
+            smeltr_core::event::Payload::MlxArrayAlive {
+                array_id,
+                size_bytes,
+                dtype,
+                shape,
+                stream,
+            } => {
+                format!(
+                    "MlxArrayAlive id=0x{array_id:x} size={} dtype={dtype} shape={shape:?} stream={stream}",
+                    human_bytes(*size_bytes)
+                )
+            }
+            smeltr_core::event::Payload::MlxArrayFreed { array_id } => {
+                format!("MlxArrayFreed id=0x{array_id:x}")
+            }
+            smeltr_core::event::Payload::MlxSnapshot {
+                live_arrays,
+                total_array_bytes,
+                streams,
+                mlx_version,
+            } => {
+                format!(
+                    "MlxSnapshot arrays={live_arrays} total={} streams={streams:?} mlx={}",
+                    human_bytes(*total_array_bytes),
+                    mlx_version.as_deref().unwrap_or("none")
+                )
+            }
+            smeltr_core::event::Payload::MlxPanicTriggered { condition } => {
+                format!("MlxPanicTriggered condition={condition}")
+            }
+            smeltr_core::event::Payload::PostMortemFlushed {
+                reason,
+                source_session,
+                event_count,
+            } => {
+                format!(
+                    "PostMortemFlushed reason={reason} src={source_session} events={event_count}"
+                )
+            }
             other => format!("{other:?}"),
         };
         println!(
@@ -132,4 +295,19 @@ fn print_session(
         );
     }
     Ok(())
+}
+
+fn human_bytes(b: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if b >= GIB {
+        format!("{:.2} GiB", b as f64 / GIB as f64)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b as f64 / MIB as f64)
+    } else if b >= KIB {
+        format!("{:.0} KiB", b as f64 / KIB as f64)
+    } else {
+        format!("{b} B")
+    }
 }
