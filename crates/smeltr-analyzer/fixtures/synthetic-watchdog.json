@@ -1,0 +1,48 @@
+[
+  {
+    "ts_mono_ns": 1000000000, "ts_wall_ns": 1000000000,
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "source": "PythonSidecar", "pid": 12345, "seq": 1,
+    "payload": {"kind": "MlxEvalEntered", "call_id": 1, "array_count": 2, "stream": "gpu"}
+  },
+  {
+    "ts_mono_ns": 1100000000, "ts_wall_ns": 1100000000,
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "source": "PythonSidecar", "pid": 12345, "seq": 2,
+    "payload": {"kind": "MlxEvalReturned", "call_id": 1, "duration_ns": 100000000, "was_async": true}
+  },
+  {
+    "ts_mono_ns": 1200000000, "ts_wall_ns": 1200000000,
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "source": "MetalHook", "pid": 12345, "seq": 3,
+    "payload": {"kind": "MetalCbCommitted", "cb_id": 100, "queue_id": 1, "queue_depth": 8, "label": null}
+  },
+  {
+    "ts_mono_ns": 1300000000, "ts_wall_ns": 1300000000,
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "source": "MetalHook", "pid": 12345, "seq": 4,
+    "payload": {"kind": "MetalCbCommitted", "cb_id": 101, "queue_id": 1, "queue_depth": 17, "label": null}
+  },
+  {
+    "ts_mono_ns": 2000000000, "ts_wall_ns": 2000000000,
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "source": "Proc", "pid": null, "seq": 5,
+    "payload": {"kind": "ProcTop", "top": [
+      {"pid": 200, "name": "ReportCrash", "cpu_pct": 18.4},
+      {"pid": 201, "name": "diagnosticservicesd", "cpu_pct": 9.2}
+    ], "flagged": []}
+  },
+  {
+    "ts_mono_ns": 2100000000, "ts_wall_ns": 2100000000,
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "source": "MetalHook", "pid": 12345, "seq": 6,
+    "payload": {"kind": "MetalCbCommitted", "cb_id": 102, "queue_id": 1, "queue_depth": 23, "label": null}
+  },
+  {
+    "ts_mono_ns": 2500000000, "ts_wall_ns": 2500000000,
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "source": "MetalHook", "pid": 12345, "seq": 7,
+    "payload": {"kind": "MetalCbCompleted", "cb_id": 100, "queue_id": 1, "status": 4,
+                "error_code": 14, "error_domain": "IOGPU", "in_flight_ns": 1300000000}
+  }
+]

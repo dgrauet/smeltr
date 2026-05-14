@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 smeltr-core = { path = "../smeltr-core" }
+smeltr-analyzer = { path = "../smeltr-analyzer" }
 smeltr-daemon = { path = "../smeltr-daemon" }
 smeltr-probes-vm = { path = "../smeltr-probes-vm" }
 smeltr-probes-proc = { path = "../smeltr-probes-proc" }
@@ -31,3 +32,5 @@ smeltr-core = { path = "../smeltr-core" }
 tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
+serde_json = "1"
+serial_test = "3"

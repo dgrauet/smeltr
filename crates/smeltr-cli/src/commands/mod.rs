@@ -1,3 +1,4 @@
+pub mod analyze;
 pub mod daemon;
 pub mod doctor;
 pub mod mark;

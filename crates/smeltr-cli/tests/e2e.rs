@@ -217,6 +217,51 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
 }
 
 #[test]
+#[serial_test::serial]
+fn analyze_prints_report_from_session_dir() {
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("SMELTR_HOME", home.path());
+
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../smeltr-analyzer/fixtures/synthetic-watchdog.json"
+    ))
+    .unwrap();
+    let events: Vec<smeltr_core::event::Event> = serde_json::from_str(&fixture).unwrap();
+
+    // Write a session with these events.
+    let id = smeltr_core::session::SessionId::new();
+    let meta = smeltr_core::session::SessionMetadata::now_starting(id);
+    let mut w = smeltr_core::writer::SessionWriter::create(meta).unwrap();
+    for ev in &events {
+        w.write_event(ev).unwrap();
+    }
+    let _dir = w.dir().to_path_buf();
+    w.finalize(Some(0), "2026-05-14T00:00:00Z".into()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_smeltr");
+    let out = std::process::Command::new(bin)
+        .env("SMELTR_HOME", home.path())
+        .args(["analyze", "--last"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ImpactingInteractivity"),
+        "stdout was:\n{}",
+        stdout
+    );
+    assert!(stdout.contains("Queue depth peaked"));
+    assert!(stdout.contains("ReportCrash"));
+}
+
+#[test]
 fn doctor_prints_probe_status() {
     let out = Command::cargo_bin("smeltr")
         .unwrap()

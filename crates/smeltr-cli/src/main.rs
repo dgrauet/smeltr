@@ -26,6 +26,14 @@ enum Cmd {
     },
     /// Audit probe availability and permissions.
     Doctor,
+    /// Analyze a session and print the contributing-factor report.
+    Analyze {
+        /// Use the most recent post-mortem session (or newest if none).
+        #[arg(long)]
+        last: bool,
+        /// Session id or directory-name suffix to analyze.
+        id: Option<String>,
+    },
     /// Spawn a child process under smeltr's scoped probes.
     Record {
         /// Command to execute.
@@ -53,6 +61,7 @@ fn main() -> anyhow::Result<()> {
             Cmd::Mark { label } => commands::mark::run(label).await,
             Cmd::Sessions { sub } => commands::sessions::run(sub).await,
             Cmd::Doctor => commands::doctor::run(),
+            Cmd::Analyze { last, id } => commands::analyze::run(last, id),
             Cmd::Record { cmd, args, no_hook } => {
                 let code = commands::record::run(&cmd, &args, no_hook).await?;
                 std::process::exit(code);
