@@ -499,7 +499,6 @@ static void smeltr_warn_init(void) {
 
 static id   (*orig_cmdBufferWithDescriptor)(id, SEL, id) = NULL;
 static void (*orig_commitCommandBufferWake)(id, SEL, id, BOOL) = NULL;
-static void (*orig_cmdBufferDidComplete)(id, SEL, id, double, double, id) = NULL;
 
 static uint32_t smeltr_queue_depth(id queue) {
     SEL sel = sel_registerName("numCommandBuffers");
@@ -544,59 +543,64 @@ static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wa
                     g_inflight[@(cb_id_capture)] = @(ts_capture);
                 });
             }
+            // Register a completion handler via the public Metal API. We do
+            // this here (rather than swizzling the private
+            // commandBufferDidComplete:startTime:completionTime:error:
+            // selector, whose Apple-internal calling convention disagrees
+            // with the documented (double, double, NSError*) shape and
+            // crashes ARC in objc_retain on the bogus 'error' arg).
+            //
+            // commitCommandBuffer:wake: is invoked just before the CB is
+            // submitted to the GPU, which is exactly the right moment to
+            // attach a completion handler: the CB is still in the
+            // NotEnqueued/Enqueued state, and Metal permits adding
+            // handlers up until commit. This catches CBs created via any
+            // path (commandBufferWithDescriptor:, commandBuffer,
+            // commandBufferWithUnretainedReferences, etc.).
+            SEL addHandler = @selector(addCompletedHandler:);
+            if ([cb respondsToSelector:addHandler]) {
+                uint64_t q_id_capture = q_id;
+                void (^handler)(id<MTLCommandBuffer>) = ^(id<MTLCommandBuffer> done_cb) {
+                    if (!g_ring) return;
+                    @try {
+                        uint64_t done_cb_id = (uint64_t)(uintptr_t)done_cb;
+                        uint64_t done_ts = smeltr_mono_ns();
+                        uint64_t in_flight = 0;
+                        SmeltrAtomicU64 *box = objc_getAssociatedObject(
+                            done_cb, kSmeltrCbCommitTsKey);
+                        if (box) {
+                            uint64_t t0 = atomic_load_explicit(
+                                &box->value, memory_order_relaxed);
+                            if (t0 > 0 && done_ts > t0) in_flight = done_ts - t0;
+                        }
+                        NSError *err = [done_cb error];
+                        int32_t err_present = err ? 1 : 0;
+                        int64_t err_code = err ? (int64_t)err.code : 0;
+                        const char *domain = err ? [err.domain UTF8String] : NULL;
+                        uint32_t status = (uint32_t)[done_cb status];
+                        smeltr_write_cb_completed(g_ring, done_ts,
+                            done_cb_id, q_id_capture, status,
+                            err_present, err_code, domain, in_flight);
+                        if (g_inflight_q) {
+                            uint64_t cb_id_capture = done_cb_id;
+                            dispatch_async(g_inflight_q, ^{
+                                [g_inflight removeObjectForKey:@(cb_id_capture)];
+                            });
+                        }
+                    } @catch (NSException *e) {
+                        smeltr_log("exception in addCompletedHandler: %s",
+                                   e.reason.UTF8String);
+                    }
+                };
+                [(id<MTLCommandBuffer>)cb addCompletedHandler:handler];
+            } else {
+                SMELTR_TRACE("cb does not respond to addCompletedHandler: cb=%p", cb);
+            }
         } @catch (NSException *e) {
             smeltr_log("exception in commit (parent) hook: %s", e.reason.UTF8String);
         }
     }
     orig_commitCommandBufferWake(self, _cmd, cb, wake);
-}
-
-static void smeltr_swz_cmdBufferDidComplete(id self, SEL _cmd, id cb,
-                                             double startTime,
-                                             double completionTime,
-                                             id error) {
-    SMELTR_TRACE("_MTLCommandQueue.commandBufferDidComplete: queue=%p cb=%p "
-                 "start=%.6f end=%.6f err=%p",
-                 self, cb, startTime, completionTime, error);
-    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring && cb) {
-        @try {
-            uint64_t cb_id = (uint64_t)(uintptr_t)cb;
-            uint64_t q_id  = (uint64_t)(uintptr_t)self;
-            uint64_t done_ts = smeltr_mono_ns();
-            // MTLCommandBufferStatus: 4 = Completed, 5 = Error.
-            uint32_t status = (error != nil) ? 5u : 4u;
-            int32_t err_present = (error != nil) ? 1 : 0;
-            int64_t err_code = 0;
-            const char *domain = NULL;
-            if (error != nil) {
-                NSError *e = (NSError *)error;
-                err_code = (int64_t)[e code];
-                NSString *d = [e domain];
-                domain = d ? [d UTF8String] : NULL;
-            }
-            uint64_t in_flight = 0;
-            if (startTime > 0.0 && completionTime > startTime) {
-                in_flight = (uint64_t)((completionTime - startTime) * 1e9);
-            } else {
-                SmeltrAtomicU64 *box = objc_getAssociatedObject(cb, kSmeltrCbCommitTsKey);
-                if (box) {
-                    uint64_t t0 = atomic_load_explicit(&box->value, memory_order_relaxed);
-                    if (t0 > 0 && done_ts > t0) in_flight = done_ts - t0;
-                }
-            }
-            smeltr_write_cb_completed(g_ring, done_ts, cb_id, q_id, status,
-                err_present, err_code, domain, in_flight);
-            if (g_inflight_q) {
-                uint64_t cb_id_capture = cb_id;
-                dispatch_async(g_inflight_q, ^{
-                    [g_inflight removeObjectForKey:@(cb_id_capture)];
-                });
-            }
-        } @catch (NSException *e) {
-            smeltr_log("exception in didComplete hook: %s", e.reason.UTF8String);
-        }
-    }
-    orig_cmdBufferDidComplete(self, _cmd, cb, startTime, completionTime, error);
 }
 
 static void smeltr_install_mtl_command_queue_swizzles(void) {
@@ -616,9 +620,6 @@ static void smeltr_install_mtl_command_queue_swizzles(void) {
         { "commitCommandBuffer:wake:",
           (IMP)smeltr_swz_commitCommandBufferWake,
           (IMP *)&orig_commitCommandBufferWake },
-        { "commandBufferDidComplete:startTime:completionTime:error:",
-          (IMP)smeltr_swz_cmdBufferDidComplete,
-          (IMP *)&orig_cmdBufferDidComplete },
     };
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
         SEL sel = sel_registerName(entries[i].name);
