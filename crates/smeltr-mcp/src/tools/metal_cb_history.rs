@@ -4,10 +4,14 @@ use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, Payload};
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+const DEFAULT_LIMIT: usize = 100;
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
     pub session: String,
     pub queue_id: Option<u64>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -15,6 +19,8 @@ pub struct Response {
     pub events: Vec<Event>,
     pub matched: usize,
     pub total: usize,
+    pub truncated: bool,
+    pub offset: usize,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -32,10 +38,19 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         })
         .collect();
     let matched = filtered.len();
+
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
+    let mut sliced: Vec<Event> = filtered.into_iter().skip(offset).collect();
+    let truncated = sliced.len() > limit;
+    sliced.truncate(limit);
+
     Ok(Response {
-        events: filtered,
+        events: sliced,
         matched,
         total,
+        truncated,
+        offset,
     })
 }
 
@@ -117,6 +132,7 @@ mod tests {
         let resp = run(Params {
             session: id.short(),
             queue_id: Some(1),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(resp.matched, 2);
@@ -149,9 +165,87 @@ mod tests {
 
         let resp = run(Params {
             session: id.short(),
-            queue_id: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(resp.matched, 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn limit_truncates_history() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        for i in 1u64..=50 {
+            w.write_event(&Event {
+                ts_mono_ns: i,
+                ts_wall_ns: i,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: i,
+                payload: Payload::MetalCbCommitted {
+                    cb_id: i,
+                    queue_id: 1,
+                    queue_depth: i as u32,
+                    label: None,
+                },
+            })
+            .unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(resp.events.len(), 10);
+        assert_eq!(resp.matched, 50);
+        assert!(resp.truncated);
+        assert_eq!(resp.offset, 0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn offset_skips_initial_events() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        for i in 1u64..=10 {
+            w.write_event(&Event {
+                ts_mono_ns: i,
+                ts_wall_ns: i,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: i,
+                payload: Payload::MetalCbCommitted {
+                    cb_id: i,
+                    queue_id: 1,
+                    queue_depth: i as u32,
+                    label: None,
+                },
+            })
+            .unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+            limit: Some(5),
+            offset: Some(3),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(resp.events.len(), 5);
+        assert_eq!(resp.events[0].seq, 4); // 3 skipped
+        assert_eq!(resp.offset, 3);
     }
 }
