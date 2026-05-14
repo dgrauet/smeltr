@@ -20,7 +20,12 @@ async fn main() -> anyhow::Result<()> {
 
     let _args = Args::parse();
 
-    let session = Arc::new(sessions::ActiveSession::open_new()?);
+    let _flight_recorder = Arc::new(smeltr_daemon::flight_recorder::FlightRecorder::new(
+        std::time::Duration::from_secs(60),
+    ));
+    let session = Arc::new(sessions::ActiveSession::open_new_with_recorder(Some(
+        _flight_recorder.clone(),
+    ))?);
     tracing::info!(session = %session.id(), "active session opened");
     let bus = bus::Bus::new();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);

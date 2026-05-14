@@ -1,15 +1,17 @@
 //! Active session bookkeeping inside the daemon.
 
+use crate::flight_recorder::FlightRecorder;
 use smeltr_core::clock::MonoClock;
 use smeltr_core::event::{Event, Payload, Source};
 use smeltr_core::session::{SessionId, SessionMetadata};
 use smeltr_core::writer::SessionWriter;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
 pub struct ActiveSession {
     inner: Mutex<Option<Inner>>,
+    flight_recorder: Option<Arc<FlightRecorder>>,
 }
 
 struct Inner {
@@ -22,6 +24,12 @@ struct Inner {
 
 impl ActiveSession {
     pub fn open_new() -> std::io::Result<Self> {
+        Self::open_new_with_recorder(None)
+    }
+
+    pub fn open_new_with_recorder(
+        flight_recorder: Option<Arc<FlightRecorder>>,
+    ) -> std::io::Result<Self> {
         let id = SessionId::new();
         let meta = SessionMetadata::now_starting(id);
         let writer = SessionWriter::create(meta)?;
@@ -35,6 +43,7 @@ impl ActiveSession {
                 wall_epoch_ns,
                 seq: 0,
             })),
+            flight_recorder,
         };
         s.append_internal(
             Source::System,
@@ -90,6 +99,10 @@ impl ActiveSession {
             .writer
             .write_event(&ev)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+        drop(guard);
+        if let Some(fr) = &self.flight_recorder {
+            fr.push(ev.clone());
+        }
         Ok(ev)
     }
 
@@ -181,5 +194,20 @@ mod tests {
         assert_eq!(meta.exit_code, Some(7));
         assert!(meta.ended_rfc3339.is_some());
         drop(s_clone);
+    }
+
+    #[test]
+    #[serial]
+    fn append_pushes_to_flight_recorder() {
+        let _home = temp_home();
+        let fr = std::sync::Arc::new(crate::flight_recorder::FlightRecorder::new(
+            std::time::Duration::from_secs(60),
+        ));
+        let s = ActiveSession::open_new_with_recorder(Some(fr.clone())).unwrap();
+        s.append(Source::Mark, None, Payload::Mark { label: "x".into() })
+            .unwrap();
+        // SessionStarted (emitted by constructor) + Mark = 2 events in the ring.
+        assert_eq!(fr.len(), 2);
+        s.finalize(Some(0), "test").unwrap();
     }
 }
