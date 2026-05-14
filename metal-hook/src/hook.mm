@@ -432,21 +432,70 @@ static void smeltr_warn_init(void) {
     dispatch_resume(g_warn_timer);
 }
 
+static int smeltr_detect_os_major(void) {
+    const char *ovr = getenv("SMELTR_HOOK_FORCE_OS_MAJOR");
+    if (ovr) {
+        int n = atoi(ovr);
+        if (n > 0) return n;
+    }
+    NSOperatingSystemVersion v = [[NSProcessInfo processInfo] operatingSystemVersion];
+    return (int)v.majorVersion;
+}
+
+static const int kMinSupportedMacOSMajor = 14;
+
+/// Returns YES if the current macOS major version is below the supported
+/// minimum and the caller should skip swizzling.
+static BOOL smeltr_macos_too_old(char *reason_out, size_t cap) {
+    int major = smeltr_detect_os_major();
+    if (major >= kMinSupportedMacOSMajor) {
+        return NO;
+    }
+    NSOperatingSystemVersion v = [[NSProcessInfo processInfo] operatingSystemVersion];
+    snprintf(reason_out, cap,
+        "macOS %ld.%ld.%ld unsupported (need >= %d)",
+        (long)v.majorVersion, (long)v.minorVersion, (long)v.patchVersion,
+        kMinSupportedMacOSMajor);
+    return YES;
+}
+
+/// Emit a MetalHookSkipped frame to the ring (if open) and log to stderr.
+static void smeltr_emit_metal_hook_skipped(const char *reason) {
+    if (g_ring) {
+        smeltr_write_skipped(g_ring, smeltr_mono_ns(), reason);
+    }
+    smeltr_log("skipped: %s", reason);
+}
+
 __attribute__((constructor))
 static void smeltr_hook_init(void) {
+    // Open the ring early so the Skipped frame can be emitted on any skip path.
+    const char *ring_path = getenv("SMELTR_RING_PATH");
+    if (ring_path && ring_path[0] != '\0') {
+        g_ring = smeltr_ring_open(ring_path);
+        if (!g_ring) {
+            smeltr_log("failed to open ring at %s (errno=%d)", ring_path, errno);
+        }
+    }
+
     const char *disabled = getenv("SMELTR_HOOK_DISABLE");
     if (disabled && strcmp(disabled, "1") == 0) {
-        smeltr_log("disabled via SMELTR_HOOK_DISABLE=1");
+        smeltr_emit_metal_hook_skipped("SMELTR_HOOK_DISABLE set");
         return;
     }
-    const char *ring_path = getenv("SMELTR_RING_PATH");
+
+    char reason[160];
+    if (smeltr_macos_too_old(reason, sizeof(reason))) {
+        smeltr_emit_metal_hook_skipped(reason);
+        return;
+    }
+
     if (!ring_path || ring_path[0] == '\0') {
         smeltr_log("no SMELTR_RING_PATH set; remaining inert");
         return;
     }
-    g_ring = smeltr_ring_open(ring_path);
     if (!g_ring) {
-        smeltr_log("failed to open ring at %s (errno=%d)", ring_path, errno);
+        // Ring path was set but open failed above; remain inert.
         return;
     }
     atomic_store_explicit(&g_enabled, true, memory_order_release);

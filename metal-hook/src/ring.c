@@ -204,3 +204,9 @@ void smeltr_write_texture_free(smeltr_ring_t *r, uint64_t ts, uint64_t texture_i
     uint8_t buf[8]; size_t off = 0; BUF_PUSH_U64(buf, off, texture_id);
     write_frame(r, SMELTR_KIND_TEXTURE_FREE, ts, buf, off);
 }
+
+void smeltr_write_skipped(smeltr_ring_t *r, uint64_t ts, const char *reason) {
+    uint8_t buf[512]; size_t off = 0;
+    push_label(buf, &off, reason);
+    write_frame(r, SMELTR_KIND_SKIPPED, ts, buf, off);
+}

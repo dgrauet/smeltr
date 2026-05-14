@@ -37,6 +37,7 @@ void smeltr_write_texture_alloc(smeltr_ring_t *r, uint64_t ts,
     uint64_t texture_id, int32_t heap_id_present, uint64_t heap_id,
     uint64_t size_bytes, const char *label);
 void smeltr_write_texture_free(smeltr_ring_t *r, uint64_t ts, uint64_t texture_id);
+void smeltr_write_skipped(smeltr_ring_t *r, uint64_t ts, const char *reason);
 
 #ifdef __cplusplus
 }
