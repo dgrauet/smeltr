@@ -6,7 +6,7 @@ use smeltr_core::event::Event;
 
 const DEFAULT_WINDOW_NS: u64 = 200_000_000;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
     pub session: String,
     pub focal_seq: u64,

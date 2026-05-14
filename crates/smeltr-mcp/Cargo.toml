@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
 async-trait = "0.1"
+schemars = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

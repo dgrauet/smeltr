@@ -3,7 +3,7 @@
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
     pub session: String,
 }

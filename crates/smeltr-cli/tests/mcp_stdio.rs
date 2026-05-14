@@ -121,6 +121,22 @@ fn mcp_stdio_initialize_then_list_tools() {
         );
     }
 
+    // Each tool must have a non-trivial inputSchema with at least one property
+    // (except list_sessions which legitimately takes no params).
+    for tool in tools.iter() {
+        let name = tool.get("name").and_then(|n| n.as_str()).unwrap();
+        let schema = tool.get("inputSchema").expect("tool has no inputSchema");
+        let props = schema.get("properties").and_then(|p| p.as_object());
+        if name == "list_sessions" {
+            continue;
+        }
+        let props = props.unwrap_or_else(|| panic!("tool {name} has no properties"));
+        assert!(
+            !props.is_empty(),
+            "tool {name} inputSchema has empty properties — placeholder not replaced"
+        );
+    }
+
     // Clean shutdown.
     drop(stdin);
     let exit_deadline = Instant::now() + Duration::from_secs(3);

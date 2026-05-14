@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use smeltr_core::event::Source;
 use std::collections::HashMap;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
     pub session_a: String,
     pub session_b: String,

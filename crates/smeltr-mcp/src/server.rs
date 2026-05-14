@@ -100,21 +100,17 @@ use rmcp::service::{NotificationContext, RequestContext, RoleServer};
 #[derive(Clone, Default)]
 pub struct SmeltrMcpServer;
 
-fn empty_schema() -> Arc<JsonObject> {
-    let mut obj = JsonObject::new();
-    obj.insert(
-        "type".to_string(),
-        serde_json::Value::String("object".into()),
-    );
-    obj.insert(
-        "properties".to_string(),
-        serde_json::Value::Object(JsonObject::new()),
-    );
-    Arc::new(obj)
+fn schema_for<T: schemars::JsonSchema>() -> Arc<JsonObject> {
+    let v = serde_json::to_value(schemars::schema_for!(T)).unwrap_or_default();
+    let map = match v {
+        serde_json::Value::Object(m) => m,
+        _ => JsonObject::new(),
+    };
+    Arc::new(map)
 }
 
-fn tool(name: &'static str, description: &'static str) -> Tool {
-    Tool::new(name, description, empty_schema())
+fn tool<T: schemars::JsonSchema>(name: &'static str, description: &'static str) -> Tool {
+    Tool::new(name, description, schema_for::<T>())
 }
 
 fn tool_error_to_mcp(e: ToolError) -> McpError {
@@ -147,28 +143,34 @@ impl ServerHandler for SmeltrMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let tools = vec![
-            tool("list_sessions", "List recorded smeltr sessions."),
-            tool(
+            tool::<crate::tools::list_sessions::Params>(
+                "list_sessions",
+                "List recorded smeltr sessions.",
+            ),
+            tool::<crate::tools::session_summary::Params>(
                 "get_session_summary",
                 "Summarize a session: counts, time range, root cause.",
             ),
-            tool(
+            tool::<crate::tools::query_events::Params>(
                 "query_events",
                 "Query events from a session with filters (source, kind, limit).",
             ),
-            tool(
+            tool::<crate::tools::correlations::Params>(
                 "find_correlations",
                 "Find correlated events in a session via the analyzer.",
             ),
-            tool(
+            tool::<crate::tools::crash_report::Params>(
                 "get_crash_report",
                 "Retrieve crash reports captured during a session.",
             ),
-            tool(
+            tool::<crate::tools::metal_cb_history::Params>(
                 "get_metal_cb_history",
                 "Retrieve Metal command-buffer history events for a session.",
             ),
-            tool("compare_sessions", "Compare two sessions side by side."),
+            tool::<crate::tools::compare_sessions::Params>(
+                "compare_sessions",
+                "Compare two sessions side by side.",
+            ),
         ];
         Ok(ListToolsResult::with_all_items(tools))
     }

@@ -4,7 +4,7 @@ use crate::types::ToolError;
 use serde::{Deserialize, Serialize};
 use smeltr_core::reader::{list_sessions, read_events, read_metadata};
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {}
 
 #[derive(Debug, Serialize, Deserialize)]

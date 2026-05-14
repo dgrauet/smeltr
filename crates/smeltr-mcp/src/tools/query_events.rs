@@ -6,7 +6,7 @@ use smeltr_core::event::{Event, Source};
 
 const DEFAULT_LIMIT: usize = 1000;
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
     pub session: String,
     pub source: Option<String>,

@@ -41,3 +41,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+schemars = "0.8"
