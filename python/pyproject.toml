@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smeltr"
+dynamic = ["version"]
+description = "Python sidecar for the smeltr Metal/MLX observability tool."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "smeltr authors" }]
+dependencies = [
+    "cbor2>=5.4",
+]
+
+[project.optional-dependencies]
+mlx = ["mlx>=0.18"]
+dev = ["pytest>=7", "pytest-timeout>=2"]
+
+[tool.hatch.version]
+path = "src/smeltr/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/smeltr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 10
