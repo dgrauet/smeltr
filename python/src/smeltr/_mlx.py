@@ -89,6 +89,7 @@ def snapshot() -> None:
 
 
 def _reset_for_tests() -> None:
+    _undecorate_eval_for_tests()
     stop_polling()
     with _tracked_lock:
         _tracked.clear()
@@ -153,3 +154,79 @@ def stop_polling() -> None:
     if t is not None:
         t.join(timeout=2.0)
     _poll_thread = None
+
+
+# ---- mx.core.eval decoration ----
+
+_eval_decorated = False
+_eval_call_counter = 0
+_eval_call_counter_lock = threading.Lock()
+
+
+def _next_call_id() -> int:
+    global _eval_call_counter
+    with _eval_call_counter_lock:
+        _eval_call_counter += 1
+        return _eval_call_counter
+
+
+def decorate_eval() -> None:
+    """Monkey-patch mx.core.eval to emit MlxEvalEntered/Returned events.
+
+    No-op if MLX is not importable or if already decorated.
+    """
+    global _eval_decorated
+    if _eval_decorated:
+        return
+    try:
+        import mlx.core as mx_core
+    except ImportError:
+        return
+    original = getattr(mx_core, "eval", None)
+    if original is None or getattr(original, "_smeltr_wrapped", False):
+        return
+
+    import time as _time
+
+    def wrapped(*args, **kwargs):
+        call_id = _next_call_id()
+        try:
+            _emit({
+                "kind": "MlxEvalEntered",
+                "call_id": call_id,
+                "array_count": len(args),
+                "stream": "gpu",
+            })
+        except Exception:
+            pass
+        start = _time.monotonic_ns()
+        try:
+            return original(*args, **kwargs)
+        finally:
+            end = _time.monotonic_ns()
+            try:
+                _emit({
+                    "kind": "MlxEvalReturned",
+                    "call_id": call_id,
+                    "duration_ns": end - start,
+                    "was_async": True,
+                })
+            except Exception:
+                pass
+
+    wrapped._smeltr_wrapped = True  # type: ignore[attr-defined]
+    wrapped._smeltr_original = original  # type: ignore[attr-defined]
+    mx_core.eval = wrapped
+    _eval_decorated = True
+
+
+def _undecorate_eval_for_tests() -> None:
+    global _eval_decorated
+    _eval_decorated = False
+    try:
+        import mlx.core as mx_core
+    except ImportError:
+        return
+    current = getattr(mx_core, "eval", None)
+    if getattr(current, "_smeltr_wrapped", False):
+        mx_core.eval = current._smeltr_original

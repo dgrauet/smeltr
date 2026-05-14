@@ -127,3 +127,84 @@ def test_polling_skipped_when_mlx_absent(fake_daemon, monkeypatch):
     polls = [m for m in fake_daemon.received
              if m["payload"]["kind"] == "MlxMemoryPoll"]
     assert polls == []
+
+
+def test_decorate_eval_emits_enter_and_return(fake_daemon, monkeypatch):
+    import types
+    import sys as _sys
+
+    fake_core = types.ModuleType("mlx.core")
+    call_log = []
+
+    def fake_eval(*args, **kwargs):
+        call_log.append(args)
+        return None
+
+    fake_core.eval = fake_eval
+    fake_root = types.ModuleType("mlx")
+    fake_root.core = fake_core
+    monkeypatch.setitem(_sys.modules, "mlx", fake_root)
+    monkeypatch.setitem(_sys.modules, "mlx.core", fake_core)
+
+    smeltr.attach(poll_hz=0)
+    try:
+        smeltr.decorate_eval()
+        import mlx.core as mx_core
+        mx_core.eval("array1", "array2", "array3")
+    finally:
+        smeltr.detach()
+
+    enters = [m for m in fake_daemon.received
+              if m["payload"]["kind"] == "MlxEvalEntered"]
+    returns = [m for m in fake_daemon.received
+               if m["payload"]["kind"] == "MlxEvalReturned"]
+    assert len(enters) == 1
+    assert len(returns) == 1
+    assert enters[0]["payload"]["array_count"] == 3
+    assert returns[0]["payload"]["call_id"] == enters[0]["payload"]["call_id"]
+    assert returns[0]["payload"]["duration_ns"] >= 0
+    assert call_log == [("array1", "array2", "array3")]
+
+
+def test_decorate_eval_is_idempotent(fake_daemon, monkeypatch):
+    import types
+    import sys as _sys
+    fake_core = types.ModuleType("mlx.core")
+    fake_core.eval = lambda *a, **k: None
+    fake_root = types.ModuleType("mlx")
+    fake_root.core = fake_core
+    monkeypatch.setitem(_sys.modules, "mlx", fake_root)
+    monkeypatch.setitem(_sys.modules, "mlx.core", fake_core)
+
+    smeltr.attach(poll_hz=0)
+    try:
+        smeltr.decorate_eval()
+        first_wrap = fake_core.eval
+        smeltr.decorate_eval()
+        assert fake_core.eval is first_wrap
+    finally:
+        smeltr.detach()
+
+
+def test_decorate_eval_noop_without_mlx(fake_daemon, monkeypatch):
+    import sys as _sys
+    import builtins
+
+    for name in list(_sys.modules):
+        if name == "mlx" or name.startswith("mlx."):
+            monkeypatch.delitem(_sys.modules, name, raising=False)
+
+    real_import = builtins.__import__
+
+    def blocked_import(name, *a, **k):
+        if name == "mlx" or name.startswith("mlx."):
+            raise ImportError("mlx not installed (simulated)")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+
+    smeltr.attach(poll_hz=0)
+    try:
+        smeltr.decorate_eval()  # must not raise
+    finally:
+        smeltr.detach()
