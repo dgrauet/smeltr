@@ -15,6 +15,7 @@ smeltr-probes-proc = { path = "../smeltr-probes-proc" }
 smeltr-probes-thermal = { path = "../smeltr-probes-thermal" }
 smeltr-probes-ioreport = { path = "../smeltr-probes-ioreport" }
 smeltr-probes-mach-exceptions = { path = "../smeltr-probes-mach-exceptions" }
+smeltr-metal-ring = { path = "../smeltr-metal-ring" }
 anyhow.workspace = true
 tokio.workspace = true
 serde.workspace = true

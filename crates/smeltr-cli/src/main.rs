@@ -33,6 +33,9 @@ enum Cmd {
         /// Arguments to pass to the command.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+        /// Skip the Metal hook (no DYLD_INSERT_LIBRARIES).
+        #[arg(long)]
+        no_hook: bool,
     },
 }
 
@@ -50,8 +53,8 @@ fn main() -> anyhow::Result<()> {
             Cmd::Mark { label } => commands::mark::run(label).await,
             Cmd::Sessions { sub } => commands::sessions::run(sub).await,
             Cmd::Doctor => commands::doctor::run(),
-            Cmd::Record { cmd, args } => {
-                let code = commands::record::run(&cmd, &args).await?;
+            Cmd::Record { cmd, args, no_hook } => {
+                let code = commands::record::run(&cmd, &args, no_hook).await?;
                 std::process::exit(code);
             }
         }
