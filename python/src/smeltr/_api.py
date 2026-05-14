@@ -47,10 +47,14 @@ def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0,
         pass
     from smeltr._mlx import start_polling
     start_polling(poll_hz)
+    from smeltr._shutdown import install_hooks
+    install_hooks()
 
 
 def detach() -> None:
     """Close the daemon connection. Idempotent."""
+    from smeltr._shutdown import remove_hooks
+    remove_hooks()
     from smeltr._mlx import stop_polling
     stop_polling()
     global _client

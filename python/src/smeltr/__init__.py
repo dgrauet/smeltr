@@ -2,11 +2,8 @@
 
 from smeltr._api import attach, detach, mark, now, session
 from smeltr._mlx import decorate_eval, snapshot
+from smeltr._shutdown import panic_on
 from smeltr._version import __version__
-
-
-def panic_on(*args, **kwargs):
-    raise NotImplementedError("panic_on() is implemented in a later task")
 
 
 __all__ = [
