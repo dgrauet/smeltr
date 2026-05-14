@@ -4,8 +4,15 @@ use crate::types::ToolError;
 use serde::{Deserialize, Serialize};
 use smeltr_core::reader::{list_sessions, read_events, read_metadata};
 
+const MIN_USEFUL_EVENT_COUNT: usize = 20;
+
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct Params {}
+pub struct Params {
+    /// When false (default), sessions with fewer than 20 events are
+    /// excluded from the listing as likely-orphan daemon-spawn sessions
+    /// without workload. Set to true to include them.
+    pub include_empty: Option<bool>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -24,8 +31,9 @@ pub struct SessionSummary {
     pub root_cause_title: Option<String>,
 }
 
-pub fn run(_params: Params) -> Result<Response, ToolError> {
+pub fn run(params: Params) -> Result<Response, ToolError> {
     let dirs = list_sessions()?;
+    let include_empty = params.include_empty.unwrap_or(false);
     let mut out = Vec::with_capacity(dirs.len());
     for dir in dirs.iter() {
         let dir_name = dir
@@ -35,6 +43,11 @@ pub fn run(_params: Params) -> Result<Response, ToolError> {
             .to_string();
         let meta = read_metadata(dir).ok();
         let events = read_events(dir).unwrap_or_default();
+
+        if !include_empty && events.len() < MIN_USEFUL_EVENT_COUNT {
+            continue;
+        }
+
         let report = smeltr_analyzer::analyze(&events);
         let root_cause_title = report.root_cause().map(|f| f.title.clone());
         let (full_id, started, ended, exit_code) = match meta {
@@ -113,7 +126,10 @@ mod tests {
                 in_flight_ns: 1,
             },
         }]);
-        let resp = run(Params::default()).unwrap();
+        let resp = run(Params {
+            include_empty: Some(true),
+        })
+        .unwrap();
         assert_eq!(resp.sessions.len(), 1);
         let s = &resp.sessions[0];
         assert_eq!(s.event_count, 1);
@@ -122,5 +138,50 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("ImpactingInteractivity"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn excludes_orphan_sessions_by_default() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+
+        // Session 1: minimal (just finalize, no user events).
+        let id1 = SessionId::new();
+        let meta1 = SessionMetadata::now_starting(id1);
+        let w1 = SessionWriter::create(meta1).unwrap();
+        w1.finalize(Some(0), "x".into()).unwrap();
+
+        // Session 2: substantial (30 marks).
+        let id2 = SessionId::new();
+        let meta2 = SessionMetadata::now_starting(id2);
+        let mut w2 = SessionWriter::create(meta2).unwrap();
+        for i in 0..30 {
+            w2.write_event(&Event {
+                ts_mono_ns: i,
+                ts_wall_ns: i,
+                session_id: Uuid::nil(),
+                source: Source::Mark,
+                pid: None,
+                seq: i,
+                payload: Payload::Mark {
+                    label: format!("m{i}"),
+                },
+            })
+            .unwrap();
+        }
+        w2.finalize(Some(0), "x".into()).unwrap();
+
+        // Default: orphan excluded, only the substantial session.
+        let resp = run(Params::default()).unwrap();
+        assert_eq!(resp.sessions.len(), 1);
+        assert_eq!(resp.sessions[0].short_id, id2.short());
+
+        // include_empty=true: both listed.
+        let resp = run(Params {
+            include_empty: Some(true),
+        })
+        .unwrap();
+        assert_eq!(resp.sessions.len(), 2);
     }
 }
