@@ -6,8 +6,13 @@ rust-version.workspace = true
 
 [dependencies]
 smeltr-core = { path = "../smeltr-core" }
+smeltr-daemon = { path = "../smeltr-daemon" }
+smeltr-replay = { path = "../smeltr-replay" }
 ratatui = "0.30"
 crossterm = "0.29"
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "net", "io-util"] }
+ciborium = "0.2"
+serde = { workspace = true }
 
 [dev-dependencies]
 uuid = { workspace = true }
