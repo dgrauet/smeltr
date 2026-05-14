@@ -1,0 +1,25 @@
+{
+  "include": ["src"],
+  "exclude": [
+    "**/__pycache__",
+    "**/.venv",
+    "tests"
+  ],
+  "pythonVersion": "3.10",
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonPath": ".venv/bin/python",
+  "extraPaths": [".venv/lib/python3.10/site-packages", ".venv/lib/python3.14/site-packages"],
+  "typeCheckingMode": "strict",
+  "reportMissingImports": "warning",
+  "reportUnknownMemberType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownParameterType": false,
+  "reportMissingParameterType": false,
+  "reportMissingTypeArgument": false,
+  "reportPrivateUsage": false,
+  "reportUnusedFunction": false,
+  "reportUnusedClass": false,
+  "reportMissingTypeStubs": false
+}

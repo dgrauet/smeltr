@@ -45,6 +45,22 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B", "RUF"]
 
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.10"
+
+[tool.ty.src]
+include = ["src"]
+exclude = ["tests", "**/__pycache__", "**/.venv"]
+
+[tool.ty.rules]
+# mlx is an optional dependency — its absence is documented in README.
+unresolved-import = "ignore"
+# wrapped._smeltr_wrapped is set dynamically; same pattern is used by
+# functools.wraps in stdlib and is a known type-checker false positive.
+unresolved-attribute = "ignore"
+unused-type-ignore-comment = "ignore"
+
 [tool.pyright]
 include = ["src"]
 exclude = ["**/__pycache__", "**/.venv", "tests"]
