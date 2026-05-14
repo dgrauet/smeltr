@@ -21,7 +21,7 @@ dev = [
     "pytest-timeout>=2",
     "pytest-cov>=4",
     "ruff>=0.6",
-    "pyright>=1.1.380",
+    "ty>=0.0.1a13",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -54,31 +54,12 @@ include = ["src"]
 exclude = ["tests", "**/__pycache__", "**/.venv"]
 
 [tool.ty.rules]
-# mlx is an optional dependency — its absence is documented in README.
+# mlx is an optional dependency — its absence is documented in the README.
 unresolved-import = "ignore"
-# wrapped._smeltr_wrapped is set dynamically; same pattern is used by
-# functools.wraps in stdlib and is a known type-checker false positive.
+# wrapped._smeltr_wrapped is set dynamically (same pattern as functools.wraps);
+# a known type-checker false positive that is not worth annotating around.
 unresolved-attribute = "ignore"
 unused-type-ignore-comment = "ignore"
-
-[tool.pyright]
-include = ["src"]
-exclude = ["**/__pycache__", "**/.venv", "tests"]
-pythonVersion = "3.10"
-venvPath = "."
-venv = ".venv"
-typeCheckingMode = "strict"
-reportMissingImports = "warning"
-# Pragmatic relaxations — keep the bug-catching checks, drop bikeshed-noise:
-reportUnknownMemberType = false      # cbor2 / mlx have loose types
-reportUnknownArgumentType = false
-reportUnknownVariableType = false
-reportUnknownParameterType = false   # signal/excepthook callbacks take OS-typed frames
-reportMissingParameterType = false   # forwarded **kwargs in monkey-patches
-reportMissingTypeArgument = false    # generic Queue/Callable in internal queues
-reportPrivateUsage = false           # _emit/_require_attached intentional cross-module
-reportUnusedFunction = false         # test-only _undecorate_eval_for_tests / _drain_panic_for_tests
-reportUnusedClass = false            # _Client used cross-module; pyright src-only sweep miscounts
 
 [tool.coverage.run]
 source = ["src/smeltr"]

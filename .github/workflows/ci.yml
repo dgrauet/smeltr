@@ -46,26 +46,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
       - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version-file: .python-version
-          cache: pip
+        run: uv python install $(cat .python-version)
 
       - name: Install package + dev deps
-        run: pip install -e 'python/[dev]'
+        working-directory: python
+        run: uv pip install --system -e '.[dev]'
 
       - name: ruff lint
-        run: ruff check python/
+        working-directory: python
+        run: ruff check .
 
       - name: ruff format check
-        run: ruff format --check python/
+        working-directory: python
+        run: ruff format --check .
 
-      - name: pyright
-        run: pyright python/src
+      - name: ty check
+        working-directory: python
+        run: ty check
 
       - name: pytest
-        run: pytest python/tests --ignore=python/tests/test_e2e_daemon.py
+        working-directory: python
+        run: pytest tests --ignore=tests/test_e2e_daemon.py
 
   intendant:
     name: intendant audit
