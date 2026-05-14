@@ -18,6 +18,7 @@ members = [
     "crates/smeltr-probes-metal-hook",
     "crates/smeltr-metal-harness",
     "crates/smeltr-tui",
+    "crates/smeltr-mcp",
 ]
 
 [workspace.package]
