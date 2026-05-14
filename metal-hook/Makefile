@@ -6,7 +6,7 @@ CC  := clang
 COMMON := -fPIC -O2 -Wall -Wextra -Werror -mmacosx-version-min=14.0 -Iinclude
 OBJCXXFLAGS := -fobjc-arc $(COMMON)
 CFLAGS := -std=c11 $(COMMON)
-LDFLAGS := -dynamiclib -framework Foundation
+LDFLAGS := -dynamiclib -framework Foundation -framework Metal
 
 OBJS := build/hook.o build/ring.o
 OUT  := build/libmetal_hook.dylib
