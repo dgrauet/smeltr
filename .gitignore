@@ -1,4 +1,29 @@
-/target
+target/
 **/*.rs.bk
-Cargo.lock
 metal-hook/build/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright_cache/
+build/
+dist/
+*.egg-info/
+.venv/
+python/.venv/
+python/.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml

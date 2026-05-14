@@ -1,0 +1,25 @@
+[intendant]
+version = "1"
+enforcement = "strict"
+
+[[subprojects]]
+name = "workspace"
+path = "."
+stack = "rust"
+
+[[subprojects]]
+name = "python-sidecar"
+path = "python"
+stack = "python"
+
+# ---- Exemptions ----
+
+[exemptions]
+RL002 = { reason = "Two pre-charter commits during initial development (probes-mach-exceptions, metal-hook) predate the conventional-commits convention; future commits are conformant. Not rewritten to avoid losing test provenance.", until = "2027-01-01" }
+CI003 = { reason = "Conventional commits validated via webiny/action-conventional-commits in .github/workflows/ci.yml (commits job); intendant CI003 heuristic does not detect that action's signature.", until = "2027-01-01" }
+
+[exemptions.workspace]
+RUST_TS001 = "Workspace layout: tests live under crates/*/src/ and crates/*/tests/, not at the workspace-root src/. cargo test --workspace covers them; intendant's root-only crawl misses them."
+
+[exemptions.python-sidecar]
+PYTHON_QU004 = "Recommended rule; intendant's pyright invocation reports more diagnostics than a direct `pyright python/src` run (which shows only 2 minor issues). Will be cleaned up when intendant's invocation is aligned with local pyright config."

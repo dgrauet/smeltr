@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smeltr"
-dynamic = ["version"]
+version = "0.1.0"
 description = "Python sidecar for the smeltr Metal/MLX observability tool."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,10 +16,13 @@ dependencies = [
 
 [project.optional-dependencies]
 mlx = ["mlx>=0.18"]
-dev = ["pytest>=7", "pytest-timeout>=2"]
-
-[tool.hatch.version]
-path = "src/smeltr/_version.py"
+dev = [
+    "pytest>=7",
+    "pytest-timeout>=2",
+    "pytest-cov>=4",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/smeltr"]
@@ -27,3 +30,48 @@ packages = ["src/smeltr"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 10
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = [
+    "E501",  # line length is enforced by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B", "RUF"]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/__pycache__", "**/.venv", "tests"]
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "strict"
+reportMissingImports = "warning"
+# Pragmatic relaxations — keep the bug-catching checks, drop bikeshed-noise:
+reportUnknownMemberType = false      # cbor2 / mlx have loose types
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownParameterType = false   # signal/excepthook callbacks take OS-typed frames
+reportMissingParameterType = false   # forwarded **kwargs in monkey-patches
+reportMissingTypeArgument = false    # generic Queue/Callable in internal queues
+reportPrivateUsage = false           # _emit/_require_attached intentional cross-module
+reportUnusedFunction = false         # test-only _undecorate_eval_for_tests / _drain_panic_for_tests
+reportUnusedClass = false            # _Client used cross-module; pyright src-only sweep miscounts
+
+[tool.coverage.run]
+source = ["src/smeltr"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+show_missing = true

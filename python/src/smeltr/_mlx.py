@@ -267,5 +267,5 @@ def _undecorate_eval_for_tests() -> None:
     except ImportError:
         return
     current = getattr(mx_core, "eval", None)
-    if getattr(current, "_smeltr_wrapped", False):
+    if current is not None and getattr(current, "_smeltr_wrapped", False):
         mx_core.eval = current._smeltr_original

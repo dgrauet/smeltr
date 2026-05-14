@@ -8,7 +8,7 @@ import platform
 import sys
 import threading
 import time
-from typing import Iterator
+from typing import Generator
 
 from smeltr._client import ClientError, _Client
 from smeltr._proto import SOURCE_PYTHON_SIDECAR
@@ -88,7 +88,7 @@ def now() -> int:
 
 
 @contextlib.contextmanager
-def session(name: str) -> Iterator[None]:
+def session(name: str) -> Generator[None, None, None]:
     _require_attached()
     mark(f"session-open: {name}")
     try:
