@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a new probe, rule, MCP tool, CLI ergonomics improvement, or anything else.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        What can't you do today that you wish you could? Describe the workflow or pain
+        point. "I want X" is fine; "I keep having to do Y manually" is even better.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        How could smeltr address this? Sketch the UX (CLI flag, new command, MCP tool,
+        TUI panel, analyzer rule, …). Don't worry about implementation details.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about and why you didn't pick them.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links to related issues, prior art in other tools, screenshots, etc.

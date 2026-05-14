@@ -1,0 +1,84 @@
+name: Bug report
+description: smeltr did something unexpected, crashed, or produced wrong data.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill in as much as you can — environment details
+        and the exact command help a lot. If smeltr crashed during capture, attach the
+        relevant lines from `~/.smeltr/smeltrd.log` and the session directory if you can.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear, concrete description of the bug. What did you expect, and what did you get?
+      placeholder: |
+        I ran `smeltr record python infer.py` and ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran, in order. Copy-pasteable if possible.
+      placeholder: |
+        1. smeltr daemon install
+        2. smeltr record python my_script.py
+        3. smeltr tui
+      render: bash
+    validations:
+      required: true
+
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Apple Silicon model (M1/M2/M3/…) and RAM.
+      placeholder: M3 Max, 64 GB
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Output of `sw_vers -productVersion`.
+      placeholder: "14.5"
+    validations:
+      required: true
+
+  - type: input
+    id: smeltr-version
+    attributes:
+      label: smeltr version
+      description: Output of `smeltr --version` (and `smeltrd --version` if different).
+      placeholder: "smeltr 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: target-binary
+    attributes:
+      label: Target binary architecture (if relevant)
+      description: |
+        Output of `lipo -archs <your binary>` and `codesign -dv <your binary> 2>&1 | grep flags`.
+        Helps diagnose hook injection failures (arm64 vs arm64e, hardened runtime).
+      placeholder: "arm64; flags=0x10000(runtime)"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon logs / stderr
+      description: |
+        Relevant lines from `~/.smeltr/smeltrd.log` (last 30-50 lines around the
+        failure are usually enough). Include any stderr smeltr printed.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Hypotheses, related sessions, screenshots, etc.
