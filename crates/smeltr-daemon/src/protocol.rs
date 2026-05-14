@@ -35,6 +35,10 @@ pub enum ClientToDaemon {
     AttachMetalHook { pid: u32, ring_path: String },
     /// Detach the metal-hook reader and let final frames flush.
     DetachMetalHook { pid: u32 },
+    /// Streaming subscription: server replies Ack, then pushes one
+    /// EventNotification per event published on the bus until the client
+    /// closes the connection.
+    SubscribeEvents,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,6 +58,9 @@ pub enum DaemonToClient {
     SessionEvents {
         events: Vec<Event>,
         metadata: smeltr_core::session::SessionMetadata,
+    },
+    EventNotification {
+        event: Event,
     },
 }
 
@@ -76,6 +83,35 @@ mod tests {
     #[test]
     fn daemon_msg_round_trip() {
         let m = DaemonToClient::Ack;
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &m).unwrap();
+        let back: DaemonToClient = read_frame(&mut &buf[..]).unwrap().unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn subscribe_events_round_trip() {
+        let m = ClientToDaemon::SubscribeEvents;
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &m).unwrap();
+        let back: ClientToDaemon = read_frame(&mut &buf[..]).unwrap().unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn event_notification_round_trip() {
+        use smeltr_core::event::{Payload, Source};
+        use uuid::Uuid;
+        let ev = Event {
+            ts_mono_ns: 1,
+            ts_wall_ns: 2,
+            session_id: Uuid::nil(),
+            source: Source::Mark,
+            pid: None,
+            seq: 1,
+            payload: Payload::Mark { label: "hi".into() },
+        };
+        let m = DaemonToClient::EventNotification { event: ev.clone() };
         let mut buf = Vec::new();
         write_frame(&mut buf, &m).unwrap();
         let back: DaemonToClient = read_frame(&mut &buf[..]).unwrap().unwrap();

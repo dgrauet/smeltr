@@ -188,6 +188,9 @@ async fn handle_msg(
             probe_runtime.detach_metal_hook(pid).await;
             DaemonToClient::Ack
         }
+        ClientToDaemon::SubscribeEvents => DaemonToClient::Error {
+            message: "SubscribeEvents not yet implemented".into(),
+        },
     }
 }
 
