@@ -32,6 +32,26 @@ async fn main() -> anyhow::Result<()> {
     }
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
+    // Periodic flush so external readers see in-flight events.
+    let flush_session = session.clone();
+    let mut flush_shutdown = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    if let Err(e) = flush_session.flush() {
+                        tracing::warn!(error = %e, "periodic session flush failed");
+                    }
+                }
+                _ = flush_shutdown.changed() => {
+                    if *flush_shutdown.borrow() { break; }
+                }
+            }
+        }
+    });
+
     let sink = Arc::new(probes::DaemonSink {
         session: session.clone(),
         bus: bus.clone(),

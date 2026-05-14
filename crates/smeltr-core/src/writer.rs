@@ -39,6 +39,12 @@ impl SessionWriter {
         &self.dir
     }
 
+    /// Flushes the internal BufWriter so external readers can see in-flight
+    /// events. Does NOT fsync.
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.events.flush()
+    }
+
     pub fn finalize(
         mut self,
         exit_code: Option<i32>,
@@ -133,5 +139,30 @@ mod tests {
         assert!(meta_str.contains("exit_code = 0"));
         let events_size = std::fs::metadata(dir.join("events.cbor")).unwrap().len();
         assert!(events_size > 30, "size {events_size}");
+    }
+
+    #[test]
+    #[serial]
+    fn flush_makes_events_visible_to_reader() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut w = SessionWriter::create(meta).unwrap();
+        w.write_event(&Event {
+            ts_mono_ns: 1,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::Mark,
+            pid: None,
+            seq: 1,
+            payload: Payload::Mark { label: "hi".into() },
+        })
+        .unwrap();
+        let dir = w.dir().to_path_buf();
+        w.flush().unwrap();
+
+        let events = crate::reader::read_events(&dir).unwrap();
+        assert_eq!(events.len(), 1, "expected 1 event after flush");
+
+        w.finalize(Some(0), "2026-05-14T00:00:00Z".into()).unwrap();
     }
 }

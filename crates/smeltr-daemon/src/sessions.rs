@@ -93,6 +93,15 @@ impl ActiveSession {
         Ok(ev)
     }
 
+    /// Flushes the writer if the session is still active. Idempotent.
+    pub fn flush(&self) -> std::io::Result<()> {
+        let mut guard = self.inner.lock().unwrap();
+        match guard.as_mut() {
+            Some(inner) => inner.writer.flush(),
+            None => Ok(()),
+        }
+    }
+
     /// Idempotent. Subsequent calls are no-ops.
     pub fn finalize(&self, exit_code: Option<i32>, reason: &str) -> std::io::Result<()> {
         let _ = self.append(
