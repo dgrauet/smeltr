@@ -108,7 +108,15 @@ fn print_session(
             smeltr_core::event::Payload::SessionEnded { reason, .. } => {
                 format!("session-ended ({reason})")
             }
-            other => format!("{:?}", std::mem::discriminant(other)),
+            smeltr_core::event::Payload::PythonSidecarHello {
+                python_version,
+                mlx_version,
+                argv,
+            } => {
+                let mlx = mlx_version.as_deref().unwrap_or("none");
+                format!("PythonSidecarHello python={python_version} mlx={mlx} argv={argv:?}")
+            }
+            other => format!("{other:?}"),
         };
         println!(
             "  +{:>10}ns  seq={:>4}  src={:?}  {kind}",
