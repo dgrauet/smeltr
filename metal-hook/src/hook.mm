@@ -30,6 +30,13 @@ static atomic_bool    g_enabled = false;
 static const void *kSmeltrQueueDepthKey = &kSmeltrQueueDepthKey;
 static const void *kSmeltrCbCommitTsKey = &kSmeltrCbCommitTsKey;
 
+/* In-flight CB tracking for warning timer. Keys: NSNumber(cb_id). Values:
+   NSNumber(commit_ts) — set to 0 when already warned (one-shot). Always
+   accessed via g_inflight_q. */
+static NSMutableDictionary<NSNumber *, NSNumber *> *g_inflight = nil;
+static dispatch_queue_t g_inflight_q = NULL;
+static dispatch_source_t g_warn_timer = NULL;
+
 @interface SmeltrAtomicU64 : NSObject {
     @public _Atomic uint64_t value;
 }
@@ -148,7 +155,20 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                     atomic_fetch_sub_explicit(&queue_depth_of(q2)->value, 1,
                         memory_order_relaxed);
                 }
+                if (g_inflight_q) {
+                    dispatch_async(g_inflight_q, ^{
+                        [g_inflight removeObjectForKey:@(captured_cb_id)];
+                    });
+                }
             }];
+            // Track in-flight for warning timer.
+            if (g_inflight_q) {
+                uint64_t cb_id_capture = cb_id;
+                uint64_t ts_capture = commit_ts;
+                dispatch_async(g_inflight_q, ^{
+                    g_inflight[@(cb_id_capture)] = @(ts_capture);
+                });
+            }
         } @catch (NSException *e) {
             smeltr_log("exception in commit hook: %s", e.reason.UTF8String);
         }
@@ -383,6 +403,35 @@ static void smeltr_swizzle_device_class(void) {
     }
 }
 
+static void smeltr_warn_init(void) {
+    g_inflight = [NSMutableDictionary new];
+    g_inflight_q = dispatch_queue_create("smeltr.inflight", DISPATCH_QUEUE_SERIAL);
+    g_warn_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_inflight_q);
+    dispatch_source_set_timer(g_warn_timer,
+        dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+        NSEC_PER_SEC,
+        100 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(g_warn_timer, ^{
+        if (!g_ring) return;
+        uint64_t now = smeltr_mono_ns();
+        // Snapshot keys to allow safe mutation below.
+        NSArray<NSNumber *> *keys = [g_inflight.allKeys copy];
+        for (NSNumber *k in keys) {
+            NSNumber *tsBox = g_inflight[k];
+            if (!tsBox) continue;
+            uint64_t t0 = tsBox.unsignedLongLongValue;
+            if (t0 == 0) continue; // already warned
+            uint64_t elapsed = (now > t0) ? (now - t0) : 0;
+            if (elapsed >= 5ULL * 1000000000ULL) {
+                uint64_t cb_id = k.unsignedLongLongValue;
+                smeltr_write_cb_warning(g_ring, now, cb_id, 0, elapsed);
+                g_inflight[k] = @0; // sentinel: warned
+            }
+        }
+    });
+    dispatch_resume(g_warn_timer);
+}
+
 __attribute__((constructor))
 static void smeltr_hook_init(void) {
     const char *disabled = getenv("SMELTR_HOOK_DISABLE");
@@ -402,6 +451,7 @@ static void smeltr_hook_init(void) {
     }
     atomic_store_explicit(&g_enabled, true, memory_order_release);
     smeltr_swizzle_device_class();
+    smeltr_warn_init();
     smeltr_log("loaded; ring=%s, swizzles installed", ring_path);
 }
 
