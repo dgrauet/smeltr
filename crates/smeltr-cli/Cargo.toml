@@ -19,6 +19,7 @@ smeltr-probes-mach-exceptions = { path = "../smeltr-probes-mach-exceptions" }
 smeltr-metal-ring = { path = "../smeltr-metal-ring" }
 smeltr-tui = { path = "../smeltr-tui" }
 smeltr-replay = { path = "../smeltr-replay" }
+smeltr-mcp = { path = "../smeltr-mcp" }
 anyhow.workspace = true
 tokio.workspace = true
 serde.workspace = true

@@ -36,6 +36,8 @@ enum Cmd {
         /// Session id or directory-name suffix to analyze.
         id: Option<String>,
     },
+    /// Run the MCP stdio server (used by LLM clients, e.g. Claude Desktop).
+    Mcp,
     /// Spawn a child process under smeltr's scoped probes.
     Record {
         /// Command to execute.
@@ -65,6 +67,7 @@ fn main() -> anyhow::Result<()> {
             Cmd::Doctor => commands::doctor::run(),
             Cmd::Tui => commands::tui::run_live().await,
             Cmd::Analyze { last, id } => commands::analyze::run(last, id),
+            Cmd::Mcp => commands::mcp::run().await,
             Cmd::Record { cmd, args, no_hook } => {
                 let code = commands::record::run(&cmd, &args, no_hook).await?;
                 std::process::exit(code);

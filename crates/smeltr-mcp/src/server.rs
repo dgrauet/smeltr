@@ -1,9 +1,8 @@
 //! rmcp server wiring: register tools, expose resources, run on stdio.
 //!
-//! The pure dispatch + resource helpers below do NOT depend on rmcp and are
-//! fully testable. The actual rmcp transport in `run_stdio()` requires the
-//! rmcp crate; if its API doesn't match what's coded below, `run_stdio()`
-//! returns a placeholder error and the rest of the file stays valid.
+//! The pure-Rust `dispatch_call` / resource helpers do NOT depend on rmcp and
+//! are fully unit-testable. The `ServerHandler` impl below adapts them to the
+//! rmcp model types, and `run_stdio()` serves them over stdio.
 
 use crate::tools;
 use crate::types::ToolError;
@@ -83,17 +82,168 @@ pub fn read_session_resource(uri: &str) -> Result<serde_json::Value, ToolError> 
     }))
 }
 
+// -- rmcp wiring ------------------------------------------------------------
+
+use std::sync::Arc;
+
+use rmcp::handler::server::ServerHandler;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, Content, ErrorData as McpError, Implementation,
+    JsonObject, ListResourcesResult, ListToolsResult, PaginatedRequestParams, RawResource,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    ServerInfo, Tool,
+};
+use rmcp::service::{NotificationContext, RequestContext, RoleServer};
+
+/// Server handler implementing the 7 smeltr tools and `smeltr://session/*`
+/// resources. Stateless — pure-Rust dispatch delegates to module helpers.
+#[derive(Clone, Default)]
+pub struct SmeltrMcpServer;
+
+fn empty_schema() -> Arc<JsonObject> {
+    let mut obj = JsonObject::new();
+    obj.insert(
+        "type".to_string(),
+        serde_json::Value::String("object".into()),
+    );
+    obj.insert(
+        "properties".to_string(),
+        serde_json::Value::Object(JsonObject::new()),
+    );
+    Arc::new(obj)
+}
+
+fn tool(name: &'static str, description: &'static str) -> Tool {
+    Tool::new(name, description, empty_schema())
+}
+
+fn tool_error_to_mcp(e: ToolError) -> McpError {
+    match e {
+        ToolError::NotFound(s) => McpError::resource_not_found(format!("not found: {s}"), None),
+        ToolError::BadArgs(s) => McpError::invalid_params(s, None),
+        ToolError::Serde(s) => McpError::invalid_params(s.to_string(), None),
+        ToolError::Io(s) => McpError::internal_error(s.to_string(), None),
+    }
+}
+
+impl ServerHandler for SmeltrMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_server_info(Implementation::new("smeltr-mcp", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            "smeltr MCP server: query recorded sessions, crash reports, \
+             Metal command-buffer history, and analyzer findings.",
+        )
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let tools = vec![
+            tool("list_sessions", "List recorded smeltr sessions."),
+            tool(
+                "get_session_summary",
+                "Summarize a session: counts, time range, root cause.",
+            ),
+            tool(
+                "query_events",
+                "Query events from a session with filters (source, kind, limit).",
+            ),
+            tool(
+                "find_correlations",
+                "Find correlated events in a session via the analyzer.",
+            ),
+            tool(
+                "get_crash_report",
+                "Retrieve crash reports captured during a session.",
+            ),
+            tool(
+                "get_metal_cb_history",
+                "Retrieve Metal command-buffer history events for a session.",
+            ),
+            tool("compare_sessions", "Compare two sessions side by side."),
+        ];
+        Ok(ListToolsResult::with_all_items(tools))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = request
+            .arguments
+            .map(serde_json::Value::Object)
+            .unwrap_or(serde_json::Value::Object(JsonObject::new()));
+        match dispatch_call(&request.name, args) {
+            Ok(value) => {
+                let text = serde_json::to_string(&value)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(value);
+                Ok(result)
+            }
+            Err(e) => Err(tool_error_to_mcp(e)),
+        }
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let uris = list_session_resource_uris().map_err(tool_error_to_mcp)?;
+        use rmcp::model::AnnotateAble;
+        let resources: Vec<Resource> = uris
+            .into_iter()
+            .map(|uri| {
+                let name = uri
+                    .strip_prefix("smeltr://session/")
+                    .unwrap_or(&uri)
+                    .to_string();
+                RawResource::new(uri, name)
+                    .with_mime_type("application/json")
+                    .no_annotation()
+            })
+            .collect();
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        let value = read_session_resource(&request.uri).map_err(tool_error_to_mcp)?;
+        let text = serde_json::to_string(&value)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(
+            text,
+            request.uri,
+        )
+        .with_mime_type("application/json")]))
+    }
+
+    async fn on_initialized(&self, _context: NotificationContext<RoleServer>) {}
+}
+
 /// Runs the MCP server on stdio.
 pub async fn run_stdio() -> std::io::Result<()> {
-    // TASK 5 SECOND HALF: rmcp API adaptation deferred. The pure-Rust
-    // dispatch + resource helpers above are wired and tested. Once the rmcp
-    // ServerHandler API surface is mapped, this function should construct a
-    // handler that delegates list_tools / call_tool to `dispatch_call` and
-    // list_resources / read_resource to the helpers above, then serve on
-    // stdio (rmcp::transport::stdio or rmcp::serve_server).
-    Err(std::io::Error::other(
-        "smeltr-mcp::server::run_stdio is not wired to rmcp yet",
-    ))
+    use rmcp::ServiceExt;
+    let transport = rmcp::transport::stdio();
+    let service = SmeltrMcpServer
+        .serve(transport)
+        .await
+        .map_err(std::io::Error::other)?;
+    service.waiting().await.map_err(std::io::Error::other)?;
+    Ok(())
 }
 
 #[cfg(test)]

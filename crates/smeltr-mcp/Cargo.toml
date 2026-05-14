@@ -10,7 +10,7 @@ smeltr-analyzer = { path = "../smeltr-analyzer" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1"
 thiserror = { workspace = true }
-rmcp = "1.7"
+rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
 async-trait = "0.1"
 
