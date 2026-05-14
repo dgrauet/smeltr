@@ -80,16 +80,18 @@ jobs:
   intendant:
     name: intendant audit
     runs-on: ubuntu-latest
-    # Optional governance audit. `intendant` is not (yet) on PyPI; skip until
-    # it's published. Re-enable by removing this `if: false` once available.
-    if: false
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Install intendant
-        run: pipx install intendant || pip install intendant
+        run: pipx install intendant
 
       - name: Audit
         run: intendant audit . --severity required
