@@ -1,5 +1,8 @@
 # smeltr
 
+[![CI](https://github.com/dgrauet/smeltr/actions/workflows/ci.yml/badge.svg)](https://github.com/dgrauet/smeltr/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Metal/MLX observability and crash post-mortem for macOS Apple Silicon.
 
 **Status:** v1 — feature complete, dogfooded against real MLX inference workloads.
