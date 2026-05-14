@@ -14,6 +14,7 @@ members = [
     "crates/smeltr-probes-mach-exceptions",
     "crates/smeltr-metal-ring",
     "crates/smeltr-probes-metal-hook",
+    "crates/smeltr-metal-harness",
 ]
 
 [workspace.package]

@@ -1,0 +1,13 @@
+[package]
+name = "smeltr-metal-harness"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "smeltr-metal-harness"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.30"

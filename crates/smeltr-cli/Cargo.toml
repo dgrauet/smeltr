@@ -27,6 +27,7 @@ time.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+smeltr-core = { path = "../smeltr-core" }
 tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true

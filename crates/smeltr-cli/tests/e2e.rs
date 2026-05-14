@@ -137,6 +137,84 @@ fn record_captures_child_lifecycle() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore)]
+fn record_with_metal_hook_captures_cb_lifecycle() {
+    let dylib_rel = std::path::PathBuf::from("metal-hook/build/libmetal_hook.dylib");
+    let candidates = [
+        dylib_rel.clone(),
+        std::path::PathBuf::from("../").join(&dylib_rel),
+        std::path::PathBuf::from("../../").join(&dylib_rel),
+    ];
+    let dylib = candidates.iter().find(|p| p.exists()).cloned();
+    let Some(dylib) = dylib else {
+        eprintln!("metal-hook dylib not built — run `make -C metal-hook` first. Soft-skipping.");
+        return;
+    };
+    let dylib_abs = std::fs::canonicalize(&dylib).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    let sock = tmp.path().join("smeltr.sock");
+
+    let mut daemon = StdCommand::new(smeltrd_path())
+        .env("SMELTR_HOME", &home)
+        .env("SMELTR_SOCKET", &sock)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn smeltrd");
+    assert!(wait_for_socket(&sock), "daemon never created its socket");
+
+    let harness = assert_cmd::cargo::cargo_bin("smeltr-metal-harness");
+    Command::cargo_bin("smeltr")
+        .unwrap()
+        .env("SMELTR_HOME", &home)
+        .env("SMELTR_SOCKET", &sock)
+        .env("SMELTR_DYLIB", &dylib_abs)
+        .args(["record", harness.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Shut down the daemon so it flushes events to disk.
+    let _ = StdCommand::new("kill")
+        .arg("-TERM")
+        .arg(daemon.id().to_string())
+        .output();
+    let _ = daemon.wait();
+    std::thread::sleep(Duration::from_millis(200));
+
+    let sessions_root = home.join("sessions");
+    let entries: Vec<_> = std::fs::read_dir(&sessions_root)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1);
+
+    let dir = entries[0].path();
+    let events = smeltr_core::reader::read_events(&dir).unwrap();
+
+    use smeltr_core::event::Payload;
+    let mut seen_committed = false;
+    let mut seen_completed = false;
+    let mut seen_buffer = false;
+    for ev in &events {
+        match &ev.payload {
+            Payload::MetalCbCommitted { .. } => seen_committed = true,
+            Payload::MetalCbCompleted { .. } => seen_completed = true,
+            Payload::MetalBufferAlloc { .. } => seen_buffer = true,
+            _ => {}
+        }
+    }
+    assert!(
+        seen_committed,
+        "no MetalCbCommitted in session ({} events)",
+        events.len()
+    );
+    assert!(seen_completed, "no MetalCbCompleted in session");
+    assert!(seen_buffer, "no MetalBufferAlloc in session");
+}
+
+#[test]
 fn doctor_prints_probe_status() {
     let out = Command::cargo_bin("smeltr")
         .unwrap()
