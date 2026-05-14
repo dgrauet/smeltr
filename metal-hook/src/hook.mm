@@ -27,6 +27,56 @@
 static smeltr_ring_t *g_ring = NULL;
 static atomic_bool    g_enabled = false;
 
+static BOOL smeltr_trace_enabled(void) {
+    static BOOL cached = NO;
+    static BOOL checked = NO;
+    if (!checked) {
+        const char *v = getenv("SMELTR_HOOK_TRACE");
+        cached = (v != NULL && v[0] != '\0' && v[0] != '0');
+        checked = YES;
+    }
+    return cached;
+}
+
+#define SMELTR_TRACE(fmt, ...) do { \
+    if (smeltr_trace_enabled()) { \
+        fprintf(stderr, "[smeltr-hook trace] " fmt "\n", ##__VA_ARGS__); \
+    } \
+} while (0)
+
+static void smeltr_dump_command_queue_methods(void) {
+    if (!smeltr_trace_enabled()) return;
+
+    const char *class_names[] = {
+        "AGXG14XFamilyCommandQueue",
+        "AGXG13XFamilyCommandQueue",
+        "AGXG15FamilyCommandQueue",
+        "AGXG14SDevice",
+        "MTLCommandQueue",
+        "_MTLCommandQueue",
+        NULL,
+    };
+    for (int i = 0; class_names[i] != NULL; i++) {
+        Class cls = objc_getClass(class_names[i]);
+        if (cls == nil) {
+            SMELTR_TRACE("class %s: NOT FOUND", class_names[i]);
+            continue;
+        }
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(cls, &count);
+        SMELTR_TRACE("class %s: %u methods", class_names[i], count);
+        for (unsigned int j = 0; j < count; j++) {
+            SEL sel = method_getName(methods[j]);
+            const char *name = sel_getName(sel);
+            if (strstr(name, "ommandBuffer") != NULL ||
+                strstr(name, "ommit") != NULL) {
+                SMELTR_TRACE("  - %s", name);
+            }
+        }
+        if (methods) free(methods);
+    }
+}
+
 static const void *kSmeltrQueueDepthKey = &kSmeltrQueueDepthKey;
 static const void *kSmeltrCbCommitTsKey = &kSmeltrCbCommitTsKey;
 
@@ -94,6 +144,8 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
 /* After exchange, calling [self smeltr_commandBuffer] from inside this method
    invokes the ORIGINAL -[XXX commandBuffer] (because exchange swapped both). */
 - (id<MTLCommandBuffer>)smeltr_commandBuffer {
+    SMELTR_TRACE("swizzled_commandBuffer hit on class=%s",
+                 class_getName([self class]));
     id<MTLCommandBuffer> cb = [self smeltr_commandBuffer];
     if (cb && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
         smeltr_install_cb_swizzle(cb);
@@ -102,6 +154,8 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
 }
 
 - (void)smeltr_commit {
+    SMELTR_TRACE("swizzled_commit hit on class=%s cb=%p",
+                 class_getName([self class]), self);
     if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring) {
         @try {
             id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
@@ -469,6 +523,10 @@ static void smeltr_emit_metal_hook_skipped(const char *reason) {
 
 __attribute__((constructor))
 static void smeltr_hook_init(void) {
+    // Diagnostic: dump AGX command-queue method lists if trace is enabled.
+    // Runs unconditionally so it's useful even when the hook stays inert.
+    smeltr_dump_command_queue_methods();
+
     // Open the ring early so the Skipped frame can be emitted on any skip path.
     const char *ring_path = getenv("SMELTR_RING_PATH");
     if (ring_path && ring_path[0] != '\0') {
