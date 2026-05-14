@@ -1,3 +1,5 @@
 //! MCP tools. Pure logic; no rmcp/serde-rpc plumbing.
 
-// Tool submodules will be added in Tasks 2-4.
+pub mod list_sessions;
+pub mod metal_cb_history;
+pub mod session_summary;
