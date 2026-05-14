@@ -132,12 +132,39 @@ _poll_thread: threading.Thread | None = None
 _poll_stop = threading.Event()
 
 
-def _get_mx_metal() -> Any | None:
+def _get_mlx_memory_api() -> Any | None:
+    """Returns an object exposing get_active_memory/peak/cache_memory.
+
+    Picks the modern API (`mlx.core.get_*_memory`, MLX 0.30+) when
+    available; falls back to the legacy `mlx.core.metal.get_*_memory`
+    accessors (kept reachable via `_get_mx_metal` for back-compat with
+    existing tests).
+
+    Returns None if mlx is not importable or has no memory accessors.
+    """
     try:
         import mlx.core as mx_core
-        return getattr(mx_core, "metal", None)
     except ImportError:
         return None
+    if hasattr(mx_core, "get_active_memory"):
+        return mx_core
+    return _get_mx_metal()
+
+
+def _get_mx_metal() -> Any | None:
+    """Legacy accessor — returns mlx.core.metal if present, else None.
+
+    Kept for backward compatibility with existing tests that monkeypatch
+    this function. New code should prefer `_get_mlx_memory_api`.
+    """
+    try:
+        import mlx.core as mx_core
+    except ImportError:
+        return None
+    legacy = getattr(mx_core, "metal", None)
+    if legacy is not None and hasattr(legacy, "get_active_memory"):
+        return legacy
+    return None
 
 
 def start_polling(poll_hz: float) -> None:
@@ -146,20 +173,20 @@ def start_polling(poll_hz: float) -> None:
     stop_polling()
     if poll_hz <= 0:
         return
-    if _get_mx_metal() is None:
+    if _get_mlx_memory_api() is None:
         return
     _poll_stop.clear()
 
     def _loop():
         period = 1.0 / poll_hz
         while not _poll_stop.is_set():
-            mx_metal = _get_mx_metal()
-            if mx_metal is None:
+            api = _get_mlx_memory_api()
+            if api is None:
                 return
             try:
-                active = int(mx_metal.get_active_memory())
-                peak = int(mx_metal.get_peak_memory())
-                cache = int(mx_metal.get_cache_memory())
+                active = int(api.get_active_memory())
+                peak = int(api.get_peak_memory())
+                cache = int(api.get_cache_memory())
             except Exception:
                 _poll_stop.wait(period)
                 continue

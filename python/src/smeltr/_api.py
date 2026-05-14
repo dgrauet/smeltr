@@ -18,9 +18,23 @@ _client_lock = threading.Lock()
 
 
 def _detect_mlx_version() -> str | None:
+    """Returns the installed MLX version, or None if MLX is unavailable.
+
+    MLX 0.30+ removed `mlx.__version__`; fall back to importlib.metadata
+    which works for any pip-installed package.
+    """
     try:
-        import mlx
-        return getattr(mlx, "__version__", None)
+        import mlx  # noqa: F401  # confirm package is importable first
+    except ImportError:
+        return None
+    try:
+        import importlib.metadata as _md
+        return _md.version("mlx")
+    except Exception:  # PackageNotFoundError or other
+        pass
+    try:
+        import mlx as _mlx_module
+        return getattr(_mlx_module, "__version__", None)
     except ImportError:
         return None
 

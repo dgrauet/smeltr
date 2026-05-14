@@ -80,7 +80,7 @@ def test_polling_emits_memory_poll(monkeypatch, fake_daemon):
         "get_peak_memory":   staticmethod(lambda: 2048),
         "get_cache_memory":  staticmethod(lambda: 512),
     })()
-    monkeypatch.setattr(_mlxmod, "_get_mx_metal", lambda: fake_module)
+    monkeypatch.setattr(_mlxmod, "_get_mlx_memory_api", lambda: fake_module)
 
     smeltr.attach(poll_hz=20.0)
     try:
@@ -103,7 +103,7 @@ def test_polling_disabled_when_poll_hz_zero(fake_daemon, monkeypatch):
         "get_peak_memory":   staticmethod(lambda: 1),
         "get_cache_memory":  staticmethod(lambda: 1),
     })()
-    monkeypatch.setattr(_mlxmod, "_get_mx_metal", lambda: fake_module)
+    monkeypatch.setattr(_mlxmod, "_get_mlx_memory_api", lambda: fake_module)
 
     smeltr.attach(poll_hz=0)
     try:
@@ -117,7 +117,7 @@ def test_polling_disabled_when_poll_hz_zero(fake_daemon, monkeypatch):
 
 def test_polling_skipped_when_mlx_absent(fake_daemon, monkeypatch):
     from smeltr import _mlx as _mlxmod
-    monkeypatch.setattr(_mlxmod, "_get_mx_metal", lambda: None)
+    monkeypatch.setattr(_mlxmod, "_get_mlx_memory_api", lambda: None)
 
     smeltr.attach(poll_hz=20.0)
     try:
@@ -326,3 +326,53 @@ def test_snapshot_streams_falls_back_to_observed_when_mlx_missing(fake_daemon, m
     assert len(snaps) == 1
     streams = snaps[0]["payload"]["streams"]
     assert "gpu" in streams
+
+
+def test_detect_mlx_version_uses_importlib_metadata(monkeypatch):
+    """MLX 0.30+ removed __version__; we must use importlib.metadata."""
+    import importlib.metadata as _md
+    import sys as _sys
+    import types
+
+    # Build a minimal mlx module with NO __version__.
+    fake_root = types.ModuleType("mlx")
+    fake_root.__file__ = "/fake/mlx/__init__.py"
+    monkeypatch.setitem(_sys.modules, "mlx", fake_root)
+
+    monkeypatch.setattr(
+        _md, "version",
+        lambda name: "0.31.2" if name == "mlx" else "?",
+    )
+
+    from smeltr._api import _detect_mlx_version
+
+    assert _detect_mlx_version() == "0.31.2"
+
+
+def test_memory_poll_prefers_modern_mlx_api(fake_daemon, monkeypatch):
+    """When mx.core.get_active_memory exists (MLX 0.30+), prefer it over
+    the legacy mx.core.metal.get_active_memory which emits deprecation
+    warnings.
+    """
+    from smeltr import _mlx as _mlxmod
+
+    fake_api = type("FakeModernAPI", (), {
+        "get_active_memory": staticmethod(lambda: 1234567),
+        "get_peak_memory":   staticmethod(lambda: 9876543),
+        "get_cache_memory":  staticmethod(lambda: 8192),
+    })()
+    monkeypatch.setattr(_mlxmod, "_get_mlx_memory_api", lambda: fake_api)
+
+    smeltr.attach(poll_hz=20.0)
+    try:
+        time.sleep(0.25)
+    finally:
+        smeltr.detach()
+
+    polls = [m for m in fake_daemon.received
+             if m["payload"]["kind"] == "MlxMemoryPoll"]
+    assert len(polls) >= 2, f"only {len(polls)} polls in time window"
+    p0 = polls[0]["payload"]
+    assert p0["active_bytes"] == 1234567
+    assert p0["peak_bytes"] == 9876543
+    assert p0["cache_bytes"] == 8192
