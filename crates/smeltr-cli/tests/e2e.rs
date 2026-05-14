@@ -284,3 +284,34 @@ fn doctor_prints_probe_status() {
         assert!(s.contains(probe), "doctor output missing {probe}:\n{s}");
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn tui_help_lists_subcommand() {
+    let bin = env!("CARGO_BIN_EXE_smeltr");
+    let out = std::process::Command::new(bin)
+        .args(["tui", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "exit={:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Live TUI") || stdout.to_lowercase().contains("tui"));
+}
+
+#[test]
+#[serial_test::serial]
+fn sessions_open_help_lists_speed_flag() {
+    let bin = env!("CARGO_BIN_EXE_smeltr");
+    let out = std::process::Command::new(bin)
+        .args(["sessions", "open", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--speed"), "stdout was:\n{stdout}");
+}

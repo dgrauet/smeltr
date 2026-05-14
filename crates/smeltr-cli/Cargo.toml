@@ -17,6 +17,8 @@ smeltr-probes-thermal = { path = "../smeltr-probes-thermal" }
 smeltr-probes-ioreport = { path = "../smeltr-probes-ioreport" }
 smeltr-probes-mach-exceptions = { path = "../smeltr-probes-mach-exceptions" }
 smeltr-metal-ring = { path = "../smeltr-metal-ring" }
+smeltr-tui = { path = "../smeltr-tui" }
+smeltr-replay = { path = "../smeltr-replay" }
 anyhow.workspace = true
 tokio.workspace = true
 serde.workspace = true

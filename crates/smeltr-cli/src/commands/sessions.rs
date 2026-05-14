@@ -10,12 +10,20 @@ pub enum SessionsCmd {
     Ls,
     /// Show summary + events of a session. Pass an 8-char short id or a full UUID.
     Show { id: String },
+    /// Open a session in the TUI replay mode.
+    Open {
+        id: String,
+        /// Playback speed multiplier (1.0 = real time, 0.0 = as fast as possible).
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+    },
 }
 
 pub async fn run(cmd: SessionsCmd) -> anyhow::Result<()> {
     match cmd {
         SessionsCmd::Ls => ls().await,
         SessionsCmd::Show { id } => show(&id).await,
+        SessionsCmd::Open { id, speed } => crate::commands::tui::run_replay(id, speed).await,
     }
 }
 

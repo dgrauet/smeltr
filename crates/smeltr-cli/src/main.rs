@@ -26,6 +26,8 @@ enum Cmd {
     },
     /// Audit probe availability and permissions.
     Doctor,
+    /// Live TUI: connect to the running daemon and stream events.
+    Tui,
     /// Analyze a session and print the contributing-factor report.
     Analyze {
         /// Use the most recent post-mortem session (or newest if none).
@@ -61,6 +63,7 @@ fn main() -> anyhow::Result<()> {
             Cmd::Mark { label } => commands::mark::run(label).await,
             Cmd::Sessions { sub } => commands::sessions::run(sub).await,
             Cmd::Doctor => commands::doctor::run(),
+            Cmd::Tui => commands::tui::run_live().await,
             Cmd::Analyze { last, id } => commands::analyze::run(last, id),
             Cmd::Record { cmd, args, no_hook } => {
                 let code = commands::record::run(&cmd, &args, no_hook).await?;
