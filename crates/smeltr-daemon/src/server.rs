@@ -184,6 +184,16 @@ async fn handle_msg(
             }
             DaemonToClient::Ack
         }
+        ClientToDaemon::AttachMetalHook { pid, ring_path } => {
+            probe_runtime
+                .attach_metal_hook(pid, std::path::PathBuf::from(ring_path))
+                .await;
+            DaemonToClient::Ack
+        }
+        ClientToDaemon::DetachMetalHook { pid } => {
+            probe_runtime.detach_metal_hook(pid).await;
+            DaemonToClient::Ack
+        }
     }
 }
 

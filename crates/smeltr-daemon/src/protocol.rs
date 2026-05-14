@@ -31,6 +31,10 @@ pub enum ClientToDaemon {
     AttachScopedProbes { pid: u32 },
     /// Detach scoped probes for the given PID and emit a final marker.
     DetachScopedProbes { pid: u32, exit_code: Option<i32> },
+    /// Attach a metal-hook reader to drain the given ring file for the child PID.
+    AttachMetalHook { pid: u32, ring_path: String },
+    /// Detach the metal-hook reader and let final frames flush.
+    DetachMetalHook { pid: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -21,6 +21,7 @@ smeltr-probes-oslog = { path = "../smeltr-probes-oslog" }
 smeltr-probes-ioreport = { path = "../smeltr-probes-ioreport" }
 smeltr-probes-crash-reports = { path = "../smeltr-probes-crash-reports" }
 smeltr-probes-mach-exceptions = { path = "../smeltr-probes-mach-exceptions" }
+smeltr-probes-metal-hook = { path = "../smeltr-probes-metal-hook" }
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

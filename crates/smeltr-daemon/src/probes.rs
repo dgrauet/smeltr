@@ -29,6 +29,7 @@ pub struct ProbeRuntime {
     handle: tokio::sync::Mutex<Option<smeltr_probes_core::SupervisorHandle>>,
     sink: Arc<DaemonSink>,
     scoped: tokio::sync::Mutex<HashMap<u32, smeltr_probes_core::SupervisorHandle>>,
+    metal_hooks: tokio::sync::Mutex<HashMap<u32, smeltr_probes_core::SupervisorHandle>>,
 }
 
 impl ProbeRuntime {
@@ -57,6 +58,7 @@ impl ProbeRuntime {
             handle: tokio::sync::Mutex::new(Some(sup.spawn())),
             sink,
             scoped: tokio::sync::Mutex::new(HashMap::new()),
+            metal_hooks: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -81,7 +83,28 @@ impl ProbeRuntime {
         }
     }
 
+    pub async fn attach_metal_hook(&self, pid: u32, ring_path: std::path::PathBuf) {
+        use smeltr_probes_core::Supervisor;
+        let sink_dyn: smeltr_probes_core::SharedSink = self.sink.clone();
+        let mut sup = Supervisor::new(sink_dyn);
+        sup.add(Box::new(smeltr_probes_metal_hook::MetalHookProbe::new(
+            pid, ring_path,
+        )));
+        self.metal_hooks.lock().await.insert(pid, sup.spawn());
+    }
+
+    pub async fn detach_metal_hook(&self, pid: u32) {
+        let h = self.metal_hooks.lock().await.remove(&pid);
+        if let Some(h) = h {
+            h.shutdown().await;
+        }
+    }
+
     pub async fn shutdown(&self) {
+        let mut mh = std::mem::take(&mut *self.metal_hooks.lock().await);
+        for (_, h) in mh.drain() {
+            h.shutdown().await;
+        }
         let mut scoped = std::mem::take(&mut *self.scoped.lock().await);
         for (_, h) in scoped.drain() {
             h.shutdown().await;
