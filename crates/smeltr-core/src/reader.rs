@@ -164,6 +164,7 @@ mod tests {
     use crate::event::{Payload, Source};
     use crate::session::SessionMetadata;
     use crate::writer::SessionWriter;
+    use serial_test::serial;
     use uuid::Uuid;
 
     fn temp_home() -> tempfile::TempDir {
@@ -173,6 +174,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn write_then_read_back() {
         let _home = temp_home();
         let id = SessionId::new();
@@ -208,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn empty_root_lists_nothing() {
         let _home = temp_home();
         assert!(list_sessions().unwrap().is_empty());

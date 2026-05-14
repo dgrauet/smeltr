@@ -234,6 +234,7 @@ async fn write_msg<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> s
 mod tests {
     use super::*;
     use crate::probes::{DaemonSink, ProbeRuntime};
+    use serial_test::serial;
     use smeltr_core::event::{Payload, Source};
 
     async fn connect() -> UnixStream {
@@ -248,6 +249,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn hello_round_trip() {
         let _home = temp_env();
         let session = Arc::new(ActiveSession::open_new().unwrap());

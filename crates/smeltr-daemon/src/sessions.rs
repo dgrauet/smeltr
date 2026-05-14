@@ -126,6 +126,7 @@ fn now_unix_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use smeltr_core::reader::{list_sessions, read_events, read_metadata};
 
     fn temp_home() -> tempfile::TempDir {
@@ -135,6 +136,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn session_lifecycle_appends_start_and_end() {
         let _home = temp_home();
         let s = ActiveSession::open_new().unwrap();
@@ -157,6 +159,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn finalize_works_even_with_outstanding_arc_clones() {
         let _home = temp_home();
         let s = std::sync::Arc::new(ActiveSession::open_new().unwrap());

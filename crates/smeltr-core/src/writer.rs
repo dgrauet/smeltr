@@ -87,6 +87,7 @@ mod tests {
     use super::*;
     use crate::event::{Payload, Source};
     use crate::session::SessionId;
+    use serial_test::serial;
     use uuid::Uuid;
 
     fn temp_home() -> tempfile::TempDir {
@@ -96,6 +97,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn writer_creates_dir_and_metadata() {
         let _home = temp_home();
         let id = SessionId::new();
@@ -106,6 +108,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn writer_appends_events() {
         let _home = temp_home();
         let meta = SessionMetadata::now_starting(SessionId::new());
