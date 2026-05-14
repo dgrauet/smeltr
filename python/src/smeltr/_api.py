@@ -45,10 +45,14 @@ def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0,
         })
     except ClientError:
         pass
+    from smeltr._mlx import start_polling
+    start_polling(poll_hz)
 
 
 def detach() -> None:
     """Close the daemon connection. Idempotent."""
+    from smeltr._mlx import stop_polling
+    stop_polling()
     global _client
     with _client_lock:
         if _client is not None:

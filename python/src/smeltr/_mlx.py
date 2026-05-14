@@ -89,5 +89,67 @@ def snapshot() -> None:
 
 
 def _reset_for_tests() -> None:
+    stop_polling()
     with _tracked_lock:
         _tracked.clear()
+
+
+# ---- mx.metal polling ----
+
+_poll_thread: threading.Thread | None = None
+_poll_stop = threading.Event()
+
+
+def _get_mx_metal() -> Any | None:
+    try:
+        import mlx.core as mx_core
+        return getattr(mx_core, "metal", None)
+    except ImportError:
+        return None
+
+
+def start_polling(poll_hz: float) -> None:
+    """Start the background memory poller. Safe to call multiple times."""
+    global _poll_thread
+    stop_polling()
+    if poll_hz <= 0:
+        return
+    if _get_mx_metal() is None:
+        return
+    _poll_stop.clear()
+
+    def _loop():
+        period = 1.0 / poll_hz
+        while not _poll_stop.is_set():
+            mx_metal = _get_mx_metal()
+            if mx_metal is None:
+                return
+            try:
+                active = int(mx_metal.get_active_memory())
+                peak = int(mx_metal.get_peak_memory())
+                cache = int(mx_metal.get_cache_memory())
+            except Exception:
+                _poll_stop.wait(period)
+                continue
+            try:
+                _emit({
+                    "kind": "MlxMemoryPoll",
+                    "active_bytes": active,
+                    "peak_bytes": peak,
+                    "cache_bytes": cache,
+                })
+            except Exception:
+                pass
+            _poll_stop.wait(period)
+
+    _poll_thread = threading.Thread(target=_loop, daemon=True, name="smeltr-mx-poll")
+    _poll_thread.start()
+
+
+def stop_polling() -> None:
+    global _poll_thread
+    _poll_stop.set()
+    t = _poll_thread
+    if t is not None:
+        t.join(timeout=2.0)
+    _poll_thread = None

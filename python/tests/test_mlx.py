@@ -70,3 +70,60 @@ def test_snapshot_emits_summary(fake_daemon):
 
 def test_snapshot_skips_when_not_attached():
     smeltr.snapshot()  # no-op, no exception
+
+
+def test_polling_emits_memory_poll(monkeypatch, fake_daemon):
+    from smeltr import _mlx as _mlxmod
+
+    fake_module = type("FakeMxMetal", (), {
+        "get_active_memory": staticmethod(lambda: 1024),
+        "get_peak_memory":   staticmethod(lambda: 2048),
+        "get_cache_memory":  staticmethod(lambda: 512),
+    })()
+    monkeypatch.setattr(_mlxmod, "_get_mx_metal", lambda: fake_module)
+
+    smeltr.attach(poll_hz=20.0)
+    try:
+        time.sleep(0.25)
+    finally:
+        smeltr.detach()
+
+    polls = [m for m in fake_daemon.received
+             if m["payload"]["kind"] == "MlxMemoryPoll"]
+    assert len(polls) >= 2
+    assert polls[0]["payload"]["active_bytes"] == 1024
+    assert polls[0]["payload"]["peak_bytes"] == 2048
+    assert polls[0]["payload"]["cache_bytes"] == 512
+
+
+def test_polling_disabled_when_poll_hz_zero(fake_daemon, monkeypatch):
+    from smeltr import _mlx as _mlxmod
+    fake_module = type("FakeMxMetal", (), {
+        "get_active_memory": staticmethod(lambda: 1),
+        "get_peak_memory":   staticmethod(lambda: 1),
+        "get_cache_memory":  staticmethod(lambda: 1),
+    })()
+    monkeypatch.setattr(_mlxmod, "_get_mx_metal", lambda: fake_module)
+
+    smeltr.attach(poll_hz=0)
+    try:
+        time.sleep(0.1)
+    finally:
+        smeltr.detach()
+    polls = [m for m in fake_daemon.received
+             if m["payload"]["kind"] == "MlxMemoryPoll"]
+    assert polls == []
+
+
+def test_polling_skipped_when_mlx_absent(fake_daemon, monkeypatch):
+    from smeltr import _mlx as _mlxmod
+    monkeypatch.setattr(_mlxmod, "_get_mx_metal", lambda: None)
+
+    smeltr.attach(poll_hz=20.0)
+    try:
+        time.sleep(0.1)
+    finally:
+        smeltr.detach()
+    polls = [m for m in fake_daemon.received
+             if m["payload"]["kind"] == "MlxMemoryPoll"]
+    assert polls == []
