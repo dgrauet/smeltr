@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/smeltr-analyzer",
     "crates/smeltr-core",
     "crates/smeltr-daemon",
     "crates/smeltr-cli",

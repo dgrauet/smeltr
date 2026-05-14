@@ -1,0 +1,12 @@
+[package]
+name = "smeltr-analyzer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+smeltr-core = { path = "../smeltr-core" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+uuid = { workspace = true }
