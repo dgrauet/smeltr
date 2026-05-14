@@ -6,6 +6,8 @@ rust-version.workspace = true
 
 [dependencies]
 smeltr-core = { path = "../smeltr-core" }
+ratatui = "0.30"
+crossterm = "0.29"
 
 [dev-dependencies]
 uuid = { workspace = true }
