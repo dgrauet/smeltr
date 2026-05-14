@@ -189,6 +189,180 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb) {
     });
 }
 
+/* ============ Alloc/free tracking ============ */
+
+static IMP g_orig_buffer_dealloc  = NULL;
+static IMP g_orig_texture_dealloc = NULL;
+static IMP g_orig_heap_dealloc    = NULL;
+
+static void smeltr_buffer_dealloc_replacement(__unsafe_unretained id self, SEL _cmd) {
+    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring) {
+        @try {
+            smeltr_write_buffer_free(g_ring, smeltr_mono_ns(),
+                                     (uint64_t)(uintptr_t)self);
+        } @catch (NSException *e) {
+            smeltr_log("buffer dealloc hook exc: %s", e.reason.UTF8String);
+        }
+    }
+    ((void (*)(__unsafe_unretained id, SEL))g_orig_buffer_dealloc)(self, _cmd);
+}
+
+static void smeltr_texture_dealloc_replacement(__unsafe_unretained id self, SEL _cmd) {
+    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring) {
+        @try {
+            smeltr_write_texture_free(g_ring, smeltr_mono_ns(),
+                                      (uint64_t)(uintptr_t)self);
+        } @catch (NSException *e) {
+            smeltr_log("texture dealloc hook exc: %s", e.reason.UTF8String);
+        }
+    }
+    ((void (*)(__unsafe_unretained id, SEL))g_orig_texture_dealloc)(self, _cmd);
+}
+
+static void smeltr_heap_dealloc_replacement(__unsafe_unretained id self, SEL _cmd) {
+    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring) {
+        @try {
+            smeltr_write_heap_free(g_ring, smeltr_mono_ns(),
+                                   (uint64_t)(uintptr_t)self);
+        } @catch (NSException *e) {
+            smeltr_log("heap dealloc hook exc: %s", e.reason.UTF8String);
+        }
+    }
+    ((void (*)(__unsafe_unretained id, SEL))g_orig_heap_dealloc)(self, _cmd);
+}
+
+static void install_dealloc_hook(Class cls, IMP *orig_slot, IMP replacement) {
+    if (!cls || *orig_slot != NULL) return;
+    SEL sel = sel_registerName("dealloc");
+    // Find dealloc method DIRECTLY on this class (not inherited). If it lives
+    // on a superclass (e.g. NSObject), replacing it would clobber ALL objc
+    // objects' dealloc. In that case, add a fresh dealloc method on this class
+    // that calls the superclass implementation after emitting the event.
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    Method direct = NULL;
+    for (unsigned int i = 0; i < count; i++) {
+        if (method_getName(methods[i]) == sel) { direct = methods[i]; break; }
+    }
+    if (methods) free(methods);
+    if (direct) {
+        *orig_slot = method_setImplementation(direct, replacement);
+        smeltr_log("installed dealloc hook on %s", class_getName(cls));
+    } else {
+        // No direct dealloc — calling super's IMP raw is fragile in practice
+        // (ARC pool teardown crashed on some Metal classes). Skip; we'll miss
+        // free events for these objects but won't destabilize the host.
+        smeltr_log("skipping dealloc hook on %s (no direct dealloc)", class_getName(cls));
+    }
+}
+
+static dispatch_once_t g_heap_suballoc_once;
+
+static void smeltr_install_heap_suballoc_swizzles(id<MTLHeap> heap);
+
+static void smeltr_on_buffer_alloc(id<MTLBuffer> buf, id<MTLHeap> heap /* nullable */) {
+    if (!g_ring) return;
+    @try {
+        install_dealloc_hook(object_getClass(buf), &g_orig_buffer_dealloc,
+                              (IMP)smeltr_buffer_dealloc_replacement);
+        int32_t hp  = heap ? 1 : 0;
+        uint64_t hid = heap ? (uint64_t)(uintptr_t)heap : 0;
+        uint64_t sz  = (uint64_t)[buf length];
+        NSString *lbl = [buf label];
+        const char *lbl_c = lbl ? [lbl UTF8String] : NULL;
+        smeltr_write_buffer_alloc(g_ring, smeltr_mono_ns(),
+            (uint64_t)(uintptr_t)buf, hp, hid, sz, lbl_c);
+    } @catch (NSException *e) {
+        smeltr_log("buffer alloc hook exc: %s", e.reason.UTF8String);
+    }
+}
+
+static void smeltr_on_texture_alloc(id<MTLTexture> tex, id<MTLHeap> heap) {
+    if (!g_ring) return;
+    @try {
+        install_dealloc_hook(object_getClass(tex), &g_orig_texture_dealloc,
+                              (IMP)smeltr_texture_dealloc_replacement);
+        int32_t hp  = heap ? 1 : 0;
+        uint64_t hid = heap ? (uint64_t)(uintptr_t)heap : 0;
+        uint64_t sz  = (uint64_t)[tex allocatedSize];
+        NSString *lbl = [tex label];
+        const char *lbl_c = lbl ? [lbl UTF8String] : NULL;
+        smeltr_write_texture_alloc(g_ring, smeltr_mono_ns(),
+            (uint64_t)(uintptr_t)tex, hp, hid, sz, lbl_c);
+    } @catch (NSException *e) {
+        smeltr_log("texture alloc hook exc: %s", e.reason.UTF8String);
+    }
+}
+
+static void smeltr_on_heap_alloc(id<MTLHeap> heap) {
+    if (!g_ring) return;
+    @try {
+        smeltr_install_heap_suballoc_swizzles(heap);
+        install_dealloc_hook(object_getClass(heap), &g_orig_heap_dealloc,
+                              (IMP)smeltr_heap_dealloc_replacement);
+        uint64_t sz = (uint64_t)[heap size];
+        NSString *lbl = [heap label];
+        const char *lbl_c = lbl ? [lbl UTF8String] : NULL;
+        smeltr_write_heap_alloc(g_ring, smeltr_mono_ns(),
+            (uint64_t)(uintptr_t)heap, sz, lbl_c);
+    } @catch (NSException *e) {
+        smeltr_log("heap alloc hook exc: %s", e.reason.UTF8String);
+    }
+}
+
+/* MTLDevice swizzles for newBufferWithLength:options: and newHeapWithDescriptor: */
+@interface NSObject (SmeltrDeviceAllocHook)
+- (id<MTLBuffer>)smeltr_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts;
+- (id<MTLHeap>)smeltr_newHeapWithDescriptor:(MTLHeapDescriptor *)desc;
+@end
+
+@implementation NSObject (SmeltrDeviceAllocHook)
+- (id<MTLBuffer>)smeltr_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts {
+    id<MTLBuffer> b = [self smeltr_newBufferWithLength:length options:opts];
+    if (b) smeltr_on_buffer_alloc(b, nil);
+    return b;
+}
+- (id<MTLHeap>)smeltr_newHeapWithDescriptor:(MTLHeapDescriptor *)desc {
+    id<MTLHeap> h = [self smeltr_newHeapWithDescriptor:desc];
+    if (h) smeltr_on_heap_alloc(h);
+    return h;
+}
+@end
+
+/* MTLHeap swizzles for sub-allocations. Same selector names as on the device
+   category, but they live on a different concrete class, which is fine. */
+@interface NSObject (SmeltrHeapAllocHook)
+- (id<MTLBuffer>)smeltr_heap_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts;
+- (id<MTLTexture>)smeltr_heap_newTextureWithDescriptor:(MTLTextureDescriptor *)desc;
+@end
+
+@implementation NSObject (SmeltrHeapAllocHook)
+- (id<MTLBuffer>)smeltr_heap_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts {
+    id<MTLBuffer> b = [self smeltr_heap_newBufferWithLength:length options:opts]; // original
+    if (b) smeltr_on_buffer_alloc(b, (id<MTLHeap>)self);
+    return b;
+}
+- (id<MTLTexture>)smeltr_heap_newTextureWithDescriptor:(MTLTextureDescriptor *)desc {
+    id<MTLTexture> t = [self smeltr_heap_newTextureWithDescriptor:desc]; // original
+    if (t) smeltr_on_texture_alloc(t, (id<MTLHeap>)self);
+    return t;
+}
+@end
+
+static void smeltr_install_heap_suballoc_swizzles(id<MTLHeap> heap) {
+    dispatch_once(&g_heap_suballoc_once, ^{
+        Class hcls = object_getClass(heap);
+        if (swizzle_instance(hcls, @selector(newBufferWithLength:options:),
+                                    @selector(smeltr_heap_newBufferWithLength:options:))) {
+            smeltr_log("swizzled %s.newBufferWithLength:options: (heap)", class_getName(hcls));
+        }
+        if (swizzle_instance(hcls, @selector(newTextureWithDescriptor:),
+                                    @selector(smeltr_heap_newTextureWithDescriptor:))) {
+            smeltr_log("swizzled %s.newTextureWithDescriptor: (heap)", class_getName(hcls));
+        }
+    });
+}
+
 static void smeltr_swizzle_device_class(void) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     if (!d) { smeltr_log("no Metal device available"); return; }
@@ -198,6 +372,14 @@ static void smeltr_swizzle_device_class(void) {
         smeltr_log("swizzled %s.newCommandQueue", class_getName(dcls));
     } else {
         smeltr_log("failed to swizzle %s.newCommandQueue", class_getName(dcls));
+    }
+    if (swizzle_instance(dcls, @selector(newBufferWithLength:options:),
+                                @selector(smeltr_newBufferWithLength:options:))) {
+        smeltr_log("swizzled %s.newBufferWithLength:options:", class_getName(dcls));
+    }
+    if (swizzle_instance(dcls, @selector(newHeapWithDescriptor:),
+                                @selector(smeltr_newHeapWithDescriptor:))) {
+        smeltr_log("swizzled %s.newHeapWithDescriptor:", class_getName(dcls));
     }
 }
 
