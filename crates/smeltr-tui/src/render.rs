@@ -85,7 +85,7 @@ fn block(title: String, focused: bool) -> Block<'static> {
 fn render_timeline(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCtx) {
     let pause_tag = if ctx.paused { " [PAUSED]" } else { "" };
     let title = format!(
-        "Timeline · smeltr · {} · session: {} · events: {}{}",
+        "smeltr · {} · session: {} · events: {}{}",
         ctx.mode_label,
         state.session_short.as_deref().unwrap_or("?"),
         state.events_total,

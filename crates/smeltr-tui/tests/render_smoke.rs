@@ -75,7 +75,8 @@ fn render_after_synthetic_events_shows_all_panels() {
     let d = dump(buf);
     for marker in [
         "smeltr",
-        "Timeline",
+        "session:",
+        "events:",
         "Metal CBs",
         "Memory",
         "MLX (sidecar)",
