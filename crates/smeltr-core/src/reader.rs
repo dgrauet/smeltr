@@ -2,7 +2,7 @@
 
 use crate::codec::read_frame;
 use crate::event::Event;
-use crate::session::{metadata_path, sessions_root, SessionId, SessionKind, SessionMetadata};
+use crate::session::{metadata_path, sessions_root, SessionId, SessionMetadata};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -88,99 +88,15 @@ fn read_loop<R: std::io::Read>(r: &mut R, path: &Path) -> std::io::Result<Vec<Ev
     Ok(out)
 }
 
-/// Minimal parser matching what `toml_simple` writes. Single-pass, line-based.
 fn parse_metadata(text: &str) -> Option<SessionMetadata> {
-    let mut session_id = None;
-    let mut started = None;
-    let mut ended = None;
-    let mut host = None;
-    let mut mlx_version = None;
-    let mut exit_code: Option<i32> = None;
-    let mut argv: Vec<String> = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (k, v) = line.split_once('=')?;
-        let k = k.trim();
-        let v = v.trim();
-        match k {
-            "session_id" => session_id = Some(unquote(v)?.parse().ok()?),
-            "started_rfc3339" => started = Some(unquote(v)?),
-            "ended_rfc3339" => ended = Some(unquote(v)?),
-            "host" => host = Some(unquote(v)?),
-            "mlx_version" => mlx_version = Some(unquote(v)?),
-            "exit_code" => exit_code = v.parse().ok(),
-            "argv" => argv = parse_argv(v)?,
-            _ => {}
-        }
-    }
-    Some(SessionMetadata {
-        session_id: session_id?,
-        started_rfc3339: started?,
-        ended_rfc3339: ended,
-        host: host.unwrap_or_else(|| "unknown".into()),
-        mlx_version,
-        exit_code,
-        argv,
-        kind: SessionKind::Ambient,
-    })
-}
-
-fn unquote(v: &str) -> Option<String> {
-    let v = v.trim();
-    if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
-        Some(
-            v[1..v.len() - 1]
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\"),
-        )
-    } else {
-        None
-    }
-}
-
-fn parse_argv(v: &str) -> Option<Vec<String>> {
-    let v = v.trim();
-    if !v.starts_with('[') || !v.ends_with(']') {
-        return None;
-    }
-    let inner = &v[1..v.len() - 1];
-    if inner.trim().is_empty() {
-        return Some(vec![]);
-    }
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_str = false;
-    let mut prev_escape = false;
-    for ch in inner.chars() {
-        if in_str {
-            if prev_escape {
-                cur.push(ch);
-                prev_escape = false;
-            } else if ch == '\\' {
-                prev_escape = true;
-            } else if ch == '"' {
-                out.push(cur.clone());
-                cur.clear();
-                in_str = false;
-            } else {
-                cur.push(ch);
-            }
-        } else if ch == '"' {
-            in_str = true;
-        }
-    }
-    Some(out)
+    toml::from_str::<SessionMetadata>(text).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::{Payload, Source};
-    use crate::session::SessionMetadata;
+    use crate::session::{SessionKind, SessionMetadata};
     use crate::writer::SessionWriter;
     use serial_test::serial;
     use uuid::Uuid;
@@ -272,5 +188,29 @@ mod tests {
         let events = read_events(&dir).unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].payload, Payload::Mark { ref label } if label == "legacy"));
+    }
+
+    #[test]
+    #[serial]
+    fn read_metadata_parses_scoped_kind() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.kind = SessionKind::Scoped {
+            pid: 9999,
+            argv: vec!["python".into(), "infer.py".into()],
+        };
+        let writer = SessionWriter::create(meta.clone()).unwrap();
+        let dir = writer.dir().to_path_buf();
+        drop(writer);
+        let parsed = read_metadata(&dir).unwrap();
+        match parsed.kind {
+            SessionKind::Scoped { pid, ref argv } => {
+                assert_eq!(pid, 9999);
+                assert_eq!(argv, &vec!["python".to_string(), "infer.py".to_string()]);
+            }
+            SessionKind::Ambient => panic!("expected Scoped, got Ambient"),
+        }
     }
 }
