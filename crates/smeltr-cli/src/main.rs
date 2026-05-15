@@ -36,6 +36,26 @@ enum Cmd {
         /// Session id or directory-name suffix to analyze.
         id: Option<String>,
     },
+    /// Per-module GPU time breakdown for an MLX inference session.
+    Breakdown {
+        /// Use the most recent session.
+        #[arg(long)]
+        last: bool,
+        /// Session id or directory-name suffix.
+        id: Option<String>,
+        /// Max rows in the table output.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        /// Max tree depth in the table output.
+        #[arg(long, default_value_t = 6)]
+        depth: u16,
+        /// Write a folded-stack flamegraph SVG here.
+        #[arg(long)]
+        flamegraph: Option<std::path::PathBuf>,
+        /// Write a Chrome Trace Event Format JSON here.
+        #[arg(long)]
+        chrome_trace: Option<std::path::PathBuf>,
+    },
     /// Run the MCP stdio server (used by LLM clients, e.g. Claude Desktop).
     Mcp,
     /// Spawn a child process under smeltr's scoped probes.
@@ -67,6 +87,14 @@ fn main() -> anyhow::Result<()> {
             Cmd::Doctor => commands::doctor::run(),
             Cmd::Tui => commands::tui::run_live().await,
             Cmd::Analyze { last, id } => commands::analyze::run(last, id),
+            Cmd::Breakdown {
+                last,
+                id,
+                top,
+                depth,
+                flamegraph,
+                chrome_trace,
+            } => commands::breakdown::run(id, last, top, depth, flamegraph, chrome_trace),
             Cmd::Mcp => commands::mcp::run().await,
             Cmd::Record { cmd, args, no_hook } => {
                 let code = commands::record::run(&cmd, &args, no_hook).await?;

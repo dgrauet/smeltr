@@ -6,7 +6,10 @@ pub mod rule;
 pub mod rules;
 
 pub mod breakdown;
-pub use breakdown::{compute as compute_breakdown, BreakdownError, Diagnostics, ModuleBreakdown};
+pub use breakdown::{
+    compute as compute_breakdown, render_chrome_trace, render_table, BreakdownError, Diagnostics,
+    ModuleBreakdown,
+};
 
 pub use finding::{Category, EvidenceRef, Finding, Severity};
 pub use report::Report;
