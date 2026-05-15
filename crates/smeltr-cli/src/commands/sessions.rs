@@ -37,7 +37,7 @@ async fn ls() -> anyhow::Result<()> {
         },
         Err(_) => None,
     };
-    let dirs = match from_daemon {
+    let dirs: Vec<String> = match from_daemon {
         Some(d) => d,
         None => list_sessions()?
             .into_iter()
@@ -48,8 +48,20 @@ async fn ls() -> anyhow::Result<()> {
         println!("(no sessions)");
         return Ok(());
     }
-    for d in dirs {
-        println!("{d}");
+    let root = smeltr_core::session::sessions_root();
+    for d in &dirs {
+        let dir = root.join(d);
+        let kind_label = match read_metadata(&dir) {
+            Ok(meta) => match meta.kind {
+                smeltr_core::session::SessionKind::Ambient => "ambient".to_string(),
+                smeltr_core::session::SessionKind::Scoped { pid, argv } => {
+                    let cmd = argv.first().map(|s| s.as_str()).unwrap_or("?");
+                    format!("scoped pid={pid} cmd={cmd}")
+                }
+            },
+            Err(_) => "?".to_string(),
+        };
+        println!("{d}  [{kind_label}]");
     }
     Ok(())
 }
@@ -310,5 +322,57 @@ fn human_bytes(b: u64) -> String {
         format!("{:.0} KiB", b as f64 / KIB as f64)
     } else {
         format!("{b} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serial_test::serial;
+    use smeltr_core::session::{SessionId, SessionKind, SessionMetadata};
+    use smeltr_core::writer::SessionWriter;
+
+    #[test]
+    #[serial]
+    fn metadata_kind_renders_distinct_labels() {
+        // Direct unit on the formatting logic — no daemon, no socket.
+        // We just exercise the match on SessionKind that ls() uses.
+        let amb = SessionKind::Ambient;
+        let sc = SessionKind::Scoped {
+            pid: 4242,
+            argv: vec!["/bin/sleep".into(), "1".into()],
+        };
+        let render = |k: &SessionKind| match k {
+            SessionKind::Ambient => "ambient".to_string(),
+            SessionKind::Scoped { pid, argv } => {
+                let cmd = argv.first().map(|s| s.as_str()).unwrap_or("?");
+                format!("scoped pid={pid} cmd={cmd}")
+            }
+        };
+        assert_eq!(render(&amb), "ambient");
+        assert_eq!(render(&sc), "scoped pid=4242 cmd=/bin/sleep");
+    }
+
+    #[test]
+    #[serial]
+    fn metadata_persisted_kind_round_trip() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.kind = SessionKind::Scoped {
+            pid: 999,
+            argv: vec!["python".into(), "x.py".into()],
+        };
+        let w = SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), "test".into()).unwrap();
+        let parsed = smeltr_core::reader::read_metadata(&dir).unwrap();
+        match parsed.kind {
+            SessionKind::Scoped { pid, argv } => {
+                assert_eq!(pid, 999);
+                assert_eq!(argv[0], "python");
+            }
+            _ => panic!("expected Scoped"),
+        }
     }
 }

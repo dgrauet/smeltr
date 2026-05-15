@@ -68,7 +68,9 @@ fn end_to_end_mark_then_show() {
         .clone();
     let listing = String::from_utf8(out).unwrap();
     let line = listing.lines().next().expect("at least one session listed");
-    let short = line.rsplit('-').next().unwrap();
+    // Line format is "<dirname>  [<kind>]"; take the dirname token first.
+    let dirname = line.split_whitespace().next().unwrap();
+    let short = dirname.rsplit('-').next().unwrap();
 
     // Shut down the daemon so it flushes events to disk.
     let _ = StdCommand::new("kill")
