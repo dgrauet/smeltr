@@ -175,3 +175,30 @@ def test_uninstall_restores_original_call():
     assert after_module_call == before_module_call
     assert after_linear_call == before_linear_call
     assert getattr(nn.Module.__call__, "_smeltr_wrapped", False) is False
+
+
+def test_mlx_eval_payload_includes_module_stack():
+    _modules._reset_for_tests()
+    pytest.importorskip("mlx.core")
+    pytest.importorskip("mlx.nn")
+    import mlx.core as mx
+    import mlx.nn as nn
+    from smeltr import _mlx
+
+    events, fake = _fake_emit_recorder()
+    with patch.object(_modules, "_emit", fake), patch("smeltr._mlx._emit", fake):
+        _modules.install()
+        _mlx.decorate_eval()
+        try:
+            layer = nn.Linear(2, 2)
+            y = layer(mx.zeros((1, 2)))
+            mx.eval(y)
+        finally:
+            _mlx._undecorate_eval_for_tests()
+            _modules.uninstall()
+
+    entered = [e for e in events if e["kind"] == "MlxEvalEntered"]
+    assert len(entered) >= 1
+    for ev in entered:
+        assert "module_stack" in ev
+        assert isinstance(ev["module_stack"], list)
