@@ -1,5 +1,5 @@
 use clap::Parser;
-use smeltr_daemon::{bus, probes, server, sessions};
+use smeltr_daemon::{bus, probes, server, session_router, sessions};
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -24,11 +24,16 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(60),
     ));
     let bus = bus::Bus::new();
-    let session = Arc::new(sessions::ActiveSession::open_new_full(
+    let ambient = Arc::new(sessions::ActiveSession::open_new_full(
         Some(flight_recorder.clone()),
         Some(bus.clone()),
     )?);
-    tracing::info!(session = %session.id(), "active session opened");
+    tracing::info!(session = %ambient.id(), "active session opened");
+    let router = Arc::new(session_router::SessionRouter::new(
+        ambient.clone(),
+        Some(flight_recorder.clone()),
+        Some(bus.clone()),
+    ));
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Write PID file for `smeltr daemon stop`.
@@ -39,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
     // Periodic flush so external readers see in-flight events.
-    let flush_session = session.clone();
+    let flush_router = router.clone();
     let mut flush_shutdown = shutdown_tx.subscribe();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -47,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    if let Err(e) = flush_session.flush() {
+                    if let Err(e) = flush_router.flush_all() {
                         tracing::warn!(error = %e, "periodic session flush failed");
                     }
                 }
@@ -60,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Post-mortem trigger watcher: subscribe to bus, flush flight recorder on
     // crash-like events, and emit a PostMortemFlushed event back into the
-    // active session.
-    let trigger_session = session.clone();
+    // ambient session.
+    let trigger_session = ambient.clone();
     let trigger_fr = flight_recorder.clone();
     let mut bus_rx = bus.subscribe();
     let mut trigger_shutdown = shutdown_tx.subscribe();
@@ -112,13 +117,14 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let sink = Arc::new(probes::DaemonSink {
-        session: session.clone(),
+        session: ambient.clone(),
         bus: bus.clone(),
+        router: router.clone(),
     });
     let probe_runtime = Arc::new(probes::ProbeRuntime::start_global(sink));
 
     let server = server::Server::bind(
-        session.clone(),
+        router.clone(),
         bus.clone(),
         probe_runtime.clone(),
         shutdown_tx.clone(),
@@ -148,9 +154,9 @@ async fn main() -> anyhow::Result<()> {
 
     probe_runtime.shutdown().await;
 
-    // Finalize session (idempotent, safe with outstanding Arc clones).
-    if let Err(e) = session.finalize(Some(0), "daemon shutdown") {
-        tracing::error!(error = %e, "failed to finalize session on shutdown");
+    // Finalize all sessions (ambient + any remaining scoped) on graceful shutdown.
+    if let Err(e) = router.finalize_all("daemon shutdown") {
+        tracing::error!(error = %e, "failed to finalize sessions on shutdown");
     }
 
     let _ = std::fs::remove_file(&pid_path);

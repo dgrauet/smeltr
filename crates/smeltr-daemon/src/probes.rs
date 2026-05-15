@@ -1,6 +1,7 @@
-//! Wires per-source probes into the active session + broadcast bus.
+//! Wires per-source probes into the session router + broadcast bus.
 
 use crate::bus::Bus;
+use crate::session_router::SessionRouter;
 use crate::sessions::ActiveSession;
 use smeltr_core::event::{Payload, Source};
 use smeltr_probes_core::sink::EventSink;
@@ -8,20 +9,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Bridges probe emissions into the active session + broadcast bus.
+/// Bridges probe emissions into the session router + broadcast bus.
 ///
-/// Note: `ActiveSession::append` itself publishes to the bus when constructed
-/// via `open_new_full(..., Some(bus))`, so this sink only needs to call
-/// `append`. The `bus` field is retained for use by the server (e.g. live
-/// subscribers, scope attach paths).
+/// The router dispatches each event to the correct session (scoped for a
+/// known PID, ambient otherwise). `SessionRouter::append` also publishes
+/// to the bus for sessions opened with a `Bus` instance.
 pub struct DaemonSink {
     pub session: Arc<ActiveSession>,
     pub bus: Bus,
+    pub router: Arc<SessionRouter>,
 }
 
 impl EventSink for DaemonSink {
     fn emit(&self, source: Source, pid: Option<u32>, payload: Payload) {
-        if let Err(e) = self.session.append(source, pid, payload) {
+        if let Err(e) = self.router.append(source, pid, payload) {
             tracing::warn!(error = %e, "session append failed");
         }
     }
