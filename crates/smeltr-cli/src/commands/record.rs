@@ -136,7 +136,7 @@ pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i3
 
     // Attach scoped probes.
     let resp = client
-        .request(ClientToDaemon::AttachScopedProbes { pid })
+        .request(ClientToDaemon::AttachScopedProbes { pid, argv: vec![] })
         .await?;
     if !matches!(resp, DaemonToClient::Ack) {
         let _ = child.kill();

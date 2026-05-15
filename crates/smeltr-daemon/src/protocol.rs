@@ -27,8 +27,13 @@ pub enum ClientToDaemon {
     /// Ask the daemon to stop cleanly.
     Shutdown,
     /// Attach scoped probes (mach-exceptions, pid-filtered crash reports) to
-    /// the given child PID. Used by `smeltr record`.
-    AttachScopedProbes { pid: u32 },
+    /// the given PID. The daemon also opens a Scoped session for this PID
+    /// from this point until DetachScopedProbes finalizes it.
+    AttachScopedProbes {
+        pid: u32,
+        #[serde(default)]
+        argv: Vec<String>,
+    },
     /// Detach scoped probes for the given PID and emit a final marker.
     DetachScopedProbes { pid: u32, exit_code: Option<i32> },
     /// Attach a metal-hook reader to drain the given ring file for the child PID.
@@ -68,6 +73,45 @@ pub enum DaemonToClient {
 mod tests {
     use super::*;
     use smeltr_core::codec::{read_frame, write_frame};
+
+    #[test]
+    fn attach_scoped_probes_decodes_legacy_without_argv() {
+        // Old client sent just `{ "op": "AttachScopedProbes", "pid": 4242 }`.
+        // New deserializer must accept it, defaulting argv to [].
+        let legacy_cbor = {
+            use ciborium::value::Value;
+            let msg = Value::Map(vec![
+                (
+                    Value::Text("op".into()),
+                    Value::Text("AttachScopedProbes".into()),
+                ),
+                (Value::Text("pid".into()), Value::Integer(4242_i64.into())),
+            ]);
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&msg, &mut buf).unwrap();
+            buf
+        };
+        let decoded: ClientToDaemon = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        match decoded {
+            ClientToDaemon::AttachScopedProbes { pid, argv } => {
+                assert_eq!(pid, 4242);
+                assert!(argv.is_empty());
+            }
+            other => panic!("expected AttachScopedProbes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_scoped_probes_round_trips_argv() {
+        let msg = ClientToDaemon::AttachScopedProbes {
+            pid: 4242,
+            argv: vec!["python".into(), "script.py".into()],
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&msg, &mut buf).unwrap();
+        let decoded: ClientToDaemon = ciborium::de::from_reader(&buf[..]).unwrap();
+        assert_eq!(decoded, msg);
+    }
 
     #[test]
     fn client_msg_round_trip() {

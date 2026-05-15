@@ -207,7 +207,7 @@ async fn handle_msg(
             let _ = shutdown_tx.send(true);
             DaemonToClient::Ack
         }
-        ClientToDaemon::AttachScopedProbes { pid } => {
+        ClientToDaemon::AttachScopedProbes { pid, argv: _ } => {
             probe_runtime.attach_scoped(pid).await;
             DaemonToClient::Ack
         }
