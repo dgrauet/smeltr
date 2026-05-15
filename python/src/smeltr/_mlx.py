@@ -260,9 +260,9 @@ def decorate_eval() -> None:
 
     def wrapped(*args, **kwargs):
         call_id = _next_call_id()
-        from smeltr._modules import _current_stack as _smeltr_current_stack
-
         try:
+            from smeltr._modules import _current_stack as _smeltr_current_stack
+
             _emit(
                 {
                     "kind": "MlxEvalEntered",

@@ -185,14 +185,22 @@ def test_mlx_eval_payload_includes_module_stack():
     import mlx.nn as nn
     from smeltr import _mlx
 
+    class EvalInside(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = nn.Linear(2, 2)
+
+        def __call__(self, x):
+            y = self.lin(x)
+            mx.eval(y)
+            return y
+
     events, fake = _fake_emit_recorder()
     with patch.object(_modules, "_emit", fake), patch("smeltr._mlx._emit", fake):
         _modules.install()
         _mlx.decorate_eval()
         try:
-            layer = nn.Linear(2, 2)
-            y = layer(mx.zeros((1, 2)))
-            mx.eval(y)
+            EvalInside()(mx.zeros((1, 2)))
         finally:
             _mlx._undecorate_eval_for_tests()
             _modules.uninstall()
@@ -202,3 +210,7 @@ def test_mlx_eval_payload_includes_module_stack():
     for ev in entered:
         assert "module_stack" in ev
         assert isinstance(ev["module_stack"], list)
+    assert any(len(ev["module_stack"]) > 0 for ev in entered), (
+        f"expected at least one MlxEvalEntered with a non-empty module_stack; "
+        f"got: {[ev['module_stack'] for ev in entered]}"
+    )
