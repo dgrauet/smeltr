@@ -2,7 +2,7 @@
 
 use crate::codec::read_frame;
 use crate::event::Event;
-use crate::session::{metadata_path, sessions_root, SessionId, SessionMetadata};
+use crate::session::{metadata_path, sessions_root, SessionId, SessionKind, SessionMetadata};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -125,6 +125,7 @@ fn parse_metadata(text: &str) -> Option<SessionMetadata> {
         mlx_version,
         exit_code,
         argv,
+        kind: SessionKind::Ambient,
     })
 }
 

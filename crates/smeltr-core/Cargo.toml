@@ -18,3 +18,4 @@ zstd = "0.13"
 [dev-dependencies]
 tempfile.workspace = true
 serial_test = "3"
+toml = "0.8"
