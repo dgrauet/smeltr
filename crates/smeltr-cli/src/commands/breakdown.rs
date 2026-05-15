@@ -14,8 +14,7 @@ pub fn run(
     flamegraph: Option<PathBuf>,
     chrome_trace: Option<PathBuf>,
 ) -> Result<()> {
-    let _ = last; // kept for parity with `analyze`; resolution picks newest by default
-    let dir = resolve_session(id)?;
+    let dir = resolve_session(last, id)?;
     let events =
         read_events(&dir).with_context(|| format!("reading events from {}", dir.display()))?;
     if events.is_empty() {
@@ -69,12 +68,12 @@ fn write_flamegraph(path: &Path, root: &ModuleBreakdown) -> Result<()> {
     Ok(())
 }
 
-fn resolve_session(id: Option<String>) -> Result<PathBuf> {
+fn resolve_session(arg_last: bool, session_id: Option<String>) -> Result<PathBuf> {
     let sessions = list_sessions().context("listing sessions")?;
     if sessions.is_empty() {
         return Err(anyhow!("no sessions found under SMELTR_HOME"));
     }
-    if let Some(id) = id {
+    if let Some(id) = session_id {
         for dir in sessions.iter().rev() {
             if dir
                 .file_name()
@@ -87,5 +86,18 @@ fn resolve_session(id: Option<String>) -> Result<PathBuf> {
         }
         return Err(anyhow!("session {id} not found"));
     }
-    Ok(sessions.last().cloned().unwrap())
+    if arg_last {
+        if let Some(pm) = sessions.iter().rev().find(|d| {
+            d.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("post-mortem-"))
+                .unwrap_or(false)
+        }) {
+            return Ok(pm.clone());
+        }
+    }
+    sessions
+        .last()
+        .cloned()
+        .ok_or_else(|| anyhow!("no sessions found under SMELTR_HOME"))
 }
