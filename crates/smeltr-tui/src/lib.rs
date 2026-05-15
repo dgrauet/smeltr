@@ -1,6 +1,7 @@
 //! TUI for smeltr.
 
 pub mod app;
+pub mod breakdown;
 pub mod live;
 pub mod render;
 pub mod replay;

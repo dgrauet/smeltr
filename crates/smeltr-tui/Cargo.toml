@@ -8,6 +8,7 @@ rust-version.workspace = true
 smeltr-core = { path = "../smeltr-core" }
 smeltr-daemon = { path = "../smeltr-daemon" }
 smeltr-replay = { path = "../smeltr-replay" }
+smeltr-analyzer = { path = "../smeltr-analyzer" }
 ratatui = "0.30"
 crossterm = "0.29"
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "net", "io-util"] }
