@@ -211,9 +211,7 @@ def _install_base_sentinel(base: type) -> None:
             # Fallback: call the original C-level __call__ saved at install time.
             if _original_module_call is not None:
                 return _original_module_call(self, *args, **kwargs)
-            raise AttributeError(
-                f"{type(self).__name__}: no __call__ found in MRO"
-            )
+            raise AttributeError(f"{type(self).__name__}: no __call__ found in MRO")
         finally:
             _pop(cid)
 
