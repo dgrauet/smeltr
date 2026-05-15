@@ -5,6 +5,9 @@ pub mod report;
 pub mod rule;
 pub mod rules;
 
+pub mod breakdown;
+pub use breakdown::{compute as compute_breakdown, BreakdownError, Diagnostics, ModuleBreakdown};
+
 pub use finding::{Category, EvidenceRef, Finding, Severity};
 pub use report::Report;
 pub use rule::Rule;
