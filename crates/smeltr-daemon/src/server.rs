@@ -1,11 +1,11 @@
 //! Unix-socket server. Reads framed `ClientToDaemon` messages, writes framed
-//! `DaemonToClient` responses, holds a reference to the active session and the
+//! `DaemonToClient` responses, holds a reference to the session router and the
 //! broadcast bus.
 
 use crate::bus::Bus;
 use crate::probes::ProbeRuntime;
 use crate::protocol::{ClientToDaemon, DaemonToClient};
-use crate::sessions::ActiveSession;
+use crate::session_router::SessionRouter;
 use smeltr_core::reader::{find_session_dir, list_sessions, read_events, read_metadata};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -24,7 +24,7 @@ pub fn socket_path() -> std::path::PathBuf {
 
 pub struct Server {
     listener: UnixListener,
-    session: Arc<ActiveSession>,
+    router: Arc<SessionRouter>,
     bus: Bus,
     probe_runtime: Arc<ProbeRuntime>,
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -32,7 +32,7 @@ pub struct Server {
 
 impl Server {
     pub fn bind(
-        session: Arc<ActiveSession>,
+        router: Arc<SessionRouter>,
         bus: Bus,
         probe_runtime: Arc<ProbeRuntime>,
         shutdown: tokio::sync::watch::Sender<bool>,
@@ -45,7 +45,7 @@ impl Server {
         let listener = UnixListener::bind(&path)?;
         Ok(Self {
             listener,
-            session,
+            router,
             bus,
             probe_runtime,
             shutdown,
@@ -58,11 +58,11 @@ impl Server {
             tokio::select! {
                 accept = self.listener.accept() => {
                     let (stream, _) = accept?;
-                    let session = self.session.clone();
+                    let router = self.router.clone();
                     let bus = self.bus.clone();
                     let probe_runtime = self.probe_runtime.clone();
                     let shutdown_tx = self.shutdown.clone();
-                    tokio::spawn(handle_connection(stream, session, bus, probe_runtime, shutdown_tx));
+                    tokio::spawn(handle_connection(stream, router, bus, probe_runtime, shutdown_tx));
                 }
                 _ = rx.changed() => {
                     if *rx.borrow() { break; }
@@ -75,13 +75,13 @@ impl Server {
 
 async fn handle_connection(
     mut stream: UnixStream,
-    session: Arc<ActiveSession>,
+    router: Arc<SessionRouter>,
     bus: Bus,
     probe_runtime: Arc<ProbeRuntime>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) {
     if let Err(e) =
-        handle_connection_inner(&mut stream, &session, &bus, &probe_runtime, &shutdown_tx).await
+        handle_connection_inner(&mut stream, &router, &bus, &probe_runtime, &shutdown_tx).await
     {
         tracing::warn!(error = %e, "connection ended with error");
     }
@@ -89,7 +89,7 @@ async fn handle_connection(
 
 async fn handle_connection_inner(
     stream: &mut UnixStream,
-    session: &Arc<ActiveSession>,
+    router: &Arc<SessionRouter>,
     bus: &Bus,
     probe_runtime: &Arc<ProbeRuntime>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
@@ -104,7 +104,7 @@ async fn handle_connection_inner(
             stream_events(stream, bus, shutdown_tx).await?;
             return Ok(());
         }
-        let resp = handle_msg(msg, session, bus, probe_runtime, shutdown_tx).await;
+        let resp = handle_msg(msg, router, bus, probe_runtime, shutdown_tx).await;
         write_msg(stream, &resp).await?;
     }
 }
@@ -154,7 +154,7 @@ async fn stream_events(
 
 async fn handle_msg(
     msg: ClientToDaemon,
-    session: &Arc<ActiveSession>,
+    router: &Arc<SessionRouter>,
     _bus: &Bus,
     probe_runtime: &Arc<ProbeRuntime>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
@@ -164,15 +164,15 @@ async fn handle_msg(
             tracing::info!(client = %client, "client connected");
             DaemonToClient::Welcome {
                 daemon_version: env!("CARGO_PKG_VERSION").to_string(),
-                active_session: session.id(),
+                active_session: router.ambient_id(),
             }
         }
         ClientToDaemon::Emit {
             source,
             pid,
             payload,
-        } => match session.append(source, pid, payload) {
-            Ok(_ev) => DaemonToClient::Ack,
+        } => match router.append(source, pid, payload) {
+            Ok(()) => DaemonToClient::Ack,
             Err(e) => DaemonToClient::Error {
                 message: e.to_string(),
             },
@@ -207,23 +207,16 @@ async fn handle_msg(
             let _ = shutdown_tx.send(true);
             DaemonToClient::Ack
         }
-        ClientToDaemon::AttachScopedProbes { pid } => {
+        ClientToDaemon::AttachScopedProbes { pid, argv } => {
             probe_runtime.attach_scoped(pid).await;
+            if let Err(e) = router.attach_scoped(pid, argv) {
+                tracing::warn!(error = %e, pid = pid, "failed to open scoped session");
+            }
             DaemonToClient::Ack
         }
         ClientToDaemon::DetachScopedProbes { pid, exit_code } => {
             probe_runtime.detach_scoped(pid).await;
-            let label = match exit_code {
-                Some(c) => format!("record:exit pid={pid} code={c}"),
-                None => format!("record:exit pid={pid} code=none"),
-            };
-            if let Err(e) = session.append(
-                smeltr_core::event::Source::Mark,
-                Some(pid),
-                smeltr_core::event::Payload::Mark { label },
-            ) {
-                tracing::warn!(error = %e, "failed to append detach mark");
-            }
+            let _ = router.detach_scoped(pid, exit_code);
             DaemonToClient::Ack
         }
         ClientToDaemon::AttachMetalHook { pid, ring_path } => {
@@ -279,6 +272,8 @@ async fn write_msg<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> s
 mod tests {
     use super::*;
     use crate::probes::{DaemonSink, ProbeRuntime};
+    use crate::session_router::SessionRouter;
+    use crate::sessions::ActiveSession;
     use serial_test::serial;
     use smeltr_core::event::{Payload, Source};
 
@@ -297,15 +292,15 @@ mod tests {
     #[serial]
     async fn hello_round_trip() {
         let _home = temp_env();
-        let session = Arc::new(ActiveSession::open_new().unwrap());
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let bus = Bus::new();
+        let router = Arc::new(SessionRouter::new(ambient.clone(), None, None));
         let sink = Arc::new(DaemonSink {
-            session: session.clone(),
-            bus: bus.clone(),
+            router: router.clone(),
         });
         let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));
         let (tx, _rx) = tokio::sync::watch::channel(false);
-        let server = Server::bind(session.clone(), bus, probe_runtime.clone(), tx.clone()).unwrap();
+        let server = Server::bind(router.clone(), bus, probe_runtime.clone(), tx.clone()).unwrap();
         tokio::spawn(server.run());
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 

@@ -261,12 +261,15 @@ def decorate_eval() -> None:
     def wrapped(*args, **kwargs):
         call_id = _next_call_id()
         try:
+            from smeltr._modules import _current_stack as _smeltr_current_stack
+
             _emit(
                 {
                     "kind": "MlxEvalEntered",
                     "call_id": call_id,
                     "array_count": len(args),
                     "stream": "gpu",
+                    "module_stack": list(_smeltr_current_stack()),
                 }
             )
         except Exception:

@@ -65,6 +65,39 @@ impl ActiveSession {
         Ok(s)
     }
 
+    pub fn open_scoped(
+        pid: u32,
+        argv: Vec<String>,
+        flight_recorder: Option<Arc<FlightRecorder>>,
+        bus: Option<Bus>,
+    ) -> std::io::Result<Self> {
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.kind = smeltr_core::session::SessionKind::Scoped { pid, argv };
+        let writer = SessionWriter::create(meta)?;
+        let clock = MonoClock::new();
+        let wall_epoch_ns = now_unix_ns();
+        let s = Self {
+            inner: Mutex::new(Some(Inner {
+                writer,
+                session_id: id,
+                clock,
+                wall_epoch_ns,
+                seq: 0,
+            })),
+            flight_recorder,
+            bus,
+        };
+        s.append_internal(
+            Source::System,
+            Some(pid),
+            Payload::SessionStarted {
+                wall_unix_ns: wall_epoch_ns,
+            },
+        )?;
+        Ok(s)
+    }
+
     pub fn id(&self) -> SessionId {
         self.inner
             .lock()
@@ -168,6 +201,34 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_HOME", d.path());
         d
+    }
+
+    #[test]
+    #[serial]
+    fn open_scoped_writes_scoped_metadata() {
+        let _home = temp_home();
+        let s = ActiveSession::open_scoped(1234, vec!["python".into(), "x.py".into()], None, None)
+            .unwrap();
+        s.finalize(Some(0), "test").unwrap();
+        let dirs = list_sessions().unwrap();
+        let meta = read_metadata(&dirs[0]).unwrap();
+        match meta.kind {
+            smeltr_core::session::SessionKind::Scoped { pid, argv } => {
+                assert_eq!(pid, 1234);
+                assert_eq!(argv, vec!["python".to_string(), "x.py".to_string()]);
+            }
+            other => panic!("expected Scoped, got {other:?}"),
+        }
+        let evs = read_events(&dirs[0]).unwrap();
+        let started = evs
+            .iter()
+            .find(|e| matches!(e.payload, Payload::SessionStarted { .. }))
+            .expect("SessionStarted event must exist");
+        assert_eq!(
+            started.pid,
+            Some(1234),
+            "SessionStarted must carry pid=Some(pid)"
+        );
     }
 
     #[test]

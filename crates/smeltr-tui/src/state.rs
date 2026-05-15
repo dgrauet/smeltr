@@ -1,6 +1,6 @@
 //! Aggregated UI state. Pure data; no rendering.
 
-use smeltr_core::event::{Event, Payload, ProcEntry};
+use smeltr_core::event::{Event, Payload, ProbeHealthState, ProcEntry};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Default)]
@@ -141,6 +141,7 @@ impl UiState {
                 while self.mlx_recent_marks.len() > RECENT_MARKS {
                     self.mlx_recent_marks.pop_front();
                 }
+                self.push_log(ev.ts_mono_ns, "mark".into(), label.clone());
             }
             Payload::VmSample {
                 wired_bytes,
@@ -205,6 +206,53 @@ impl UiState {
                     "metal-hook".into(),
                     format!("skipped: {reason}"),
                 );
+            }
+            Payload::ProbeHealth {
+                probe,
+                state: ProbeHealthState::Degraded,
+                reason,
+            } => {
+                let detail = reason
+                    .as_deref()
+                    .map(|r| format!(": {r}"))
+                    .unwrap_or_default();
+                self.push_log(
+                    ev.ts_mono_ns,
+                    "probe".into(),
+                    format!("{probe} degraded{detail}"),
+                );
+            }
+            Payload::ProbeHealth {
+                probe,
+                state: ProbeHealthState::Failed,
+                reason,
+            } => {
+                let detail = reason
+                    .as_deref()
+                    .map(|r| format!(": {r}"))
+                    .unwrap_or_default();
+                self.push_log(
+                    ev.ts_mono_ns,
+                    "probe".into(),
+                    format!("{probe} failed{detail}"),
+                );
+            }
+            Payload::MetalCbWarning {
+                cb_id,
+                queue_id,
+                elapsed_ns,
+            } => {
+                self.push_log(
+                    ev.ts_mono_ns,
+                    "metal-cb".into(),
+                    format!(
+                        "cb=0x{cb_id:x} q=0x{queue_id:x} in-flight {:.1}ms",
+                        *elapsed_ns as f64 / 1e6
+                    ),
+                );
+            }
+            Payload::MlxPanicTriggered { condition } => {
+                self.push_log(ev.ts_mono_ns, "mlx-panic".into(), condition.clone());
             }
             _ => {}
         }
@@ -313,6 +361,7 @@ mod tests {
                 call_id: 1,
                 array_count: 2,
                 stream: "gpu".into(),
+                module_stack: Vec::new(),
             },
         ));
         s.ingest(&ev(
@@ -321,6 +370,7 @@ mod tests {
                 call_id: 2,
                 array_count: 1,
                 stream: "gpu".into(),
+                module_stack: Vec::new(),
             },
         ));
         assert_eq!(s.mlx_eval_depth, 2);

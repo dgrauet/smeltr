@@ -3,5 +3,6 @@ pub mod flight_recorder;
 pub mod probes;
 pub mod protocol;
 pub mod server;
+pub mod session_router;
 pub mod sessions;
 pub mod triggers;

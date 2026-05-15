@@ -81,7 +81,7 @@ fn render_after_synthetic_events_shows_all_panels() {
         "Memory",
         "MLX (sidecar)",
         "System pressure",
-        "Log feed",
+        "Notices",
         "phase: encode",
         "depth=5",
     ] {

@@ -67,34 +67,9 @@ impl SessionWriter {
     }
 
     fn persist_metadata(&self) -> std::io::Result<()> {
-        let toml = toml_simple::to_string(&self.metadata);
-        std::fs::write(metadata_path(&self.dir), toml)
-    }
-}
-
-/// Tiny TOML emitter so we avoid pulling a full TOML crate for ~6 fields.
-mod toml_simple {
-    use crate::session::SessionMetadata;
-    pub fn to_string(m: &SessionMetadata) -> String {
-        let mut s = String::new();
-        s.push_str(&format!("session_id = \"{}\"\n", m.session_id));
-        s.push_str(&format!("started_rfc3339 = \"{}\"\n", m.started_rfc3339));
-        if let Some(end) = &m.ended_rfc3339 {
-            s.push_str(&format!("ended_rfc3339 = \"{}\"\n", esc(end)));
-        }
-        s.push_str(&format!("host = \"{}\"\n", esc(&m.host)));
-        if let Some(v) = &m.mlx_version {
-            s.push_str(&format!("mlx_version = \"{}\"\n", esc(v)));
-        }
-        if let Some(c) = m.exit_code {
-            s.push_str(&format!("exit_code = {c}\n"));
-        }
-        let args: Vec<String> = m.argv.iter().map(|a| format!("\"{}\"", esc(a))).collect();
-        s.push_str(&format!("argv = [{}]\n", args.join(", ")));
-        s
-    }
-    fn esc(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('"', "\\\"")
+        let text = toml::to_string(&self.metadata)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        std::fs::write(metadata_path(&self.dir), text)
     }
 }
 

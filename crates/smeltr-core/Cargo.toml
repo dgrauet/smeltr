@@ -14,6 +14,7 @@ uuid.workspace = true
 time.workspace = true
 tracing.workspace = true
 zstd = "0.13"
+toml = "0.8"
 
 [dev-dependencies]
 tempfile.workspace = true

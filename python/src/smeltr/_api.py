@@ -68,10 +68,16 @@ def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0, poll_hz: floa
     from smeltr._shutdown import install_hooks
 
     install_hooks()
+    from smeltr._modules import install as _install_modules
+
+    _install_modules()
 
 
 def detach() -> None:
     """Close the daemon connection. Idempotent."""
+    from smeltr._modules import uninstall as _uninstall_modules
+
+    _uninstall_modules()
     from smeltr._shutdown import remove_hooks
 
     remove_hooks()

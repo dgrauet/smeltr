@@ -4,3 +4,4 @@
 //! (and, eventually, `smeltr record`) can reach the embedded Metal hook.
 
 pub mod embedded_dylib;
+pub mod session_resolver;

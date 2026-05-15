@@ -68,7 +68,9 @@ fn end_to_end_mark_then_show() {
         .clone();
     let listing = String::from_utf8(out).unwrap();
     let line = listing.lines().next().expect("at least one session listed");
-    let short = line.rsplit('-').next().unwrap();
+    // Line format is "<dirname>  [<kind>]"; take the dirname token first.
+    let dirname = line.split_whitespace().next().unwrap();
+    let short = dirname.rsplit('-').next().unwrap();
 
     // Shut down the daemon so it flushes events to disk.
     let _ = StdCommand::new("kill")
@@ -129,13 +131,36 @@ fn record_captures_child_lifecycle() {
         .unwrap()
         .filter_map(|e| e.ok())
         .collect();
-    assert_eq!(entries.len(), 1, "expected exactly one session directory");
-    let events = smeltr_core::reader::read_events(&entries[0].path()).unwrap();
+    // Now we expect 2 sessions: one ambient, one scoped (for the recorded child).
+    assert_eq!(
+        entries.len(),
+        2,
+        "expected ambient + scoped session directories"
+    );
+
+    // Find the scoped session and verify it contains a SessionEnded event whose
+    // reason includes "record:exit" (written by router.detach_scoped).
+    use smeltr_core::session::SessionKind;
+    let scoped_dir = entries
+        .iter()
+        .find(|e| {
+            smeltr_core::reader::read_metadata(&e.path())
+                .ok()
+                .map(|m| matches!(m.kind, SessionKind::Scoped { .. }))
+                .unwrap_or(false)
+        })
+        .map(|e| e.path())
+        .expect("expected a scoped session directory");
+
+    let events = smeltr_core::reader::read_events(&scoped_dir).unwrap();
     let saw_exit = events.iter().any(|ev| match &ev.payload {
-        smeltr_core::event::Payload::Mark { label } => label.contains("record:exit"),
+        smeltr_core::event::Payload::SessionEnded { reason, .. } => reason.contains("record:exit"),
         _ => false,
     });
-    assert!(saw_exit, "expected record:exit marker in session events");
+    assert!(
+        saw_exit,
+        "expected record:exit reason in SessionEnded event of scoped session"
+    );
 }
 
 #[test]
@@ -219,10 +244,27 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
         .unwrap()
         .filter_map(|e| e.ok())
         .collect();
-    assert_eq!(entries.len(), 1);
+    // Now we expect 2 sessions: one ambient, one scoped (for the recorded child).
+    assert_eq!(
+        entries.len(),
+        2,
+        "expected ambient + scoped session directories"
+    );
 
-    let dir = entries[0].path();
-    let events = smeltr_core::reader::read_events(&dir).unwrap();
+    // Metal events land in the scoped session for the recorded process.
+    use smeltr_core::session::SessionKind;
+    let scoped_dir = entries
+        .iter()
+        .find(|e| {
+            smeltr_core::reader::read_metadata(&e.path())
+                .ok()
+                .map(|m| matches!(m.kind, SessionKind::Scoped { .. }))
+                .unwrap_or(false)
+        })
+        .map(|e| e.path())
+        .expect("expected a scoped session directory");
+
+    let events = smeltr_core::reader::read_events(&scoped_dir).unwrap();
 
     use smeltr_core::event::Payload;
     let mut seen_committed = false;
