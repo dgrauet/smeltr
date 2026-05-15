@@ -1,5 +1,6 @@
 mod client;
 mod commands;
+mod session_resolver;
 
 use clap::{Parser, Subcommand};
 
@@ -35,6 +36,9 @@ enum Cmd {
         last: bool,
         /// Session id or directory-name suffix to analyze.
         id: Option<String>,
+        /// Include the daemon's ambient session when picking --last.
+        #[arg(long)]
+        include_ambient: bool,
     },
     /// Per-module GPU time breakdown for an MLX inference session.
     Breakdown {
@@ -43,6 +47,9 @@ enum Cmd {
         last: bool,
         /// Session id or directory-name suffix.
         id: Option<String>,
+        /// Include the daemon's ambient session when picking --last.
+        #[arg(long)]
+        include_ambient: bool,
         /// Max rows in the table output.
         #[arg(long, default_value_t = 20)]
         top: usize,
@@ -86,15 +93,28 @@ fn main() -> anyhow::Result<()> {
             Cmd::Sessions { sub } => commands::sessions::run(sub).await,
             Cmd::Doctor => commands::doctor::run(),
             Cmd::Tui => commands::tui::run_live().await,
-            Cmd::Analyze { last, id } => commands::analyze::run(last, id),
+            Cmd::Analyze {
+                last,
+                id,
+                include_ambient,
+            } => commands::analyze::run(last, id, include_ambient),
             Cmd::Breakdown {
                 last,
                 id,
+                include_ambient,
                 top,
                 depth,
                 flamegraph,
                 chrome_trace,
-            } => commands::breakdown::run(id, last, top, depth, flamegraph, chrome_trace),
+            } => commands::breakdown::run(
+                id,
+                last,
+                include_ambient,
+                top,
+                depth,
+                flamegraph,
+                chrome_trace,
+            ),
             Cmd::Mcp => commands::mcp::run().await,
             Cmd::Record { cmd, args, no_hook } => {
                 let code = commands::record::run(&cmd, &args, no_hook).await?;

@@ -2,19 +2,20 @@
 
 use anyhow::{anyhow, Context, Result};
 use smeltr_analyzer::{compute_breakdown, render_chrome_trace, render_table, ModuleBreakdown};
-use smeltr_core::reader::{list_sessions, read_events};
+use smeltr_core::reader::read_events;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub fn run(
     id: Option<String>,
     last: bool,
+    include_ambient: bool,
     top: usize,
     depth: u16,
     flamegraph: Option<PathBuf>,
     chrome_trace: Option<PathBuf>,
 ) -> Result<()> {
-    let dir = resolve_session(last, id)?;
+    let dir = crate::session_resolver::resolve(id, last, include_ambient)?;
     let events =
         read_events(&dir).with_context(|| format!("reading events from {}", dir.display()))?;
     if events.is_empty() {
@@ -66,38 +67,4 @@ fn write_flamegraph(path: &Path, root: &ModuleBreakdown) -> Result<()> {
         .map_err(|e| anyhow!("inferno: {e}"))?;
     svg.flush()?;
     Ok(())
-}
-
-fn resolve_session(arg_last: bool, session_id: Option<String>) -> Result<PathBuf> {
-    let sessions = list_sessions().context("listing sessions")?;
-    if sessions.is_empty() {
-        return Err(anyhow!("no sessions found under SMELTR_HOME"));
-    }
-    if let Some(id) = session_id {
-        for dir in sessions.iter().rev() {
-            if dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.ends_with(&id) || n.contains(&id))
-                .unwrap_or(false)
-            {
-                return Ok(dir.clone());
-            }
-        }
-        return Err(anyhow!("session {id} not found"));
-    }
-    if arg_last {
-        if let Some(pm) = sessions.iter().rev().find(|d| {
-            d.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("post-mortem-"))
-                .unwrap_or(false)
-        }) {
-            return Ok(pm.clone());
-        }
-    }
-    sessions
-        .last()
-        .cloned()
-        .ok_or_else(|| anyhow!("no sessions found under SMELTR_HOME"))
 }
