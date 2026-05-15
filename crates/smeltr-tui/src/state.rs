@@ -313,6 +313,7 @@ mod tests {
                 call_id: 1,
                 array_count: 2,
                 stream: "gpu".into(),
+                module_stack: Vec::new(),
             },
         ));
         s.ingest(&ev(
@@ -321,6 +322,7 @@ mod tests {
                 call_id: 2,
                 array_count: 1,
                 stream: "gpu".into(),
+                module_stack: Vec::new(),
             },
         ));
         assert_eq!(s.mlx_eval_depth, 2);

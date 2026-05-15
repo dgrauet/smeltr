@@ -145,6 +145,8 @@ pub enum Payload {
         call_id: u64,
         array_count: u32,
         stream: String,
+        #[serde(default)]
+        module_stack: Vec<u64>,
     },
     MlxEvalReturned {
         call_id: u64,
@@ -490,9 +492,44 @@ mod tests {
                 call_id: 17,
                 array_count: 3,
                 stream: "gpu".into(),
+                module_stack: vec![1, 2, 3],
             },
             Source::PythonSidecar,
         );
+    }
+
+    #[test]
+    fn cbor_decodes_legacy_mlx_eval_entered_without_module_stack() {
+        let legacy = Payload::MlxEvalEntered {
+            call_id: 7,
+            array_count: 1,
+            stream: "gpu".into(),
+            module_stack: Vec::new(),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut buf).unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(&buf[..]).unwrap();
+        let stripped = match value {
+            ciborium::value::Value::Map(pairs) => ciborium::value::Value::Map(
+                pairs
+                    .into_iter()
+                    .filter(|(k, _)| {
+                        !matches!(k, ciborium::value::Value::Text(s) if s == "module_stack")
+                    })
+                    .collect(),
+            ),
+            v => v,
+        };
+        let mut stripped_buf = Vec::new();
+        ciborium::ser::into_writer(&stripped, &mut stripped_buf).unwrap();
+
+        let decoded: Payload = ciborium::de::from_reader(&stripped_buf[..]).unwrap();
+        match decoded {
+            Payload::MlxEvalEntered { module_stack, .. } => {
+                assert!(module_stack.is_empty());
+            }
+            other => panic!("expected MlxEvalEntered, got {other:?}"),
+        }
     }
 
     #[test]

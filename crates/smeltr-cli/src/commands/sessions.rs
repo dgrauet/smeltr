@@ -223,6 +223,7 @@ fn print_session(
                 call_id,
                 array_count,
                 stream,
+                ..
             } => {
                 format!("MlxEvalEntered call_id={call_id} arrays={array_count} stream={stream}")
             }

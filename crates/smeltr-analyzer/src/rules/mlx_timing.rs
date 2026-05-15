@@ -84,6 +84,7 @@ mod tests {
                     call_id: 1,
                     array_count: 3,
                     stream: "gpu".into(),
+                    module_stack: Vec::new(),
                 },
             ),
             ev(
