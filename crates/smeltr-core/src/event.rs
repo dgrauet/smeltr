@@ -190,6 +190,17 @@ pub enum Payload {
         state: ProbeHealthState,
         reason: Option<String>,
     },
+    ModuleEntered {
+        module_call_id: u64,
+        module_def_id: u64,
+        qualname: String,
+        class_name: String,
+        parent_call_id: Option<u64>,
+        depth: u16,
+    },
+    ModuleReturned {
+        module_call_id: u64,
+    },
 }
 
 impl Eq for Payload {}
@@ -575,6 +586,29 @@ mod tests {
                 mlx_version: Some("0.18.1".into()),
                 argv: vec!["python".into(), "my_script.py".into()],
             },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_module_entered() {
+        round_trip(
+            Payload::ModuleEntered {
+                module_call_id: 17,
+                module_def_id: 0xdead_beef,
+                qualname: "TransformerBlock.attention.qkv_proj".into(),
+                class_name: "Linear".into(),
+                parent_call_id: Some(3),
+                depth: 4,
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_module_returned() {
+        round_trip(
+            Payload::ModuleReturned { module_call_id: 17 },
             Source::PythonSidecar,
         );
     }
