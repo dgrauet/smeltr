@@ -157,3 +157,21 @@ def test_install_without_mlx_is_noop(monkeypatch):
     monkeypatch.setattr(_builtins, "__import__", fake_import)
     _modules.install()
     assert _modules._current_stack() == []
+
+
+def test_uninstall_restores_original_call():
+    """Verify uninstall() actually removes the sentinel and any wrappers."""
+    _modules._reset_for_tests()
+    pytest.importorskip("mlx.nn")
+    import mlx.nn as nn
+
+    before_module_call = nn.Module.__dict__.get("__call__")
+    before_linear_call = nn.Linear.__dict__.get("__call__")
+    _modules.install()
+    assert getattr(nn.Module.__call__, "_smeltr_wrapped", False) is True
+    _modules.uninstall()
+    after_module_call = nn.Module.__dict__.get("__call__")
+    after_linear_call = nn.Linear.__dict__.get("__call__")
+    assert after_module_call == before_module_call
+    assert after_linear_call == before_linear_call
+    assert getattr(nn.Module.__call__, "_smeltr_wrapped", False) is False

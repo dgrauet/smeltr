@@ -22,6 +22,12 @@ _install_lock = threading.Lock()
 
 # Track which classes have been wrapped so we can uninstall cleanly.
 _wrapped_classes: list[type] = []
+# Dedicated lock for _wrapped_classes mutations (avoids reentrant deadlock with
+# _install_lock, which is held for the full duration of install()).
+_wrapped_classes_lock = threading.RLock()
+
+# Saved at _install_base_sentinel() time; used as fallback in base_sentinel.
+_original_module_call: Any = None
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -80,14 +86,18 @@ def _push(qualname: str, class_name: str, *, id_of: int) -> int:
 
 def _pop(expected_cid: int) -> None:
     stack = _stack()
+    found = False
     if stack and stack[-1]["module_call_id"] == expected_cid:
         stack.pop()
+        found = True
     else:
         for i in range(len(stack) - 1, -1, -1):
             if stack[i]["module_call_id"] == expected_cid:
                 del stack[i]
+                found = True
                 break
-    _emit({"kind": "ModuleReturned", "module_call_id": expected_cid})
+    if found:
+        _emit({"kind": "ModuleReturned", "module_call_id": expected_cid})
 
 
 def _qualname_for(module: Any) -> str:
@@ -118,7 +128,8 @@ def _wrap_class(cls: type) -> None:
     wrapped._smeltr_wrapped = True  # type: ignore[attr-defined]
     wrapped._smeltr_original = original  # type: ignore[attr-defined]
     cls.__call__ = wrapped  # type: ignore[assignment]
-    _wrapped_classes.append(cls)
+    with _wrapped_classes_lock:
+        _wrapped_classes.append(cls)
 
 
 def _wrap_all_existing(base: type) -> None:
@@ -167,6 +178,12 @@ def _install_base_sentinel(base: type) -> None:
        (required by the idempotency test).
     2. Intercepts calls on subclasses that do NOT define their own __call__.
     """
+    global _original_module_call
+    # Save the original __call__ from the base class dict (the C method-wrapper)
+    # before we overwrite it.  Used as a fallback in base_sentinel when no
+    # Python __call__ is found in the MRO.
+    _original_module_call = base.__dict__.get("__call__")
+
     # There is no Python __call__ on nn.Module itself (it's a C method-wrapper
     # from dict/object), so we define one.  Subclasses with their own __call__
     # already have been wrapped by _wrap_all_existing; this covers the rest.
@@ -177,16 +194,33 @@ def _install_base_sentinel(base: type) -> None:
             id_of=id(self),
         )
         try:
-            # Delegate to the subclass forward method if it exists.
-            forward = getattr(type(self), "__call__", None)
-            if forward is not None and forward is not base_sentinel:
-                return forward(self, *args, **kwargs)
+            # Walk the MRO to find a real __call__.  Skip nn.Module itself
+            # (that's us), skip any class that only has base_sentinel or a
+            # smeltr-wrapped shim (to avoid infinite recursion).
+            for cls in type(self).__mro__:
+                if cls is base:
+                    continue
+                call = cls.__dict__.get("__call__")
+                if call is None:
+                    continue
+                if call is base_sentinel:
+                    continue
+                # A smeltr-wrapped __call__ has already been handled by
+                # _wrap_class; call it directly so it can do its own tracking.
+                return call(self, *args, **kwargs)
+            # Fallback: call the original C-level __call__ saved at install time.
+            if _original_module_call is not None:
+                return _original_module_call(self, *args, **kwargs)
+            raise AttributeError(
+                f"{type(self).__name__}: no __call__ found in MRO"
+            )
         finally:
             _pop(cid)
 
     base_sentinel._smeltr_wrapped = True  # type: ignore[attr-defined]
     base.__call__ = base_sentinel  # type: ignore[assignment]
-    _wrapped_classes.append(base)
+    with _wrapped_classes_lock:
+        _wrapped_classes.append(base)
 
 
 def _install_subclass_hook(base: type) -> None:
@@ -207,7 +241,7 @@ def _install_subclass_hook(base: type) -> None:
 
 def uninstall() -> None:
     """Restore the original mlx.nn.Module.__call__. Safe if not installed."""
-    global _installed, _wrapped_classes
+    global _installed, _wrapped_classes, _original_module_call
     with _install_lock:
         if not _installed:
             return
@@ -217,8 +251,14 @@ def uninstall() -> None:
             _installed = False
             return
 
+        # Snapshot and clear _wrapped_classes under its own lock to prevent
+        # races with concurrent __init_subclass__ calls.
+        with _wrapped_classes_lock:
+            to_restore = list(_wrapped_classes)
+            _wrapped_classes = []
+
         # Restore all wrapped classes.
-        for cls in list(_wrapped_classes):
+        for cls in to_restore:
             current = cls.__dict__.get("__call__")
             if current is not None and getattr(current, "_smeltr_wrapped", False):
                 original = getattr(current, "_smeltr_original", None)
@@ -229,7 +269,8 @@ def uninstall() -> None:
                         del cls.__call__
                     except AttributeError:
                         pass
-        _wrapped_classes = []
+
+        _original_module_call = None
 
         # Remove __init_subclass__ hook.
         isc = nn.Module.__dict__.get("__init_subclass__")
