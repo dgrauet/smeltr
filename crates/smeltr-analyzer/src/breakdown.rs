@@ -272,7 +272,7 @@ pub fn render_table(root: &ModuleBreakdown, top: usize, max_depth: u16) -> Strin
         "{:<48} {:>8} {:>14} {:>14} {:>6}\n",
         "qualname", "calls", "gpu_self_us", "gpu_subtree_us", "pct"
     ));
-    out.push_str(&"-".repeat(96));
+    out.push_str(&"-".repeat(94));
     out.push('\n');
     for (depth, n) in rows {
         let indent = "  ".repeat(depth as usize);
@@ -299,6 +299,9 @@ pub fn render_table(root: &ModuleBreakdown, top: usize, max_depth: u16) -> Strin
 }
 
 fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     if s.chars().count() <= max {
         s.to_string()
     } else {
@@ -350,7 +353,7 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
     walk(root, 0, &mut cursor_us, &mut events);
     serde_json::json!({
         "traceEvents": events,
-        "displayTimeUnit": "ns",
+        "displayTimeUnit": "us",
     })
     .to_string()
 }
@@ -731,5 +734,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let arr = parsed["traceEvents"].as_array().unwrap();
         assert!(arr.iter().any(|e| e["name"] == "Linear" && e["ph"] == "X"));
+        assert_eq!(parsed["displayTimeUnit"], "us");
     }
 }
