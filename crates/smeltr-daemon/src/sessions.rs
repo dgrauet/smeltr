@@ -219,6 +219,16 @@ mod tests {
             }
             other => panic!("expected Scoped, got {other:?}"),
         }
+        let evs = read_events(&dirs[0]).unwrap();
+        let started = evs
+            .iter()
+            .find(|e| matches!(e.payload, Payload::SessionStarted { .. }))
+            .expect("SessionStarted event must exist");
+        assert_eq!(
+            started.pid,
+            Some(1234),
+            "SessionStarted must carry pid=Some(pid)"
+        );
     }
 
     #[test]

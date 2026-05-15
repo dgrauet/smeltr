@@ -91,12 +91,12 @@ impl SessionRouter {
 
     /// Flush every active session. Called on daemon shutdown.
     pub fn flush_all(&self) -> std::io::Result<()> {
-        self.ambient.flush()?;
         let guard = self.scoped.lock().unwrap();
         for s in guard.values() {
-            let _ = s.flush();
+            s.flush()?;
         }
-        Ok(())
+        drop(guard);
+        self.ambient.flush()
     }
 
     /// Finalize every active session. Called on graceful daemon shutdown.
