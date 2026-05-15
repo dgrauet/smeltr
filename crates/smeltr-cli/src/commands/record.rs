@@ -135,8 +135,11 @@ pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i3
     let pid = child.id();
 
     // Attach scoped probes.
+    let argv: Vec<String> = std::iter::once(cmd.to_string())
+        .chain(args.iter().cloned())
+        .collect();
     let resp = client
-        .request(ClientToDaemon::AttachScopedProbes { pid, argv: vec![] })
+        .request(ClientToDaemon::AttachScopedProbes { pid, argv })
         .await?;
     if !matches!(resp, DaemonToClient::Ack) {
         let _ = child.kill();
