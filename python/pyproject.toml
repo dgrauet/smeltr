@@ -63,6 +63,11 @@ unresolved-import = "ignore"
 # a known type-checker false positive that is not worth annotating around.
 unresolved-attribute = "ignore"
 unused-type-ignore-comment = "ignore"
+# _modules.py monkey-patches nn.Module.__call__ and installs an
+# __init_subclass__ hook — both intentionally violate the strict
+# function-signature equivalence ty enforces.
+invalid-assignment = "ignore"
+invalid-super-argument = "ignore"
 
 [tool.coverage.run]
 source = ["src/smeltr"]
