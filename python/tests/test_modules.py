@@ -183,6 +183,7 @@ def test_mlx_eval_payload_includes_module_stack():
     pytest.importorskip("mlx.nn")
     import mlx.core as mx
     import mlx.nn as nn
+
     from smeltr import _mlx
 
     class EvalInside(nn.Module):
