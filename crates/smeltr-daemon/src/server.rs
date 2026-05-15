@@ -296,8 +296,6 @@ mod tests {
         let bus = Bus::new();
         let router = Arc::new(SessionRouter::new(ambient.clone(), None, None));
         let sink = Arc::new(DaemonSink {
-            session: ambient.clone(),
-            bus: bus.clone(),
             router: router.clone(),
         });
         let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));

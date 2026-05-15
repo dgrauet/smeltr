@@ -1,22 +1,18 @@
-//! Wires per-source probes into the session router + broadcast bus.
+//! Wires per-source probes into the session router.
 
-use crate::bus::Bus;
 use crate::session_router::SessionRouter;
-use crate::sessions::ActiveSession;
 use smeltr_core::event::{Payload, Source};
 use smeltr_probes_core::sink::EventSink;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Bridges probe emissions into the session router + broadcast bus.
+/// Routes probe emissions through the session router.
 ///
-/// The router dispatches each event to the correct session (scoped for a
-/// known PID, ambient otherwise). `SessionRouter::append` also publishes
-/// to the bus for sessions opened with a `Bus` instance.
+/// `SessionRouter::append` dispatches each event to the correct session
+/// (scoped for a known PID, ambient otherwise) and publishes to the bus for
+/// sessions that were opened with a `Bus` instance.
 pub struct DaemonSink {
-    pub session: Arc<ActiveSession>,
-    pub bus: Bus,
     pub router: Arc<SessionRouter>,
 }
 

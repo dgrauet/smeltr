@@ -117,8 +117,6 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let sink = Arc::new(probes::DaemonSink {
-        session: ambient.clone(),
-        bus: bus.clone(),
         router: router.clone(),
     });
     let probe_runtime = Arc::new(probes::ProbeRuntime::start_global(sink));
