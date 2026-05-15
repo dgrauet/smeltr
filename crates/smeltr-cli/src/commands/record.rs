@@ -125,6 +125,12 @@ pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i3
         builder.env("SMELTR_RING_PATH", ring_path);
     }
 
+    // Trigger smeltr/_autoload.py via smeltr-autoload.pth in site-packages,
+    // so `python script.py` under `smeltr record` is observed without any
+    // explicit `smeltr.attach()` call in user code. Unset by default → no
+    // effect on unrelated Python processes (pytest, notebooks, ...).
+    builder.env("SMELTR_AUTOLOAD", "1");
+
     let mut child = builder.spawn()?;
     let pid = child.id();
 
