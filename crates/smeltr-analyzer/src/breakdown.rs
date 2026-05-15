@@ -166,6 +166,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
 
     // 5. Attribute each eval's gpu_ns to the leaf of its module stack.
     let mut unscoped_eval_count: u64 = 0;
+    let mut unscoped_cb_count_from_evals: u64 = 0;
     for (i, eval) in eval_intervals.iter().enumerate() {
         let gpu = per_eval_gpu_ns[i];
         let cbs = per_eval_cb_count[i];
@@ -179,6 +180,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         }
         unscoped_gpu_ns += gpu;
         unscoped_eval_count += 1;
+        unscoped_cb_count_from_evals += cbs;
     }
 
     // 6. Build the output tree.
@@ -217,7 +219,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             gpu_ns_self: unscoped_gpu_ns,
             gpu_ns_subtree: unscoped_gpu_ns,
             eval_count: unscoped_eval_count,
-            cb_count: unmatched_cb_count,
+            cb_count: unmatched_cb_count + unscoped_cb_count_from_evals,
             children: vec![],
             diagnostics: None,
         });
@@ -325,6 +327,8 @@ mod tests {
         let unscoped = find_child(&r, UNSCOPED);
         assert_eq!(unscoped.gpu_ns_self, 500);
         assert_eq!(r.diagnostics.as_ref().unwrap().unscoped_gpu_ns, 500);
+        assert_eq!(unscoped.cb_count, 1);
+        assert_eq!(unscoped.eval_count, 1);
     }
 
     #[test]
