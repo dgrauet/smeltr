@@ -89,6 +89,24 @@ Kill switch: `SMELTR_HOOK_DISABLE=1` makes the loaded dylib inert.
 | `smeltr mcp` | Stdio MCP server (Claude integration) |
 | `smeltr daemon install` | Install persistent LaunchAgent |
 
+### Session kinds
+
+`smeltrd` writes events into one of two kinds of session:
+
+- **Ambient** — opened automatically when the daemon starts. Captures all
+  events not scoped to a specific PID: system probes, thermal samples,
+  unattributed crash reports, etc. One ambient session per daemon lifetime.
+- **Scoped** — opened by `smeltr record` for the child process it spawns.
+  Every event tagged with that child's PID lands in this session. Closed
+  with an exit-code marker when the child terminates.
+
+By default, `smeltr breakdown --last` and `smeltr analyze --last` pick the
+most-recent scoped session. Pass `--include-ambient` to revert to the
+older behaviour (newest of any kind).
+
+`smeltr sessions ls` annotates each line with `[ambient]` or
+`[scoped pid=N cmd=...]`.
+
 ### `smeltr breakdown [--last] [<session_id>]`
 
 Per-module GPU time breakdown for an MLX inference session. Pure observation
