@@ -14,7 +14,7 @@ pub enum Panel {
     Memory = 2,
     Mlx = 3,
     Pressure = 4,
-    Log = 5,
+    Notices = 5,
 }
 
 impl Panel {
@@ -24,8 +24,8 @@ impl Panel {
             Panel::MetalCbs => Panel::Memory,
             Panel::Memory => Panel::Mlx,
             Panel::Mlx => Panel::Pressure,
-            Panel::Pressure => Panel::Log,
-            Panel::Log => Panel::Timeline,
+            Panel::Pressure => Panel::Notices,
+            Panel::Notices => Panel::Timeline,
         }
     }
 }
@@ -67,7 +67,7 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx) {
     render_memory(frame, row1[1], state, ctx);
     render_mlx(frame, row2[0], state, ctx);
     render_pressure(frame, row2[1], state, ctx);
-    render_log_feed(frame, outer[2], state, ctx);
+    render_notices(frame, outer[2], state, ctx);
 }
 
 fn block(title: String, focused: bool) -> Block<'static> {
@@ -195,7 +195,11 @@ fn render_pressure(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCt
     frame.render_widget(widget, area);
 }
 
-fn render_log_feed(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCtx) {
+/// Notices panel: GPU/Metal incidents, probe health, post-mortem triggers,
+/// MLX panics, and user `smeltr mark` calls. Quiet by design — when nothing
+/// goes wrong this stays empty. Use `smeltr mark "msg"` to verify the live
+/// pipeline.
+fn render_notices(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCtx) {
     let items: Vec<ListItem> = state
         .log_feed
         .iter()
@@ -206,7 +210,10 @@ fn render_log_feed(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCt
             ListItem::new(format!("-{:>5.1}s  {:<11} {}", age_s, e.kind, e.summary))
         })
         .collect();
-    let list = List::new(items).block(block("Log feed".into(), ctx.focus == Panel::Log));
+    let list = List::new(items).block(block(
+        "Notices (incidents · probe-health · marks)".into(),
+        ctx.focus == Panel::Notices,
+    ));
     frame.render_widget(list, area);
 }
 
