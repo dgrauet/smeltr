@@ -243,6 +243,118 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     })
 }
 
+/// Render a flat table sorted by gpu_ns_subtree descending.
+pub fn render_table(root: &ModuleBreakdown, top: usize, max_depth: u16) -> String {
+    let total = root.gpu_ns_subtree.max(1);
+    let mut rows: Vec<(u16, &ModuleBreakdown)> = Vec::new();
+    fn walk<'a>(
+        n: &'a ModuleBreakdown,
+        depth: u16,
+        max_depth: u16,
+        out: &mut Vec<(u16, &'a ModuleBreakdown)>,
+    ) {
+        if depth > max_depth {
+            return;
+        }
+        out.push((depth, n));
+        for c in &n.children {
+            walk(c, depth + 1, max_depth, out);
+        }
+    }
+    for c in &root.children {
+        walk(c, 0, max_depth, &mut rows);
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1.gpu_ns_subtree));
+    rows.truncate(top);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<48} {:>8} {:>14} {:>14} {:>6}\n",
+        "qualname", "calls", "gpu_self_us", "gpu_subtree_us", "pct"
+    ));
+    out.push_str(&"-".repeat(96));
+    out.push('\n');
+    for (depth, n) in rows {
+        let indent = "  ".repeat(depth as usize);
+        let name = format!("{indent}{}", n.qualname);
+        let pct = (n.gpu_ns_subtree as f64 / total as f64) * 100.0;
+        out.push_str(&format!(
+            "{:<48} {:>8} {:>14.3} {:>14.3} {:>5.1}%\n",
+            truncate(&name, 48),
+            n.calls,
+            n.gpu_ns_self as f64 / 1000.0,
+            n.gpu_ns_subtree as f64 / 1000.0,
+            pct,
+        ));
+    }
+    if let Some(d) = &root.diagnostics {
+        out.push_str(&format!(
+            "\ndiagnostics: unscoped_gpu_us={:.3} unmatched_cb={} malformed_returns={}\n",
+            d.unscoped_gpu_ns as f64 / 1000.0,
+            d.unmatched_cb_count,
+            d.malformed_returns,
+        ));
+    }
+    out
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max - 1).collect();
+        format!("{truncated}...")
+    }
+}
+
+/// Chrome Trace Event Format: array of "complete" (ph=X) events.
+/// Time unit: microseconds. Hierarchy is encoded via `tid`=depth.
+pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    let mut cursor_us: u64 = 0;
+    fn walk(
+        n: &ModuleBreakdown,
+        depth: u16,
+        cursor_us: &mut u64,
+        events: &mut Vec<serde_json::Value>,
+    ) {
+        if n.qualname == "<root>" {
+            for c in &n.children {
+                walk(c, depth, cursor_us, events);
+            }
+            return;
+        }
+        let dur_us = (n.gpu_ns_subtree / 1000).max(1);
+        let start = *cursor_us;
+        events.push(serde_json::json!({
+            "name": n.qualname,
+            "cat": n.class_name,
+            "ph": "X",
+            "ts": start,
+            "dur": dur_us,
+            "pid": 0,
+            "tid": depth,
+            "args": {
+                "calls": n.calls,
+                "gpu_self_us": n.gpu_ns_self / 1000,
+                "eval_count": n.eval_count,
+                "cb_count": n.cb_count,
+            }
+        }));
+        let mut child_cursor = start;
+        for c in &n.children {
+            walk(c, depth + 1, &mut child_cursor, events);
+        }
+        *cursor_us = start + dur_us;
+    }
+    walk(root, 0, &mut cursor_us, &mut events);
+    serde_json::json!({
+        "traceEvents": events,
+        "displayTimeUnit": "ns",
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +681,55 @@ mod tests {
         )];
         let r = compute(evs).unwrap();
         assert_eq!(r.diagnostics.as_ref().unwrap().malformed_returns, 1);
+    }
+
+    fn sample_breakdown() -> ModuleBreakdown {
+        ModuleBreakdown {
+            qualname: "<root>".into(),
+            class_name: "".into(),
+            calls: 0,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: 1500,
+            eval_count: 0,
+            cb_count: 0,
+            children: vec![ModuleBreakdown {
+                qualname: "Block".into(),
+                class_name: "Block".into(),
+                calls: 1,
+                gpu_ns_self: 0,
+                gpu_ns_subtree: 1500,
+                eval_count: 0,
+                cb_count: 0,
+                children: vec![ModuleBreakdown {
+                    qualname: "Linear".into(),
+                    class_name: "Linear".into(),
+                    calls: 1,
+                    gpu_ns_self: 1500,
+                    gpu_ns_subtree: 1500,
+                    eval_count: 1,
+                    cb_count: 1,
+                    children: vec![],
+                    diagnostics: None,
+                }],
+                diagnostics: None,
+            }],
+            diagnostics: Some(Diagnostics::default()),
+        }
+    }
+
+    #[test]
+    fn render_table_shows_qualnames_and_durations() {
+        let s = render_table(&sample_breakdown(), 10, 6);
+        assert!(s.contains("Block"));
+        assert!(s.contains("Linear"));
+        assert!(s.contains("1.500")); // 1500 ns formatted as us
+    }
+
+    #[test]
+    fn render_chrome_trace_is_valid_json_with_complete_events() {
+        let json = render_chrome_trace(&sample_breakdown());
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = parsed["traceEvents"].as_array().unwrap();
+        assert!(arr.iter().any(|e| e["name"] == "Linear" && e["ph"] == "X"));
     }
 }
