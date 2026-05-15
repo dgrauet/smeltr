@@ -2375,6 +2375,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serial_test",
+ "smeltr-analyzer",
  "smeltr-core",
  "smeltr-daemon",
  "smeltr-replay",

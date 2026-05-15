@@ -85,6 +85,7 @@ smeltr daemon uninstall
 | `smeltr sessions list` | After | List sessions on disk |
 | `smeltr sessions show <id>` | After | One-line per event-kind summary |
 | `smeltr analyze <id>` | After | Run analyzer rules → findings (queue pressure, crash correlation, etc.) |
+| `smeltr breakdown [--last] [<id>]` | After | Per-module GPU time breakdown for an MLX inference session |
 | `smeltr mcp` (in Claude) | After | Query sessions from a Claude conversation via MCP tools |
 
 ## Typical workflow
