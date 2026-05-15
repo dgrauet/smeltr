@@ -46,6 +46,11 @@ pub fn dispatch_call(name: &str, args: serde_json::Value) -> Result<serde_json::
             let r = tools::compare_sessions::run(p)?;
             Ok(serde_json::to_value(r)?)
         }
+        "get_inference_breakdown" => {
+            let p: tools::inference_breakdown::Params = serde_json::from_value(args)?;
+            let r = tools::inference_breakdown::run(p)?;
+            Ok(serde_json::to_value(r)?)
+        }
         other => Err(ToolError::BadArgs(format!("unknown tool {other:?}"))),
     }
 }
@@ -170,6 +175,10 @@ impl ServerHandler for SmeltrMcpServer {
             tool::<crate::tools::compare_sessions::Params>(
                 "compare_sessions",
                 "Compare two sessions side by side.",
+            ),
+            tool::<crate::tools::inference_breakdown::Params>(
+                "get_inference_breakdown",
+                "Per-module GPU time breakdown for an MLX inference session.",
             ),
         ];
         Ok(ListToolsResult::with_all_items(tools))
