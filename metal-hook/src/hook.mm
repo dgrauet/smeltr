@@ -30,7 +30,7 @@ static atomic_bool    g_enabled = false;
 static BOOL    g_counter_sampling_supported = NO;
 static id<MTLCounterSet> g_timestamp_counter_set = nil;
 static double  g_ns_per_tick = 0.0;
-static const NSUInteger kMaxSamplesPerEncoder __attribute__((unused)) = 4096;
+static const NSUInteger kMaxSamplesPerEncoder = 4096;
 
 /* Associated-object keys for compute-encoder instrumentation (used by T5/T6/T7). */
 static const void *kSmeltrSampleBufKey  = &kSmeltrSampleBufKey;
@@ -275,6 +275,25 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb) {
         } else {
             smeltr_log("failed to swizzle %s.commit", class_getName(cbcls));
         }
+        if (g_counter_sampling_supported) {
+            if (swizzle_instance(cbcls,
+                                  @selector(computeCommandEncoder),
+                                  @selector(smeltr_computeCommandEncoder))) {
+                smeltr_log("swizzled %s.computeCommandEncoder", class_getName(cbcls));
+            } else {
+                smeltr_log("failed to swizzle %s.computeCommandEncoder",
+                           class_getName(cbcls));
+            }
+            if (swizzle_instance(cbcls,
+                                  @selector(computeCommandEncoderWithDescriptor:),
+                                  @selector(smeltr_computeCommandEncoderWithDescriptor:))) {
+                smeltr_log("swizzled %s.computeCommandEncoderWithDescriptor:",
+                           class_getName(cbcls));
+            } else {
+                smeltr_log("failed to swizzle %s.computeCommandEncoderWithDescriptor:",
+                           class_getName(cbcls));
+            }
+        }
     });
 }
 
@@ -418,6 +437,51 @@ static void smeltr_on_heap_alloc(id<MTLHeap> heap) {
 }
 @end
 
+/* Forward declaration — defined after smeltr_calibrate_ticks. */
+static void smeltr_attach_sample_buffer(id<MTLComputeCommandEncoder> enc, id<MTLDevice> device);
+
+/* MTLCommandBuffer swizzles for computeCommandEncoder creation. */
+@interface NSObject (SmeltrCbEncoderHook)
+- (id)smeltr_computeCommandEncoder;
+- (id)smeltr_computeCommandEncoderWithDescriptor:(id)desc;
+@end
+
+@implementation NSObject (SmeltrCbEncoderHook)
+
+- (id)smeltr_computeCommandEncoder {
+    id enc = [self smeltr_computeCommandEncoder]; // original (after swap)
+    if (enc && g_counter_sampling_supported) {
+        id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
+        smeltr_attach_sample_buffer((id<MTLComputeCommandEncoder>)enc, [cb device]);
+        NSMutableArray *encs = objc_getAssociatedObject(cb, kSmeltrEncodersKey);
+        if (!encs) {
+            encs = [NSMutableArray new];
+            objc_setAssociatedObject(cb, kSmeltrEncodersKey, encs,
+                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [encs addObject:enc];
+    }
+    return enc;
+}
+
+- (id)smeltr_computeCommandEncoderWithDescriptor:(id)desc {
+    id enc = [self smeltr_computeCommandEncoderWithDescriptor:desc]; // original
+    if (enc && g_counter_sampling_supported) {
+        id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
+        smeltr_attach_sample_buffer((id<MTLComputeCommandEncoder>)enc, [cb device]);
+        NSMutableArray *encs = objc_getAssociatedObject(cb, kSmeltrEncodersKey);
+        if (!encs) {
+            encs = [NSMutableArray new];
+            objc_setAssociatedObject(cb, kSmeltrEncodersKey, encs,
+                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [encs addObject:enc];
+    }
+    return enc;
+}
+
+@end
+
 /* MTLHeap swizzles for sub-allocations. Same selector names as on the device
    category, but they live on a different concrete class, which is fine. */
 @interface NSObject (SmeltrHeapAllocHook)
@@ -487,6 +551,32 @@ static void smeltr_calibrate_ticks(id<MTLDevice> device) {
 
 static inline uint64_t __attribute__((unused)) smeltr_ticks_to_ns(uint64_t ticks) {
     return (uint64_t)((double)ticks * g_ns_per_tick);
+}
+
+static void smeltr_attach_sample_buffer(id<MTLComputeCommandEncoder> enc, id<MTLDevice> device) {
+    if (!g_counter_sampling_supported) return;
+    MTLCounterSampleBufferDescriptor *d = [MTLCounterSampleBufferDescriptor new];
+    d.counterSet = g_timestamp_counter_set;
+    d.storageMode = MTLStorageModeShared;
+    d.sampleCount = kMaxSamplesPerEncoder;
+    NSError *err = nil;
+    id<MTLCounterSampleBuffer> sb = [device newCounterSampleBufferWithDescriptor:d error:&err];
+    if (!sb) {
+        smeltr_log("counter sample buffer alloc failed: %s",
+                   err ? [[err localizedDescription] UTF8String] : "(no error)");
+        return;
+    }
+    objc_setAssociatedObject(enc, kSmeltrSampleBufKey, sb,
+                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(enc, kSmeltrSampleIdxKey,
+                              [SmeltrAtomicU64 withValue:0],
+                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(enc, kSmeltrRangesKey,
+                              [NSMutableArray new],
+                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(enc, kSmeltrOpenStackKey,
+                              [NSMutableArray new],
+                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 static void smeltr_swizzle_device_class(void) {
