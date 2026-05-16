@@ -482,6 +482,52 @@ static void smeltr_attach_sample_buffer(id<MTLComputeCommandEncoder> enc, id<MTL
 
 @end
 
+@interface NSObject (SmeltrDebugGroupHook)
+- (void)smeltr_pushDebugGroup:(NSString *)name;
+- (void)smeltr_popDebugGroup;
+@end
+
+@implementation NSObject (SmeltrDebugGroupHook)
+
+- (void)smeltr_pushDebugGroup:(NSString *)name {
+    id<MTLCounterSampleBuffer> sb = objc_getAssociatedObject(self, kSmeltrSampleBufKey);
+    if (sb) {
+        SmeltrAtomicU64 *idx_box = objc_getAssociatedObject(self, kSmeltrSampleIdxKey);
+        uint64_t idx = atomic_fetch_add_explicit(&idx_box->value, 1, memory_order_relaxed);
+        if (idx < kMaxSamplesPerEncoder) {
+            [(id<MTLComputeCommandEncoder>)self sampleCountersInBuffer:sb
+                                                          atSampleIndex:idx
+                                                            withBarrier:NO];
+            NSMutableArray *open = objc_getAssociatedObject(self, kSmeltrOpenStackKey);
+            [open addObject:@[name ?: @"<anon>", @(idx)]];
+        }
+    }
+    [self smeltr_pushDebugGroup:name]; // original (after swap)
+}
+
+- (void)smeltr_popDebugGroup {
+    [self smeltr_popDebugGroup]; // original FIRST (preserve Metal nesting semantics)
+    id<MTLCounterSampleBuffer> sb = objc_getAssociatedObject(self, kSmeltrSampleBufKey);
+    if (sb) {
+        SmeltrAtomicU64 *idx_box = objc_getAssociatedObject(self, kSmeltrSampleIdxKey);
+        uint64_t end_idx = atomic_fetch_add_explicit(&idx_box->value, 1, memory_order_relaxed);
+        if (end_idx < kMaxSamplesPerEncoder) {
+            [(id<MTLComputeCommandEncoder>)self sampleCountersInBuffer:sb
+                                                          atSampleIndex:end_idx
+                                                            withBarrier:NO];
+            NSMutableArray *open = objc_getAssociatedObject(self, kSmeltrOpenStackKey);
+            if (open.count > 0) {
+                NSArray *entry = [open lastObject];
+                [open removeLastObject];
+                NSMutableArray *ranges = objc_getAssociatedObject(self, kSmeltrRangesKey);
+                [ranges addObject:@[entry[0], entry[1], @(end_idx)]];
+            }
+        }
+    }
+}
+
+@end
+
 /* MTLHeap swizzles for sub-allocations. Same selector names as on the device
    category, but they live on a different concrete class, which is fine. */
 @interface NSObject (SmeltrHeapAllocHook)
@@ -577,6 +623,25 @@ static void smeltr_attach_sample_buffer(id<MTLComputeCommandEncoder> enc, id<MTL
     objc_setAssociatedObject(enc, kSmeltrOpenStackKey,
                               [NSMutableArray new],
                               OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    static dispatch_once_t s_dg_once;
+    dispatch_once(&s_dg_once, ^{
+        Class ecls = object_getClass(enc);
+        if (swizzle_instance(ecls,
+                              @selector(pushDebugGroup:),
+                              @selector(smeltr_pushDebugGroup:))) {
+            smeltr_log("swizzled %s.pushDebugGroup:", class_getName(ecls));
+        } else {
+            smeltr_log("failed to swizzle %s.pushDebugGroup:", class_getName(ecls));
+        }
+        if (swizzle_instance(ecls,
+                              @selector(popDebugGroup),
+                              @selector(smeltr_popDebugGroup))) {
+            smeltr_log("swizzled %s.popDebugGroup", class_getName(ecls));
+        } else {
+            smeltr_log("failed to swizzle %s.popDebugGroup", class_getName(ecls));
+        }
+    });
 }
 
 static void smeltr_swizzle_device_class(void) {
