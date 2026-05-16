@@ -129,29 +129,36 @@ point and GPU time is attributed to `<unscoped>`. Module names still appear in
 the tree via `ModuleEntered` events with `gpu_ns_self = 0`. Phase 2 (op-level
 attribution via Metal debug groups) lifts this limitation — see below.
 
-### Op-level decomposition (Phase 2)
+### Op-level decomposition (Phase 2.5)
 
-Under each module leaf, `smeltr breakdown` lists the top-N GPU ops
-(Matmul, Softmax, LayerNorm, RMSNorm, ...) captured by intercepting
-MLX's `pushDebugGroup` / `popDebugGroup` calls on every
-`MTLComputeCommandEncoder`. Requires a device that supports
-`MTLCounterSamplingPointAtDispatchBoundary` — every M-series Mac since M1.
+Under each module leaf, `smeltr breakdown` lists the top-N GPU kernels
+captured by tracking each dispatch's MTLComputePipelineState pointer
+and threadgroup dimensions. Names are synthetic — `K_<pso_hash>_<tg_w>x<tg_h>x<tg_d>` —
+because MLX 0.31 does not emit debug groups in its kernel encoding
+path. Same-named entries across CBs correspond to the same underlying
+kernel; threadgroup dimensions disambiguate when a single PSO is
+launched with different shapes.
+
+Per-kernel GPU time is approximated by distributing the per-CB
+`in_flight_ns` pro-rata by dispatch count across the kernels that ran
+in that CB. This is an order-of-magnitude estimate: it assumes all
+dispatches within a CB cost the same. For typical workloads where one
+or two kernels dominate, the ranking is informative even if the
+absolute numbers per kernel are not exact.
 
 Useful when a forward pass collapses into a single top-level `mx.eval()`
 (typical for autoregressive LLMs): the module-level attribution shows
 100% under `<unscoped>`, but the op-level view decomposes that bucket
-into `Matmul / Softmax / RMSNorm / …`.
+by kernel signature.
 
 Flags:
 
-- `--top-ops N` (default 5) — max ops shown per module leaf.
-- `--no-ops` — hide the per-op lines.
+- `--top-ops N` (default 5) — max kernels shown per module leaf.
+- `--no-ops` — hide the per-kernel lines.
 - `--ops-flat` — cross-module flat table instead of the module tree.
 
-Kill switch: `SMELTR_HOOK_NO_OPS=1` disables op-level capture in the
-metal-hook (CB-level capture stays active). When counter sampling is
-unsupported on the device, the hook emits a `MetalHookSkipped` event
-with reason starting `"op-level capture disabled: …"`.
+Kill switch: `SMELTR_HOOK_NO_OPS=1` disables op-level capture (CB-level
+capture stays active).
 
 ## Development
 

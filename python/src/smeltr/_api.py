@@ -99,6 +99,9 @@ def _require_attached() -> _Client:
 
 def _emit(payload: dict, *, pid: int | None = None) -> None:
     c = _require_attached()
+    if pid is None:
+        import os
+        pid = os.getpid()
     c.emit(payload, pid=pid, source=SOURCE_PYTHON_SIDECAR)
 
 

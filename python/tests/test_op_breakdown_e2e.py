@@ -1,11 +1,14 @@
-"""End-to-end Phase 2: smeltr record on a tiny MLX model produces op-level breakdown.
+"""End-to-end Phase 2.5: smeltr record on a tiny MLX model produces
+PSO-signature op lines in the breakdown.
 
-Skips when MLX isn't installed, not on macOS, or counter sampling isn't
-supported on the test device. The test makes a best-effort assertion:
-at least one common MLX op kind (Matmul/Softmax/Cast/...) should appear
-under '└ op:' in the breakdown output. On devices that don't support
-counter sampling, the assertion is relaxed to just check that the
-breakdown runs cleanly and reports the metal hook skip.
+Phase 2.5 captures each dispatched kernel's MTLComputePipelineState
+pointer + threadgroup dimensions as a synthetic identity (no semantic
+name — MLX 0.31 doesn't emit debug groups). The per-CB in_flight_ns is
+distributed pro-rata by dispatch count to give a rough time-per-kernel
+attribution.
+
+Skips when MLX isn't installed, not on macOS, or when op-level capture
+is disabled (SMELTR_HOOK_NO_OPS=1).
 """
 
 from __future__ import annotations
@@ -100,9 +103,8 @@ def test_op_breakdown_records_some_op(short_tmp_dir, tmp_path):
         model_py.write_text(_MODEL_SCRIPT)
 
         # `smeltr record` injects the metal-hook dylib + sets SMELTR_AUTOLOAD=1
-        # so the python sidecar attaches automatically. Phase 2 op-level
-        # capture activates inside the dylib if the device supports
-        # MTLCounterSamplingPointAtDispatchBoundary.
+        # so the python sidecar attaches automatically. Phase 2.5 op-level
+        # capture activates inside the dylib via PSO pointer + threadgroup dims.
         record = subprocess.run(
             [str(smeltr_cli), "record", sys.executable, str(model_py)],
             env=env,
@@ -159,21 +161,13 @@ def test_op_breakdown_records_some_op(short_tmp_dir, tmp_path):
     # the record run's stderr for the skip condition.
     if "op-level capture disabled" in record.stderr:
         pytest.skip(
-            "device does not support MTLCounterSamplingPointAtDispatchBoundary "
-            "or SMELTR_HOOK_NO_OPS was set"
+            "op-level capture disabled — SMELTR_HOOK_NO_OPS=1 or hook inactive"
         )
 
-    # At least one op kind should appear. Use a generous list because exactly
-    # which kinds MLX emits depends on the version + the kernels selected.
-    op_keywords = ("Matmul", "Softmax", "Cast", "Copy", "Broadcast")
-    assert "└ op:" in out, (
-        f"expected at least one op line in breakdown:\n{out}"
-    )
-    assert any(kw in out for kw in op_keywords), (
-        f"expected one of {op_keywords} in breakdown:\n{out}"
-    )
-
-    # If counter sampling is supported, we expect the diagnostic to be 0.
-    assert "ops_cbs_without_samples=0" in out, (
-        f"expected ops_cbs_without_samples=0 on a supported device:\n{out}"
+    # Phase 2.5: op names are PSO+threadgroup signatures, e.g. "K_a3f7_32x1x1".
+    # We assert at least one such line appears in the breakdown table. The
+    # semantic names (Matmul, Softmax, ...) are not recoverable without MLX
+    # emitting debug groups, which it doesn't in 0.31.
+    assert "└ op:K_" in out, (
+        f"expected at least one K_<sig>_<dims> op line in breakdown:\n{out}"
     )

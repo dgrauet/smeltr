@@ -109,8 +109,14 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     malformed_returns += open_calls.len() as u64;
 
     // 2. Pair MlxEvalEntered/Returned by call_id.
-    let mut eval_entered: HashMap<u64, (u64, Vec<u64>)> = HashMap::new();
-    let mut eval_intervals: Vec<EvalInterval> = Vec::new();
+    //
+    // MLX 0.31+ uses async GPU scheduling: mx.eval() returns quickly (< 10 ms)
+    // after merely queuing GPU work; the Metal CBs are committed by the driver
+    // thread up to ~500 ms later. To keep those CBs inside their attribution
+    // window we extend t_out by ASYNC_GRACE_NS when was_async=true.
+    const ASYNC_GRACE_NS: u64 = 500_000_000; // 500 ms
+    let mut compute_entered: HashMap<u64, (u64, Vec<u64>)> = HashMap::new();
+    let mut compute_intervals: Vec<EvalInterval> = Vec::new();
     for ev in &events {
         match &ev.payload {
             Payload::MlxEvalEntered {
@@ -118,21 +124,28 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 module_stack,
                 ..
             } => {
-                eval_entered.insert(*call_id, (ev.ts_mono_ns, module_stack.clone()));
+                compute_entered.insert(*call_id, (ev.ts_mono_ns, module_stack.clone()));
             }
-            Payload::MlxEvalReturned { call_id, .. } => {
-                if let Some((t_in, stack)) = eval_entered.remove(call_id) {
-                    eval_intervals.push(EvalInterval {
-                        t_in,
-                        t_out: ev.ts_mono_ns,
-                        stack,
-                    });
+            Payload::MlxEvalReturned {
+                call_id, was_async, ..
+            } => {
+                if let Some((t_in, stack)) = compute_entered.remove(call_id) {
+                    let t_out = if *was_async {
+                        ev.ts_mono_ns.saturating_add(ASYNC_GRACE_NS)
+                    } else {
+                        ev.ts_mono_ns
+                    };
+                    compute_intervals.push(EvalInterval { t_in, t_out, stack });
                 }
             }
             _ => {}
         }
     }
-    eval_intervals.sort_by_key(|e| e.t_in);
+    let eval_intervals = {
+        let mut v = compute_intervals;
+        v.sort_by_key(|e| e.t_in);
+        v
+    };
 
     // 2.5. Index MetalCbOps by cb_id.
     let mut cb_ops_index: HashMap<u64, Vec<OpSample>> = HashMap::new();
