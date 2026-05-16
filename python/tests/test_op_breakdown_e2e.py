@@ -154,7 +154,10 @@ def test_op_breakdown_records_some_op(short_tmp_dir, tmp_path):
     )
     out = breakdown.stdout
 
-    if "op-level capture disabled" in out:
+    # The hook emits "op-level capture disabled" to its own stderr (which is
+    # part of `record`'s stderr), NOT to `smeltr breakdown` stdout.  Check
+    # the record run's stderr for the skip condition.
+    if "op-level capture disabled" in record.stderr:
         pytest.skip(
             "device does not support MTLCounterSamplingPointAtDispatchBoundary "
             "or SMELTR_HOOK_NO_OPS was set"

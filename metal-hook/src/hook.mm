@@ -797,6 +797,9 @@ static id smeltr_swz_cmdBufferWithDescriptor(id self, SEL _cmd, id desc) {
     id cb = orig_cmdBufferWithDescriptor(self, _cmd, desc);
     SMELTR_TRACE("_MTLCommandQueue.commandBufferWithDescriptor: queue=%p cb=%p",
                  self, cb);
+    if (cb && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
+        smeltr_install_cb_swizzle((id<MTLCommandBuffer>)cb);
+    }
     return cb;
 }
 
