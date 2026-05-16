@@ -273,4 +273,21 @@ impl RingWriter {
         push_u64(&mut p, texture_id);
         self.write_frame(kind::TEXTURE_FREE, ts, &p)
     }
+    pub fn write_cb_ops(
+        &mut self,
+        ts: u64,
+        cb_id: u64,
+        ops: &[(&str, u64, u32)],
+    ) -> Result<(), RingError> {
+        let mut p = Vec::new();
+        push_u64(&mut p, cb_id);
+        push_u32(&mut p, ops.len() as u32);
+        for (name, gpu_ns, count) in ops {
+            push_u32(&mut p, name.len() as u32);
+            p.extend_from_slice(name.as_bytes());
+            push_u64(&mut p, *gpu_ns);
+            push_u32(&mut p, *count);
+        }
+        self.write_frame(kind::CB_OPS, ts, &p)
+    }
 }

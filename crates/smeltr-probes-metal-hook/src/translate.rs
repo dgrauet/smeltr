@@ -75,6 +75,17 @@ pub fn frame_to_payload(f: DecodedFrame) -> Payload {
             label,
         },
         DecodedFrame::TextureFree { texture_id } => Payload::MetalTextureFree { texture_id },
+        DecodedFrame::CbOps { cb_id, ops } => Payload::MetalCbOps {
+            cb_id,
+            ops: ops
+                .into_iter()
+                .map(|o| smeltr_core::event::OpSample {
+                    name: o.name,
+                    gpu_ns: o.gpu_ns,
+                    count: o.count,
+                })
+                .collect(),
+        },
         DecodedFrame::Dropped { count } => Payload::MetalHookDropped { count },
         DecodedFrame::Skipped { reason } => Payload::MetalHookSkipped { reason },
     }
@@ -83,6 +94,7 @@ pub fn frame_to_payload(f: DecodedFrame) -> Payload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smeltr_metal_ring::DecodedOpSample;
 
     #[test]
     fn maps_cb_committed() {
@@ -126,5 +138,46 @@ mod tests {
     fn maps_dropped_to_hook_dropped() {
         let p = frame_to_payload(DecodedFrame::Dropped { count: 42 });
         assert!(matches!(p, Payload::MetalHookDropped { count: 42 }));
+    }
+
+    #[test]
+    fn cb_ops_translates_with_ops() {
+        let p = frame_to_payload(DecodedFrame::CbOps {
+            cb_id: 0xdead_beef,
+            ops: vec![
+                DecodedOpSample {
+                    name: "Matmul".into(),
+                    gpu_ns: 6_200_000,
+                    count: 3,
+                },
+                DecodedOpSample {
+                    name: "Softmax".into(),
+                    gpu_ns: 1_500_000,
+                    count: 1,
+                },
+            ],
+        });
+        match p {
+            Payload::MetalCbOps { cb_id, ops } => {
+                assert_eq!(cb_id, 0xdead_beef);
+                assert_eq!(ops.len(), 2);
+                assert_eq!(ops[0].name, "Matmul");
+                assert_eq!(ops[0].gpu_ns, 6_200_000);
+                assert_eq!(ops[0].count, 3);
+            }
+            other => panic!("expected MetalCbOps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cb_ops_translates_empty() {
+        let p = frame_to_payload(DecodedFrame::CbOps {
+            cb_id: 1,
+            ops: vec![],
+        });
+        match p {
+            Payload::MetalCbOps { cb_id: 1, ops } => assert!(ops.is_empty()),
+            other => panic!("expected MetalCbOps, got {other:?}"),
+        }
     }
 }
