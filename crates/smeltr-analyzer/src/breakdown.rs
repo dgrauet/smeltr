@@ -440,6 +440,21 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
                 "cb_count": n.cb_count,
             }
         }));
+        let mut op_cursor = start;
+        for op in &n.ops {
+            let dur_us = (op.gpu_ns / 1000).max(1);
+            events.push(serde_json::json!({
+                "name": op.name,
+                "cat": "op",
+                "ph": "X",
+                "ts": op_cursor,
+                "dur": dur_us,
+                "pid": 0,
+                "tid": depth + 1,
+                "args": { "count": op.count, "gpu_ns": op.gpu_ns },
+            }));
+            op_cursor += dur_us;
+        }
         let mut child_cursor = start;
         for c in &n.children {
             walk(c, depth + 1, &mut child_cursor, events);
@@ -452,6 +467,49 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
         "displayTimeUnit": "us",
     })
     .to_string()
+}
+
+/// Aggregate ops across all module leaves and return a flat table sorted by gpu_ns desc.
+pub fn render_ops_flat(root: &ModuleBreakdown, top: usize) -> String {
+    let mut agg: HashMap<String, (u64, u64)> = HashMap::new();
+    fn walk(n: &ModuleBreakdown, agg: &mut HashMap<String, (u64, u64)>) {
+        for op in &n.ops {
+            let e = agg.entry(op.name.clone()).or_insert((0, 0));
+            e.0 += op.gpu_ns;
+            e.1 += op.count;
+        }
+        for c in &n.children {
+            walk(c, agg);
+        }
+    }
+    walk(root, &mut agg);
+
+    let total: u64 = agg.values().map(|(ns, _)| *ns).sum::<u64>().max(1);
+    let mut rows: Vec<(String, u64, u64)> = agg
+        .into_iter()
+        .map(|(name, (ns, c))| (name, ns, c))
+        .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+    rows.truncate(top);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<32} {:>8} {:>14} {:>6}\n",
+        "op", "count", "gpu_us", "pct"
+    ));
+    out.push_str(&"-".repeat(64));
+    out.push('\n');
+    for (name, ns, c) in rows {
+        let pct = (ns as f64 / total as f64) * 100.0;
+        out.push_str(&format!(
+            "{:<32} {:>8} {:>14.3} {:>5.1}%\n",
+            name,
+            c,
+            ns as f64 / 1000.0,
+            pct,
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1305,5 +1363,80 @@ mod tests {
         let arr = parsed["traceEvents"].as_array().unwrap();
         assert!(arr.iter().any(|e| e["name"] == "Linear" && e["ph"] == "X"));
         assert_eq!(parsed["displayTimeUnit"], "us");
+    }
+
+    #[test]
+    fn render_chrome_trace_includes_op_events() {
+        let r = fixture_with_ops(vec![OpAttribution {
+            name: "Matmul".into(),
+            gpu_ns: 1000,
+            count: 1,
+        }]);
+        let json = render_chrome_trace(&r);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = parsed["traceEvents"].as_array().unwrap();
+        assert!(arr
+            .iter()
+            .any(|e| e["name"] == "Matmul" && e["cat"] == "op"));
+    }
+
+    #[test]
+    fn render_ops_flat_groups_by_name() {
+        let root = ModuleBreakdown {
+            qualname: "<root>".into(),
+            class_name: "".into(),
+            calls: 0,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: 3000,
+            eval_count: 0,
+            cb_count: 0,
+            children: vec![
+                ModuleBreakdown {
+                    qualname: "A".into(),
+                    class_name: "A".into(),
+                    calls: 1,
+                    gpu_ns_self: 1500,
+                    gpu_ns_subtree: 1500,
+                    eval_count: 1,
+                    cb_count: 1,
+                    children: vec![],
+                    ops: vec![OpAttribution {
+                        name: "Matmul".into(),
+                        gpu_ns: 1000,
+                        count: 1,
+                    }],
+                    diagnostics: None,
+                },
+                ModuleBreakdown {
+                    qualname: "B".into(),
+                    class_name: "B".into(),
+                    calls: 1,
+                    gpu_ns_self: 1500,
+                    gpu_ns_subtree: 1500,
+                    eval_count: 1,
+                    cb_count: 1,
+                    children: vec![],
+                    ops: vec![
+                        OpAttribution {
+                            name: "Matmul".into(),
+                            gpu_ns: 500,
+                            count: 2,
+                        },
+                        OpAttribution {
+                            name: "Softmax".into(),
+                            gpu_ns: 200,
+                            count: 1,
+                        },
+                    ],
+                    diagnostics: None,
+                },
+            ],
+            ops: vec![],
+            diagnostics: Some(Diagnostics::default()),
+        };
+        let s = render_ops_flat(&root, 10);
+        assert!(s.contains("Matmul"));
+        assert!(s.contains("1.500")); // 1500 ns formatted as us → "1.500"
+        assert!(s.contains("Softmax"));
     }
 }
