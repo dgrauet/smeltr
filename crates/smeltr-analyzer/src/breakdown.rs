@@ -1,7 +1,7 @@
 //! Module-level GPU breakdown computed from a session's events.
 
 use serde::{Deserialize, Serialize};
-use smeltr_core::event::{Event, Payload};
+use smeltr_core::event::{Event, OpSample, Payload};
 use std::collections::HashMap;
 
 /// Reserved qualname for time not attributable to any module call.
@@ -54,6 +54,7 @@ struct CallNode {
     gpu_ns_self: u64,
     eval_count: u64,
     cb_count: u64,
+    ops_buf: HashMap<String, (u64, u64)>,
 }
 
 struct EvalInterval {
@@ -133,9 +134,19 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     }
     eval_intervals.sort_by_key(|e| e.t_in);
 
+    // 2.5. Index MetalCbOps by cb_id.
+    let mut cb_ops_index: HashMap<u64, Vec<OpSample>> = HashMap::new();
+    let mut seen_any_cb_ops = false;
+    for ev in &events {
+        if let Payload::MetalCbOps { cb_id, ops } = &ev.payload {
+            seen_any_cb_ops = true;
+            cb_ops_index.insert(*cb_id, ops.clone());
+        }
+    }
+
     // 3. Pair MetalCbCommitted/Completed by cb_id.
     let mut cb_commit_ts: HashMap<u64, u64> = HashMap::new();
-    let mut cb_completed: Vec<(u64, u64)> = Vec::new(); // (commit_ts, in_flight_ns)
+    let mut cb_completed: Vec<(u64, u64, u64)> = Vec::new(); // (cb_id, commit_ts, in_flight_ns)
     for ev in &events {
         match &ev.payload {
             Payload::MetalCbCommitted { cb_id, .. } => {
@@ -147,7 +158,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 ..
             } => {
                 if let Some(commit_ts) = cb_commit_ts.remove(cb_id) {
-                    cb_completed.push((commit_ts, *in_flight_ns));
+                    cb_completed.push((*cb_id, commit_ts, *in_flight_ns));
                 }
             }
             _ => {}
@@ -159,18 +170,40 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     let mut unmatched_cb_count: u64 = 0;
     let mut per_eval_gpu_ns: Vec<u64> = vec![0; eval_intervals.len()];
     let mut per_eval_cb_count: Vec<u64> = vec![0; eval_intervals.len()];
-    for (commit_ts, ns) in &cb_completed {
+    let mut per_eval_ops: Vec<HashMap<String, (u64, u64)>> =
+        (0..eval_intervals.len()).map(|_| HashMap::new()).collect();
+    let mut unscoped_ops: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut ops_cbs_without_samples: u64 = 0;
+    for (cb_id, commit_ts, ns) in &cb_completed {
         let idx = eval_intervals
             .iter()
             .position(|e| e.t_in <= *commit_ts && *commit_ts <= e.t_out);
+        let ops_for_cb = cb_ops_index.get(cb_id);
+        if seen_any_cb_ops && ops_for_cb.is_none() {
+            ops_cbs_without_samples += 1;
+        }
         match idx {
             Some(i) => {
                 per_eval_gpu_ns[i] += *ns;
                 per_eval_cb_count[i] += 1;
+                if let Some(ops) = ops_for_cb {
+                    for op in ops {
+                        let e = per_eval_ops[i].entry(op.name.clone()).or_insert((0, 0));
+                        e.0 += op.gpu_ns;
+                        e.1 += op.count as u64;
+                    }
+                }
             }
             None => {
                 unscoped_gpu_ns += *ns;
                 unmatched_cb_count += 1;
+                if let Some(ops) = ops_for_cb {
+                    for op in ops {
+                        let e = unscoped_ops.entry(op.name.clone()).or_insert((0, 0));
+                        e.0 += op.gpu_ns;
+                        e.1 += op.count as u64;
+                    }
+                }
             }
         }
     }
@@ -186,12 +219,22 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 node.gpu_ns_self += gpu;
                 node.eval_count += 1;
                 node.cb_count += cbs;
+                for (name, (ns, c)) in per_eval_ops[i].drain() {
+                    let e = node.ops_buf.entry(name).or_insert((0, 0));
+                    e.0 += ns;
+                    e.1 += c;
+                }
                 continue;
             }
         }
         unscoped_gpu_ns += gpu;
         unscoped_eval_count += 1;
         unscoped_cb_count_from_evals += cbs;
+        for (name, (ns, c)) in per_eval_ops[i].drain() {
+            let e = unscoped_ops.entry(name).or_insert((0, 0));
+            e.0 += ns;
+            e.1 += c;
+        }
     }
 
     // 6. Build the output tree.
@@ -201,6 +244,16 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             n.children.iter().map(|c| build(*c, calls)).collect();
         let subtree: u64 = n.gpu_ns_self + children.iter().map(|c| c.gpu_ns_subtree).sum::<u64>();
         children.sort_by_key(|b| std::cmp::Reverse(b.gpu_ns_subtree));
+        let mut ops: Vec<OpAttribution> = n
+            .ops_buf
+            .iter()
+            .map(|(name, (ns, c))| OpAttribution {
+                name: name.clone(),
+                gpu_ns: *ns,
+                count: *c,
+            })
+            .collect();
+        ops.sort_by_key(|o| std::cmp::Reverse(o.gpu_ns));
         ModuleBreakdown {
             qualname: n.qualname.clone(),
             class_name: n.class_name.clone(),
@@ -210,7 +263,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             eval_count: n.eval_count,
             cb_count: n.cb_count,
             children,
-            ops: vec![],
+            ops,
             diagnostics: None,
         }
     }
@@ -224,6 +277,15 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     let total_subtree: u64 = root_children.iter().map(|c| c.gpu_ns_subtree).sum();
     let grand_total = total_subtree + unscoped_gpu_ns;
     if unscoped_gpu_ns > 0 || unscoped_eval_count > 0 || unmatched_cb_count > 0 {
+        let mut unscoped_ops_vec: Vec<OpAttribution> = unscoped_ops
+            .into_iter()
+            .map(|(name, (ns, c))| OpAttribution {
+                name,
+                gpu_ns: ns,
+                count: c,
+            })
+            .collect();
+        unscoped_ops_vec.sort_by_key(|o| std::cmp::Reverse(o.gpu_ns));
         root_children.push(ModuleBreakdown {
             qualname: UNSCOPED.into(),
             class_name: String::new(),
@@ -233,7 +295,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             eval_count: unscoped_eval_count,
             cb_count: unmatched_cb_count + unscoped_cb_count_from_evals,
             children: vec![],
-            ops: vec![],
+            ops: unscoped_ops_vec,
             diagnostics: None,
         });
     }
@@ -253,7 +315,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             unscoped_gpu_ns,
             unmatched_cb_count,
             malformed_returns,
-            ops_cbs_without_samples: 0,
+            ops_cbs_without_samples,
         }),
     })
 }
@@ -376,7 +438,7 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smeltr_core::event::{Payload, Source};
+    use smeltr_core::event::{OpSample, Payload, Source};
     use uuid::Uuid;
 
     fn ev(seq: u64, ts: u64, payload: Payload, source: Source) -> Event {
@@ -388,6 +450,14 @@ mod tests {
             pid: None,
             seq,
             payload,
+        }
+    }
+
+    fn op_sample(name: &str, gpu_ns: u64, count: u32) -> OpSample {
+        OpSample {
+            name: name.into(),
+            gpu_ns,
+            count,
         }
     }
 
@@ -699,6 +769,395 @@ mod tests {
         )];
         let r = compute(evs).unwrap();
         assert_eq!(r.diagnostics.as_ref().unwrap().malformed_returns, 1);
+    }
+
+    #[test]
+    fn ops_attribution_to_module_leaf() {
+        let evs = vec![
+            ev(
+                1,
+                50,
+                Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 1,
+                    qualname: "Block".into(),
+                    class_name: "Block".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                2,
+                60,
+                Payload::ModuleEntered {
+                    module_call_id: 2,
+                    module_def_id: 2,
+                    qualname: "Linear".into(),
+                    class_name: "Linear".into(),
+                    parent_call_id: Some(1),
+                    depth: 1,
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                3,
+                100,
+                Payload::MlxEvalEntered {
+                    call_id: 7,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![1, 2],
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                4,
+                110,
+                Payload::MetalCbCommitted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                5,
+                120,
+                Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 1000,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                6,
+                121,
+                Payload::MetalCbOps {
+                    cb_id: 9,
+                    ops: vec![op_sample("Matmul", 700, 1), op_sample("Softmax", 200, 1)],
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                7,
+                200,
+                Payload::MlxEvalReturned {
+                    call_id: 7,
+                    duration_ns: 100,
+                    was_async: false,
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                8,
+                210,
+                Payload::ModuleReturned { module_call_id: 2 },
+                Source::PythonSidecar,
+            ),
+            ev(
+                9,
+                220,
+                Payload::ModuleReturned { module_call_id: 1 },
+                Source::PythonSidecar,
+            ),
+        ];
+        let r = compute(evs).unwrap();
+        let block = find_child(&r, "Block");
+        let lin = block
+            .children
+            .iter()
+            .find(|c| c.qualname == "Linear")
+            .unwrap();
+        assert_eq!(lin.ops.len(), 2);
+        assert_eq!(lin.ops[0].name, "Matmul");
+        assert_eq!(lin.ops[0].gpu_ns, 700);
+        assert_eq!(lin.ops[1].name, "Softmax");
+        assert!(block.ops.is_empty(), "ops should not propagate to parent");
+    }
+
+    #[test]
+    fn ops_under_unscoped() {
+        let evs = vec![
+            ev(
+                1,
+                100,
+                Payload::MlxEvalEntered {
+                    call_id: 1,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![],
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                2,
+                110,
+                Payload::MetalCbCommitted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                3,
+                120,
+                Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 500,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                4,
+                121,
+                Payload::MetalCbOps {
+                    cb_id: 9,
+                    ops: vec![op_sample("Matmul", 400, 1), op_sample("Cast", 100, 2)],
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                5,
+                200,
+                Payload::MlxEvalReturned {
+                    call_id: 1,
+                    duration_ns: 100,
+                    was_async: false,
+                },
+                Source::PythonSidecar,
+            ),
+        ];
+        let r = compute(evs).unwrap();
+        let u = find_child(&r, UNSCOPED);
+        assert_eq!(u.ops.len(), 2);
+        assert_eq!(u.ops[0].name, "Matmul");
+    }
+
+    #[test]
+    fn ops_merge_dedup_by_name_across_cbs() {
+        let evs = vec![
+            ev(
+                1,
+                50,
+                Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 1,
+                    qualname: "Linear".into(),
+                    class_name: "Linear".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                2,
+                100,
+                Payload::MlxEvalEntered {
+                    call_id: 7,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![1],
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                3,
+                110,
+                Payload::MetalCbCommitted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                4,
+                120,
+                Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 500,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                5,
+                121,
+                Payload::MetalCbOps {
+                    cb_id: 9,
+                    ops: vec![op_sample("Matmul", 300, 1)],
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                6,
+                130,
+                Payload::MetalCbCommitted {
+                    cb_id: 10,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                7,
+                140,
+                Payload::MetalCbCompleted {
+                    cb_id: 10,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 200,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                8,
+                141,
+                Payload::MetalCbOps {
+                    cb_id: 10,
+                    ops: vec![op_sample("Matmul", 300, 2)],
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                9,
+                200,
+                Payload::MlxEvalReturned {
+                    call_id: 7,
+                    duration_ns: 100,
+                    was_async: false,
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                10,
+                210,
+                Payload::ModuleReturned { module_call_id: 1 },
+                Source::PythonSidecar,
+            ),
+        ];
+        let r = compute(evs).unwrap();
+        let lin = find_child(&r, "Linear");
+        assert_eq!(lin.ops.len(), 1);
+        assert_eq!(lin.ops[0].gpu_ns, 600);
+        assert_eq!(lin.ops[0].count, 3);
+    }
+
+    #[test]
+    fn cb_without_ops_partial_increments_diagnostic() {
+        let evs = vec![
+            ev(
+                1,
+                100,
+                Payload::MetalCbCommitted {
+                    cb_id: 1,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                2,
+                110,
+                Payload::MetalCbCompleted {
+                    cb_id: 1,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 100,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                3,
+                111,
+                Payload::MetalCbOps {
+                    cb_id: 1,
+                    ops: vec![op_sample("Matmul", 80, 1)],
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                4,
+                120,
+                Payload::MetalCbCommitted {
+                    cb_id: 2,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                5,
+                130,
+                Payload::MetalCbCompleted {
+                    cb_id: 2,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 50,
+                },
+                Source::MetalHook,
+            ),
+            // cb_id 2 has NO MetalCbOps — should be counted
+        ];
+        let r = compute(evs).unwrap();
+        assert_eq!(r.diagnostics.as_ref().unwrap().ops_cbs_without_samples, 1);
+    }
+
+    #[test]
+    fn cb_without_ops_legacy_mode_silent() {
+        let evs = vec![
+            ev(
+                1,
+                100,
+                Payload::MetalCbCommitted {
+                    cb_id: 1,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                2,
+                110,
+                Payload::MetalCbCompleted {
+                    cb_id: 1,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 100,
+                },
+                Source::MetalHook,
+            ),
+        ];
+        let r = compute(evs).unwrap();
+        assert_eq!(r.diagnostics.as_ref().unwrap().ops_cbs_without_samples, 0);
     }
 
     fn sample_breakdown() -> ModuleBreakdown {
