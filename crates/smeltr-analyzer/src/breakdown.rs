@@ -7,6 +7,13 @@ use std::collections::HashMap;
 /// Reserved qualname for time not attributable to any module call.
 pub const UNSCOPED: &str = "<unscoped>";
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct OpAttribution {
+    pub name: String,
+    pub gpu_ns: u64,
+    pub count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModuleBreakdown {
     pub qualname: String,
@@ -17,6 +24,8 @@ pub struct ModuleBreakdown {
     pub eval_count: u64,
     pub cb_count: u64,
     pub children: Vec<ModuleBreakdown>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<OpAttribution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Diagnostics>,
 }
@@ -26,6 +35,8 @@ pub struct Diagnostics {
     pub unscoped_gpu_ns: u64,
     pub unmatched_cb_count: u64,
     pub malformed_returns: u64,
+    #[serde(default)]
+    pub ops_cbs_without_samples: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -199,6 +210,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             eval_count: n.eval_count,
             cb_count: n.cb_count,
             children,
+            ops: vec![],
             diagnostics: None,
         }
     }
@@ -221,6 +233,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             eval_count: unscoped_eval_count,
             cb_count: unmatched_cb_count + unscoped_cb_count_from_evals,
             children: vec![],
+            ops: vec![],
             diagnostics: None,
         });
     }
@@ -235,10 +248,12 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         eval_count: 0,
         cb_count: 0,
         children: root_children,
+        ops: vec![],
         diagnostics: Some(Diagnostics {
             unscoped_gpu_ns,
             unmatched_cb_count,
             malformed_returns,
+            ops_cbs_without_samples: 0,
         }),
     })
 }
@@ -712,10 +727,13 @@ mod tests {
                     eval_count: 1,
                     cb_count: 1,
                     children: vec![],
+                    ops: vec![],
                     diagnostics: None,
                 }],
+                ops: vec![],
                 diagnostics: None,
             }],
+            ops: vec![],
             diagnostics: Some(Diagnostics::default()),
         }
     }
