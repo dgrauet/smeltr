@@ -6,5 +6,6 @@ pub mod crash_report;
 pub mod inference_breakdown;
 pub mod list_sessions;
 pub mod metal_cb_history;
+pub mod op_summary;
 pub mod query_events;
 pub mod session_summary;

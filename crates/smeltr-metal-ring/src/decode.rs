@@ -2,6 +2,13 @@ use crate::error::RingError;
 use crate::wire::kind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedOpSample {
+    pub name: String,
+    pub gpu_ns: u64,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodedFrame {
     CbCommitted {
         cb_id: u64,
@@ -25,6 +32,10 @@ pub enum DecodedFrame {
         cb_id: u64,
         queue_id: u64,
         elapsed_ns: u64,
+    },
+    CbOps {
+        cb_id: u64,
+        ops: Vec<DecodedOpSample>,
     },
     HeapAlloc {
         heap_id: u64,
@@ -173,6 +184,27 @@ pub fn decode_frame(kind_val: u32, payload: &[u8]) -> Result<DecodedFrame, RingE
         k if k == kind::TEXTURE_FREE => DecodedFrame::TextureFree {
             texture_id: c.read_u64()?,
         },
+        k if k == kind::CB_OPS => {
+            let cb_id = c.read_u64()?;
+            let op_count = c.read_u32()? as usize;
+            let mut ops = Vec::with_capacity(op_count);
+            for _ in 0..op_count {
+                let name_len = c.read_u32()? as usize;
+                if c.pos + name_len > c.buf.len() {
+                    return Err(RingError::Truncated(c.pos as u64));
+                }
+                let name = std::str::from_utf8(&c.buf[c.pos..c.pos + name_len])?.to_string();
+                c.pos += name_len;
+                let gpu_ns = c.read_u64()?;
+                let count = c.read_u32()?;
+                ops.push(DecodedOpSample {
+                    name,
+                    gpu_ns,
+                    count,
+                });
+            }
+            DecodedFrame::CbOps { cb_id, ops }
+        }
         k if k == kind::DROPPED => DecodedFrame::Dropped {
             count: c.read_u64()?,
         },

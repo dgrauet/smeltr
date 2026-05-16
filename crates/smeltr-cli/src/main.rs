@@ -62,6 +62,15 @@ enum Cmd {
         /// Write a Chrome Trace Event Format JSON here.
         #[arg(long)]
         chrome_trace: Option<std::path::PathBuf>,
+        /// Max ops shown per module leaf.
+        #[arg(long, default_value_t = 5)]
+        top_ops: usize,
+        /// Hide per-op breakdown under each leaf.
+        #[arg(long, default_value_t = false)]
+        no_ops: bool,
+        /// Print a flat cross-module ops table instead of the module tree.
+        #[arg(long, default_value_t = false)]
+        ops_flat: bool,
     },
     /// Run the MCP stdio server (used by LLM clients, e.g. Claude Desktop).
     Mcp,
@@ -106,6 +115,9 @@ fn main() -> anyhow::Result<()> {
                 depth,
                 flamegraph,
                 chrome_trace,
+                top_ops,
+                no_ops,
+                ops_flat,
             } => commands::breakdown::run(
                 id,
                 last,
@@ -114,6 +126,9 @@ fn main() -> anyhow::Result<()> {
                 depth,
                 flamegraph,
                 chrome_trace,
+                top_ops,
+                no_ops,
+                ops_flat,
             ),
             Cmd::Mcp => commands::mcp::run().await,
             Cmd::Record { cmd, args, no_hook } => {

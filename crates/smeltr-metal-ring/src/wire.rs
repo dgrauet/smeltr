@@ -17,6 +17,7 @@ pub mod kind {
     pub const TEXTURE_FREE: u32 = 10;
     pub const DROPPED: u32 = 11;
     pub const SKIPPED: u32 = 12;
+    pub const CB_OPS: u32 = 13;
 }
 
 #[repr(C)]

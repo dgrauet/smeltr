@@ -34,6 +34,13 @@ pub enum ProbeHealthState {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpSample {
+    pub name: String,
+    pub gpu_ns: u64,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Payload {
@@ -108,6 +115,10 @@ pub enum Payload {
         cb_id: u64,
         queue_id: u64,
         elapsed_ns: u64,
+    },
+    MetalCbOps {
+        cb_id: u64,
+        ops: Vec<OpSample>,
     },
     MetalHeapAlloc {
         heap_id: u64,
@@ -647,6 +658,57 @@ mod tests {
         round_trip(
             Payload::ModuleReturned { module_call_id: 17 },
             Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_op_sample() {
+        let s = OpSample {
+            name: "Matmul".into(),
+            gpu_ns: 1_234_567,
+            count: 3,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&s, &mut buf).unwrap();
+        let decoded: OpSample = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_cb_ops() {
+        round_trip(
+            Payload::MetalCbOps {
+                cb_id: 0xdead_beef,
+                ops: vec![
+                    OpSample {
+                        name: "Matmul".into(),
+                        gpu_ns: 6_200_000,
+                        count: 3,
+                    },
+                    OpSample {
+                        name: "Softmax".into(),
+                        gpu_ns: 1_500_000,
+                        count: 1,
+                    },
+                    OpSample {
+                        name: "RMSNorm".into(),
+                        gpu_ns: 400_000,
+                        count: 2,
+                    },
+                ],
+            },
+            Source::MetalHook,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_cb_ops_empty() {
+        round_trip(
+            Payload::MetalCbOps {
+                cb_id: 1,
+                ops: vec![],
+            },
+            Source::MetalHook,
         );
     }
 }

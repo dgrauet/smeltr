@@ -4,11 +4,20 @@
 //   -[MTLDevice newCommandQueue]            — installed in constructor
 //   -[MTLCommandQueue commandBuffer]        — installed on first queue creation
 //   -[MTLCommandBuffer commit]              — installed on first CB
+//   -[MTLCommandBuffer computeCommandEncoder*]   — installed on first CB
+//   -[MTLComputeCommandEncoder setComputePipelineState:]   — lazy, first encoder
+//   -[MTLComputeCommandEncoder dispatchThreadgroups:*]     — lazy, first encoder
+//   -[MTLComputeCommandEncoder dispatchThreads:*]          — lazy, first encoder (MLX 0.31+)
 //
 // On commit: emit MetalCbCommitted; register scheduled/completed handlers to
 // emit MetalCbScheduled and MetalCbCompleted (with status, error.code,
 // error.domain, in_flight_ns). Queue depth tracked per-queue via objc
 // associated objects holding an atomic counter.
+//
+// Op attribution (Phase 2.5a): PSO pointer hash + threadgroup dims are
+// captured per dispatch. At CB completion, dispatches are bucketed by
+// (pso, tg) signature and in_flight_ns is distributed pro-rata to emit
+// MetalCbOps frames. Name format: K_<pso_hash16>_<w>x<h>x<d>.
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -26,6 +35,67 @@
 
 static smeltr_ring_t *g_ring = NULL;
 static atomic_bool    g_enabled = false;
+
+static BOOL g_op_capture_enabled = YES;  // toggled by SMELTR_HOOK_NO_OPS
+
+static BOOL g_stage_sampling_enabled = NO;
+static id<MTLCounterSet> g_timestamp_counter_set = nil;
+static double g_ns_per_tick = 0.0;
+
+/// Detect MTLCounterSamplingPointAtStageBoundary support and find the
+/// timestamp counter set. Called once at hook init.
+static void smeltr_detect_stage_sampling(id<MTLDevice> device) {
+    for (id<MTLCounterSet> cs in [device counterSets]) {
+        if ([[cs name] isEqualToString:MTLCommonCounterSetTimestamp]) {
+            g_timestamp_counter_set = cs;
+            break;
+        }
+    }
+    if (!g_timestamp_counter_set) return;
+    if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+        g_timestamp_counter_set = nil;
+        return;
+    }
+    g_stage_sampling_enabled = YES;
+}
+
+/// Two timestamp samples 50ms apart, compute CPU-ns / GPU-tick ratio.
+/// Sanity-check the result; disable stage sampling if the ratio is absurd.
+static void smeltr_calibrate_ticks(id<MTLDevice> device) {
+    MTLTimestamp cpu1 = 0, gpu1 = 0, cpu2 = 0, gpu2 = 0;
+    [device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    [device sampleTimestamps:&cpu2 gpuTimestamp:&gpu2];
+    if (gpu2 <= gpu1) { g_stage_sampling_enabled = NO; return; }
+    double ratio = (double)(cpu2 - cpu1) / (double)(gpu2 - gpu1);
+    if (ratio < 0.1 || ratio > 100.0) { g_stage_sampling_enabled = NO; return; }
+    g_ns_per_tick = ratio;
+}
+
+static inline uint64_t smeltr_ticks_to_ns(uint64_t ticks) {
+    return (uint64_t)((double)ticks * g_ns_per_tick);
+}
+
+/* Associated-object keys for CB/encoder tracking. */
+static const void *kSmeltrEncodersKey    = &kSmeltrEncodersKey;   // NSMutableArray of encoders per CB
+static const void *kSmeltrEncoderPsoKey  = &kSmeltrEncoderPsoKey; // current PSO on encoder (NSValue wrapping uintptr_t)
+static const void *kSmeltrEncoderDispKey = &kSmeltrEncoderDispKey; // NSMutableArray of dispatch records per encoder
+static const void *kSmeltrEncoderSBKey   = &kSmeltrEncoderSBKey;  // id<MTLCounterSampleBuffer> per encoder (stage-boundary)
+
+static const NSUInteger kStageBoundarySampleCount = 2;  // start + end
+
+/* Keys for saved original IMPs (stored on the encoder class object). */
+static const void *kSmeltrOrigSetPSO              = &kSmeltrOrigSetPSO;
+static const void *kSmeltrOrigDispatchTG          = &kSmeltrOrigDispatchTG;
+static const void *kSmeltrOrigDispatchTGI         = &kSmeltrOrigDispatchTGI;
+static const void *kSmeltrOrigDispatchThreads     = &kSmeltrOrigDispatchThreads;
+// MTL4-specific indirect dispatch variants (no indirectBufferOffset: parameter).
+static const void *kSmeltrOrigDispatchTGNoOffset  = &kSmeltrOrigDispatchTGNoOffset;
+static const void *kSmeltrOrigDispatchThrIndirect = &kSmeltrOrigDispatchThrIndirect;
+
+/* Forward declaration — defined later, used in smeltr_swizzle_device_class. */
+static void smeltr_emit_metal_hook_skipped(const char *reason);
 
 static BOOL smeltr_trace_enabled(void) {
     static BOOL cached = NO;
@@ -128,6 +198,294 @@ static BOOL swizzle_instance(Class cls, SEL original, SEL replacement) {
     return YES;
 }
 
+/* ============ Dispatch/PSO swizzle wrappers (forward declarations) ============ */
+
+static void smeltr_setComputePipelineState_swz(id, SEL, id);
+static void smeltr_dispatchThreadgroups_swz(id, SEL, MTLSize, MTLSize);
+static void smeltr_dispatchThreadgroupsIndirect_swz(id, SEL, id<MTLBuffer>, NSUInteger, MTLSize);
+static void smeltr_dispatchThreads_swz(id, SEL, MTLSize, MTLSize);
+// MTL4-specific: indirect dispatch without indirectBufferOffset parameter.
+static void smeltr_dispatchTGNoOffset_swz(id, SEL, id<MTLBuffer>, MTLSize);
+static void smeltr_dispatchThrIndirect_swz(id, SEL, id<MTLBuffer>);
+
+/// Look up a saved original IMP stored on the encoder's concrete class.
+static IMP smeltr_orig_imp(id enc, const void *key) {
+    Class ec = object_getClass(enc);
+    NSValue *v = objc_getAssociatedObject((id)ec, key);
+    return v ? (IMP)[v pointerValue] : NULL;
+}
+
+/// Lazily install setComputePipelineState: + dispatchThreadgroups:* swizzles
+/// on the concrete encoder class the first time we see an encoder.
+static void smeltr_install_dispatch_swizzles(id<MTLComputeCommandEncoder> enc) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class ec = object_getClass(enc);
+        SEL sps  = @selector(setComputePipelineState:);
+        SEL dtg  = @selector(dispatchThreadgroups:threadsPerThreadgroup:);
+        SEL dtgi = @selector(dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:);
+        SEL dtt  = @selector(dispatchThreads:threadsPerThreadgroup:);
+        Method m;
+        // Guard: if the eager-swizzle pass already installed our wrappers on this
+        // class, skip — overwriting would store our OWN IMP as "orig", causing
+        // infinite recursion on the next dispatch call.
+        if ((m = class_getInstanceMethod(ec, sps))) {
+            IMP cur = method_getImplementation(m);
+            if (cur != (IMP)smeltr_setComputePipelineState_swz) {
+                IMP orig = method_setImplementation(m, (IMP)smeltr_setComputePipelineState_swz);
+                objc_setAssociatedObject((id)ec, kSmeltrOrigSetPSO,
+                                          [NSValue valueWithPointer:(void *)orig],
+                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                smeltr_log("swizzled %s.setComputePipelineState:", class_getName(ec));
+            }
+        }
+        if ((m = class_getInstanceMethod(ec, dtg))) {
+            IMP cur = method_getImplementation(m);
+            if (cur != (IMP)smeltr_dispatchThreadgroups_swz) {
+                IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreadgroups_swz);
+                objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchTG,
+                                          [NSValue valueWithPointer:(void *)orig],
+                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                smeltr_log("swizzled %s.dispatchThreadgroups:threadsPerThreadgroup:", class_getName(ec));
+            }
+        }
+        if ((m = class_getInstanceMethod(ec, dtgi))) {
+            IMP cur = method_getImplementation(m);
+            if (cur != (IMP)smeltr_dispatchThreadgroupsIndirect_swz) {
+                IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreadgroupsIndirect_swz);
+                objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchTGI,
+                                          [NSValue valueWithPointer:(void *)orig],
+                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                smeltr_log("swizzled %s.dispatchThreadgroupsWithIndirectBuffer:offset:threadsPerThreadgroup:",
+                           class_getName(ec));
+            }
+        }
+        // MLX 0.31+ uses dispatchThreads:threadsPerThreadgroup: (non-fixed-threadgroup-count
+        // variant). Swizzle it so we record the same (PSO pointer, 0x0x0) sentinel that
+        // smeltr_record_dispatch uses for indirect dispatches — total-thread dims are
+        // not known at encode time, so we treat them uniformly as size (0,0,0).
+        if ((m = class_getInstanceMethod(ec, dtt))) {
+            IMP cur = method_getImplementation(m);
+            if (cur != (IMP)smeltr_dispatchThreads_swz) {
+                IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreads_swz);
+                objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchThreads,
+                                          [NSValue valueWithPointer:(void *)orig],
+                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                smeltr_log("swizzled %s.dispatchThreads:threadsPerThreadgroup:", class_getName(ec));
+            }
+        }
+    });
+}
+
+/* ============ Dispatch/PSO wrapper bodies ============ */
+
+static void smeltr_setComputePipelineState_swz(id self, SEL cmd, id pso) {
+    // Stash current PSO pointer on the encoder for the next dispatch.
+    objc_setAssociatedObject(self, kSmeltrEncoderPsoKey,
+                              [NSValue valueWithPointer:(__bridge void *)pso],
+                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    IMP orig = smeltr_orig_imp(self, kSmeltrOrigSetPSO);
+    if (orig) ((void (*)(id, SEL, id))orig)(self, cmd, pso);
+}
+
+static void smeltr_record_dispatch(id enc, MTLSize tg) {
+    if (!g_op_capture_enabled) return;
+    SMELTR_TRACE("smeltr_record_dispatch enc=%p class=%s tg=%lux%lux%lu",
+                 enc, class_getName(object_getClass(enc)),
+                 (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth);
+    NSValue *psov = objc_getAssociatedObject(enc, kSmeltrEncoderPsoKey);
+    uint64_t pso_ptr = psov ? (uint64_t)(uintptr_t)[psov pointerValue] : 0;
+    NSMutableArray *list = objc_getAssociatedObject(enc, kSmeltrEncoderDispKey);
+    if (!list) {
+        // Encoder obtained before our smeltr_computeCommandEncoder swizzle was
+        // in place (e.g. first CB on MLX 0.31+). Lazily create the dispatch list
+        // and associate this encoder with its parent CB.
+        list = [NSMutableArray new];
+        objc_setAssociatedObject(enc, kSmeltrEncoderDispKey, list,
+                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Link encoder → parent CB so smeltr_emit_cb_ops_pso can find it.
+        // MTLComputeCommandEncoder doesn't expose commandBuffer in its public
+        // protocol, but the concrete AGX classes implement it. Use message-send
+        // via objc_msgSend to avoid a compile-time protocol error.
+        SEL cmdBufSel = sel_registerName("commandBuffer");
+        if ([enc respondsToSelector:cmdBufSel]) {
+            id cb = ((id (*)(id, SEL))objc_msgSend)(enc, cmdBufSel);
+            if (cb) {
+                NSMutableArray *encs = objc_getAssociatedObject(cb, kSmeltrEncodersKey);
+                if (!encs) {
+                    encs = [NSMutableArray new];
+                    objc_setAssociatedObject(cb, kSmeltrEncodersKey, encs,
+                                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+                [encs addObject:enc];
+            }
+        }
+    }
+    // Record (pso, tg.w, tg.h, tg.d) as a 4-element NSArray of NSNumbers.
+    [list addObject:@[ @(pso_ptr), @(tg.width), @(tg.height), @(tg.depth) ]];
+}
+
+static void smeltr_dispatchThreadgroups_swz(id self, SEL cmd, MTLSize tg, MTLSize tpt) {
+    smeltr_record_dispatch(self, tg);
+    IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchTG);
+    if (orig) ((void (*)(id, SEL, MTLSize, MTLSize))orig)(self, cmd, tg, tpt);
+}
+
+static void smeltr_dispatchThreadgroupsIndirect_swz(id self, SEL cmd,
+        id<MTLBuffer> buf, NSUInteger off, MTLSize tpt) {
+    // For indirect dispatch, we don't know the threadgroup count at encode time.
+    // Record with a sentinel tg=(0,0,0) so attribution still happens.
+    smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchTGI);
+    if (orig) ((void (*)(id, SEL, id<MTLBuffer>, NSUInteger, MTLSize))orig)(self, cmd, buf, off, tpt);
+}
+
+static void smeltr_dispatchThreads_swz(id self, SEL cmd, MTLSize threads, MTLSize tpt) {
+    // dispatchThreads:threadsPerThreadgroup: — used by MLX 0.31+.
+    // The total thread count is not a threadgroup count; record sentinel (0,0,0)
+    // for the tg dims so the key is (pso, 0, 0, 0). This distinguishes it from
+    // dispatchThreadgroups but still groups by PSO.
+    smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchThreads);
+    if (orig) ((void (*)(id, SEL, MTLSize, MTLSize))orig)(self, cmd, threads, tpt);
+}
+
+static void smeltr_dispatchTGNoOffset_swz(id self, SEL cmd, id<MTLBuffer> buf, MTLSize tpt) {
+    // MTL4: dispatchThreadgroupsWithIndirectBuffer:threadsPerThreadgroup:
+    // (no indirectBufferOffset parameter — different from the legacy variant).
+    smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchTGNoOffset);
+    if (orig) ((void (*)(id, SEL, id<MTLBuffer>, MTLSize))orig)(self, cmd, buf, tpt);
+}
+
+static void smeltr_dispatchThrIndirect_swz(id self, SEL cmd, id<MTLBuffer> buf) {
+    // MTL4: dispatchThreadsWithIndirectBuffer: (no threadsPerThreadgroup).
+    smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchThrIndirect);
+    if (orig) ((void (*)(id, SEL, id<MTLBuffer>))orig)(self, cmd, buf);
+}
+
+/* ============ CB-completion helper: emit MetalCbOps from PSO+tg buckets ============ */
+
+/// Aggregate dispatch records per CB into (pso, tg) buckets. For each encoder,
+/// use the stage-boundary sample buffer (if available) for its true GPU duration;
+/// fall back to pro-rata distribution of in_flight_ns for untimed encoders.
+/// Emit one MetalCbOps frame.
+static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
+                                    uint64_t in_flight_ns) {
+    if (!g_op_capture_enabled || !g_ring) return;
+    NSMutableArray *encs = objc_getAssociatedObject(done_cb, kSmeltrEncodersKey);
+    if (encs.count == 0) return;
+
+    NSUInteger n_encs = encs.count;
+    uint64_t *enc_gpu_ns = (uint64_t *)calloc(n_encs, sizeof(uint64_t));
+    if (!enc_gpu_ns) return;
+    NSMutableArray<NSArray *> *enc_dispatches = [NSMutableArray new];
+    BOOL all_encoders_timed = YES;
+
+    // First pass: gather per-encoder dispatch lists + per-encoder timing.
+    for (NSUInteger i = 0; i < n_encs; i++) {
+        id enc = encs[i];
+        NSArray *list = objc_getAssociatedObject(enc, kSmeltrEncoderDispKey);
+        if (!list) list = @[];
+        [enc_dispatches addObject:list];
+
+        id<MTLCounterSampleBuffer> sb = objc_getAssociatedObject(enc, kSmeltrEncoderSBKey);
+        if (sb && g_stage_sampling_enabled) {
+            NSData *raw = [sb resolveCounterRange:NSMakeRange(0, kStageBoundarySampleCount)];
+            if (raw.length >= kStageBoundarySampleCount * sizeof(MTLCounterResultTimestamp)) {
+                const MTLCounterResultTimestamp *ts =
+                    (const MTLCounterResultTimestamp *)raw.bytes;
+                uint64_t s = ts[0].timestamp;
+                uint64_t e = ts[1].timestamp;
+                if (s != MTLCounterErrorValue && e != MTLCounterErrorValue && e > s) {
+                    enc_gpu_ns[i] = smeltr_ticks_to_ns(e - s);
+                    continue;
+                }
+            }
+        }
+        all_encoders_timed = NO;
+        // enc_gpu_ns[i] stays 0 — filled below via fallback.
+    }
+
+    // Fill encoders without sample buffers via pro-rata of the leftover
+    // in_flight_ns budget.
+    if (!all_encoders_timed) {
+        uint64_t accounted = 0;
+        uint64_t untimed_dispatches = 0;
+        for (NSUInteger i = 0; i < n_encs; i++) {
+            if (enc_gpu_ns[i] > 0) {
+                accounted += enc_gpu_ns[i];
+            } else {
+                untimed_dispatches += ((NSArray *)enc_dispatches[i]).count;
+            }
+        }
+        uint64_t leftover = (in_flight_ns > accounted) ? (in_flight_ns - accounted) : 0;
+        for (NSUInteger i = 0; i < n_encs; i++) {
+            if (enc_gpu_ns[i] == 0 && untimed_dispatches > 0) {
+                uint64_t dcount = ((NSArray *)enc_dispatches[i]).count;
+                enc_gpu_ns[i] = (leftover * dcount) / untimed_dispatches;
+            }
+        }
+    }
+
+    // Second pass: aggregate per encoder into global (pso, tg) → (gpu_ns, count).
+    // Within each encoder, distribute enc_gpu_ns pro-rata by dispatch count.
+    NSMutableDictionary<NSArray *, NSArray *> *agg = [NSMutableDictionary new];
+    for (NSUInteger i = 0; i < n_encs; i++) {
+        NSArray *list = enc_dispatches[i];
+        if (list.count == 0) continue;
+        uint64_t enc_ns = enc_gpu_ns[i];
+        NSMutableDictionary<NSArray *, NSNumber *> *enc_buckets = [NSMutableDictionary new];
+        for (NSArray *d in list) {
+            NSNumber *cur = enc_buckets[d];
+            enc_buckets[d] = @([cur unsignedLongLongValue] + 1);
+        }
+        for (NSArray *key in enc_buckets) {
+            uint64_t dcount = [enc_buckets[key] unsignedLongLongValue];
+            uint64_t kernel_ns = (enc_ns * dcount) / list.count;
+            NSArray *cur = agg[key] ?: @[@(0ULL), @(0ULL)];
+            agg[key] = @[
+                @([cur[0] unsignedLongLongValue] + kernel_ns),
+                @([cur[1] unsignedLongLongValue] + dcount),
+            ];
+        }
+    }
+    free(enc_gpu_ns);
+
+    if (agg.count == 0) return;
+
+    // Build C arrays for smeltr_write_cb_ops.
+    uint32_t n = (uint32_t)agg.count;
+    char **names_buf  = (char **)malloc(sizeof(char *) * n);
+    uint64_t *gpu_ns_arr = (uint64_t *)malloc(sizeof(uint64_t) * n);
+    uint32_t *counts  = (uint32_t *)malloc(sizeof(uint32_t) * n);
+    if (!names_buf || !gpu_ns_arr || !counts) {
+        free(names_buf); free(gpu_ns_arr); free(counts);
+        return;
+    }
+    uint32_t i = 0;
+    for (NSArray *key in agg) {
+        uint64_t pso        = [key[0] unsignedLongLongValue];
+        unsigned long w     = [key[1] unsignedLongValue];
+        unsigned long h     = [key[2] unsignedLongValue];
+        unsigned long depth = [key[3] unsignedLongValue];
+        uint16_t pso_short = (uint16_t)(pso & 0xFFFF);
+        char *name = (char *)malloc(48);
+        snprintf(name, 48, "K_%04x_%lux%lux%lu", pso_short, w, h, depth);
+        names_buf[i]  = name;
+        gpu_ns_arr[i] = [agg[key][0] unsignedLongLongValue];
+        counts[i]     = (uint32_t)[agg[key][1] unsignedLongLongValue];
+        i++;
+    }
+    smeltr_write_cb_ops(g_ring, smeltr_mono_ns(), cb_id,
+                        (const char *const *)names_buf, gpu_ns_arr, counts, n);
+    for (uint32_t k = 0; k < n; k++) free(names_buf[k]);
+    free(names_buf);
+    free(gpu_ns_arr);
+    free(counts);
+}
+
 /* ============ Category: replacement methods ============ */
 
 @interface NSObject (SmeltrMetalHook)
@@ -204,6 +562,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                 smeltr_write_cb_completed(g_ring, done_ts,
                     captured_cb_id, captured_q_id, status,
                     err_present, err_code, domain, in_flight);
+                smeltr_emit_cb_ops_pso(done_cb, captured_cb_id, in_flight);
                 id<MTLCommandQueue> q2 = [done_cb commandQueue];
                 if (q2) {
                     atomic_fetch_sub_explicit(&queue_depth_of(q2)->value, 1,
@@ -251,6 +610,129 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
 
 @end
 
+/* ============ MTLCommandBuffer swizzles for computeCommandEncoder creation ============ */
+
+@interface NSObject (SmeltrCbEncoderHook)
+- (id)smeltr_computeCommandEncoder;
+- (id)smeltr_computeCommandEncoderWithDescriptor:(id)desc;
+- (id)smeltr_computeCommandEncoderWithDispatchType:(NSUInteger)dt;
+@end
+
+@implementation NSObject (SmeltrCbEncoderHook)
+
+- (id)smeltr_computeCommandEncoder {
+    id enc = [self smeltr_computeCommandEncoder]; // original (after swap)
+    if (enc && g_op_capture_enabled) {
+        id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
+        smeltr_install_dispatch_swizzles((id<MTLComputeCommandEncoder>)enc);
+        objc_setAssociatedObject(enc, kSmeltrEncoderDispKey,
+                                  [NSMutableArray new],
+                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSMutableArray *encs = objc_getAssociatedObject(cb, kSmeltrEncodersKey);
+        if (!encs) {
+            encs = [NSMutableArray new];
+            objc_setAssociatedObject(cb, kSmeltrEncodersKey, encs,
+                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [encs addObject:enc];
+    }
+    return enc;
+}
+
+- (id)smeltr_computeCommandEncoderWithDescriptor:(id)desc {
+    id enc = [self smeltr_computeCommandEncoderWithDescriptor:desc]; // original
+    if (enc && g_op_capture_enabled) {
+        id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
+        smeltr_install_dispatch_swizzles((id<MTLComputeCommandEncoder>)enc);
+        objc_setAssociatedObject(enc, kSmeltrEncoderDispKey,
+                                  [NSMutableArray new],
+                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSMutableArray *encs = objc_getAssociatedObject(cb, kSmeltrEncodersKey);
+        if (!encs) {
+            encs = [NSMutableArray new];
+            objc_setAssociatedObject(cb, kSmeltrEncodersKey, encs,
+                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [encs addObject:enc];
+    }
+    return enc;
+}
+
+- (id)smeltr_computeCommandEncoderWithDispatchType:(NSUInteger)dt {
+    id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
+    id enc;
+    id<MTLCounterSampleBuffer> sb_for_this_encoder = nil;
+
+    if (g_op_capture_enabled && g_stage_sampling_enabled) {
+        // Substitute WithDispatchType: with WithDescriptor: so we can attach a
+        // per-encoder stage-boundary counter sample buffer.
+        MTLComputePassDescriptor *desc = [MTLComputePassDescriptor computePassDescriptor];
+        desc.dispatchType = (MTLDispatchType)dt;
+
+        MTLCounterSampleBufferDescriptor *sbd = [MTLCounterSampleBufferDescriptor new];
+        sbd.counterSet = g_timestamp_counter_set;
+        sbd.storageMode = MTLStorageModeShared;
+        sbd.sampleCount = kStageBoundarySampleCount;
+        NSError *err = nil;
+        sb_for_this_encoder = [[cb device] newCounterSampleBufferWithDescriptor:sbd error:&err];
+        if (sb_for_this_encoder) {
+            MTLComputePassSampleBufferAttachmentDescriptor *att =
+                desc.sampleBufferAttachments[0];
+            att.sampleBuffer = sb_for_this_encoder;
+            att.startOfEncoderSampleIndex = 0;
+            att.endOfEncoderSampleIndex   = 1;
+        } else {
+            // Stage sample buffer allocation can fail under sustained load
+            // (device has a per-process quota of these). Log the first failure
+            // and after N consecutive failures disable stage sampling for the
+            // rest of the session; from then on the analyzer falls back to
+            // Phase 2.5a per-CB pro-rata attribution.
+            static atomic_int g_stage_alloc_failures = 0;
+            static atomic_bool g_stage_alloc_logged = false;
+            int n = atomic_fetch_add(&g_stage_alloc_failures, 1) + 1;
+            if (!atomic_exchange(&g_stage_alloc_logged, true)) {
+                smeltr_log("stage sample buffer alloc failed: %s (further failures silenced)",
+                           err ? [[err localizedDescription] UTF8String] : "(no error)");
+            }
+            if (n >= 16) {
+                BOOL was_enabled = g_stage_sampling_enabled;
+                g_stage_sampling_enabled = NO;
+                if (was_enabled) {
+                    smeltr_emit_metal_hook_skipped(
+                        "stage sampling disabled after sustained alloc failures (pro-rata fallback)");
+                }
+            }
+        }
+        // Forward to the original WithDescriptor: (after swap, this calls the
+        // real Metal implementation for computeCommandEncoderWithDescriptor:).
+        enc = [self smeltr_computeCommandEncoderWithDescriptor:desc];
+    } else {
+        // Fallback: call the original WithDispatchType: as before.
+        enc = [self smeltr_computeCommandEncoderWithDispatchType:dt]; // original (after swap)
+    }
+
+    if (enc && g_op_capture_enabled) {
+        if (sb_for_this_encoder) {
+            objc_setAssociatedObject(enc, kSmeltrEncoderSBKey, sb_for_this_encoder,
+                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        smeltr_install_dispatch_swizzles((id<MTLComputeCommandEncoder>)enc);
+        objc_setAssociatedObject(enc, kSmeltrEncoderDispKey,
+                                  [NSMutableArray new],
+                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSMutableArray *encs = objc_getAssociatedObject(cb, kSmeltrEncodersKey);
+        if (!encs) {
+            encs = [NSMutableArray new];
+            objc_setAssociatedObject(cb, kSmeltrEncodersKey, encs,
+                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [encs addObject:enc];
+    }
+    return enc;
+}
+
+@end
+
 static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -259,6 +741,34 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb) {
             smeltr_log("swizzled %s.commit", class_getName(cbcls));
         } else {
             smeltr_log("failed to swizzle %s.commit", class_getName(cbcls));
+        }
+        if (g_op_capture_enabled) {
+            if (swizzle_instance(cbcls,
+                                  @selector(computeCommandEncoder),
+                                  @selector(smeltr_computeCommandEncoder))) {
+                smeltr_log("swizzled %s.computeCommandEncoder", class_getName(cbcls));
+            } else {
+                smeltr_log("failed to swizzle %s.computeCommandEncoder",
+                           class_getName(cbcls));
+            }
+            if (swizzle_instance(cbcls,
+                                  @selector(computeCommandEncoderWithDescriptor:),
+                                  @selector(smeltr_computeCommandEncoderWithDescriptor:))) {
+                smeltr_log("swizzled %s.computeCommandEncoderWithDescriptor:",
+                           class_getName(cbcls));
+            } else {
+                smeltr_log("failed to swizzle %s.computeCommandEncoderWithDescriptor:",
+                           class_getName(cbcls));
+            }
+            if (swizzle_instance(cbcls,
+                                  @selector(computeCommandEncoderWithDispatchType:),
+                                  @selector(smeltr_computeCommandEncoderWithDispatchType:))) {
+                smeltr_log("swizzled %s.computeCommandEncoderWithDispatchType:",
+                           class_getName(cbcls));
+            } else {
+                smeltr_log("failed to swizzle %s.computeCommandEncoderWithDispatchType:",
+                           class_getName(cbcls));
+            }
         }
     });
 }
@@ -440,6 +950,27 @@ static void smeltr_install_heap_suballoc_swizzles(id<MTLHeap> heap) {
 static void smeltr_swizzle_device_class(void) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     if (!d) { smeltr_log("no Metal device available"); return; }
+
+    // Detect + calibrate stage-boundary counter sampling BEFORE the NO_OPS
+    // check so we know whether to use per-encoder timing.
+    smeltr_detect_stage_sampling(d);
+    if (g_stage_sampling_enabled) {
+        smeltr_calibrate_ticks(d);
+        if (g_stage_sampling_enabled) {
+            smeltr_log("stage_sampling enabled (ns_per_tick=%.6f)", g_ns_per_tick);
+        } else {
+            smeltr_log("stage_sampling: calibration failed, falling back to 2.5a pro-rata");
+        }
+    } else {
+        smeltr_log("stage_sampling not supported on this device, using 2.5a pro-rata");
+    }
+
+    const char *no_ops = getenv("SMELTR_HOOK_NO_OPS");
+    if (no_ops && strcmp(no_ops, "1") == 0) {
+        g_op_capture_enabled = NO;
+        smeltr_emit_metal_hook_skipped("op-level capture disabled: SMELTR_HOOK_NO_OPS=1");
+    }
+
     Class dcls = object_getClass(d);
     if (swizzle_instance(dcls, @selector(newCommandQueue),
                                 @selector(smeltr_newCommandQueue))) {
@@ -512,6 +1043,9 @@ static id smeltr_swz_cmdBufferWithDescriptor(id self, SEL _cmd, id desc) {
     id cb = orig_cmdBufferWithDescriptor(self, _cmd, desc);
     SMELTR_TRACE("_MTLCommandQueue.commandBufferWithDescriptor: queue=%p cb=%p",
                  self, cb);
+    if (cb && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
+        smeltr_install_cb_swizzle((id<MTLCommandBuffer>)cb);
+    }
     return cb;
 }
 
@@ -529,6 +1063,10 @@ static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wa
             objc_setAssociatedObject(cb, kSmeltrCbCommitTsKey,
                 [SmeltrAtomicU64 withValue:commit_ts],
                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            // Fallback: install encoder swizzles at commit time for CB families
+            // not reached by the commandBuffer / commandBufferWithDescriptor paths
+            // (e.g. MLX 0.31 on macOS 14+). dispatch_once inside is idempotent.
+            smeltr_install_cb_swizzle((id<MTLCommandBuffer>)cb);
             NSString *label = nil;
             if ([cb respondsToSelector:@selector(label)]) {
                 label = [(id<MTLCommandBuffer>)cb label];
@@ -581,6 +1119,7 @@ static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wa
                         smeltr_write_cb_completed(g_ring, done_ts,
                             done_cb_id, q_id_capture, status,
                             err_present, err_code, domain, in_flight);
+                        smeltr_emit_cb_ops_pso(done_cb, done_cb_id, in_flight);
                         if (g_inflight_q) {
                             uint64_t cb_id_capture = done_cb_id;
                             dispatch_async(g_inflight_q, ^{
@@ -601,6 +1140,82 @@ static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wa
         }
     }
     orig_commitCommandBufferWake(self, _cmd, cb, wake);
+}
+
+/// Install setComputePipelineState: + dispatchThreads/Threadgroups:* swizzles
+/// directly on known Metal compute encoder classes found at load time.
+///
+/// This is needed because smeltr_install_dispatch_swizzles() is only
+/// triggered lazily when smeltr_computeCommandEncoder() is called (i.e., when
+/// MLX obtains an encoder after the CB class swizzle is in place). On MLX 0.31+
+/// the first CB's encoding happens before that window. By swizzling the concrete
+/// encoder class here (at constructor time) we catch dispatches regardless of
+/// when the encoder was obtained.
+static void smeltr_install_encoder_dispatch_swizzles_eager(void) {
+    if (!g_op_capture_enabled) return;
+    // Known concrete classes for Metal compute/ML encoders on Apple Silicon.
+    // _MTL4ComputeCommandEncoder: MTL4 path used by MLX 0.31+ on macOS 15+.
+    // MTLLegacySVComputeCommandEncoder: legacy path used on earlier macOS/MLX.
+    // _MTL4MachineLearningCommandEncoder: ML-hardware path used by MLX 0.31+
+    //   on macOS 26 (Darwin 25.x) with Apple Silicon ANE/ML hardware; uses
+    //   setPipelineState: + dispatchNetworkWithIntermediatesHeap: instead of
+    //   standard compute dispatch APIs.
+    static const char *encoder_class_names[] = {
+        // Only the three concrete compute encoder classes that MLX actually
+        // instantiates. Debug/Tools wrappers are Apple-internal proxies with
+        // different semantics; swizzling them crashes non-debug workloads.
+        // MachineLearning encoders use a different dispatch shape
+        // (dispatchNetworkWithIntermediatesHeap:) that our wrappers cannot
+        // handle.
+        "AGXG14XFamilyComputeContext",
+        "AGXG14XFamilyComputeContext_mtlnext",
+        "_MTL4ComputeCommandEncoder",
+        NULL,
+    };
+    for (int ci = 0; encoder_class_names[ci]; ci++) {
+        Class ec = objc_getClass(encoder_class_names[ci]);
+        if (!ec) {
+            SMELTR_TRACE("encoder class %s: not found", encoder_class_names[ci]);
+            continue;
+        }
+        // Build a table of (selector_string, IMP_wrapper, key) to avoid repetition.
+        struct { const char *sel_name; IMP wrapper; const void *key; } entries[] = {
+            { "setComputePipelineState:",
+              (IMP)smeltr_setComputePipelineState_swz, kSmeltrOrigSetPSO },
+            { "dispatchThreadgroups:threadsPerThreadgroup:",
+              (IMP)smeltr_dispatchThreadgroups_swz, kSmeltrOrigDispatchTG },
+            { "dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:",
+              (IMP)smeltr_dispatchThreadgroupsIndirect_swz, kSmeltrOrigDispatchTGI },
+            { "dispatchThreads:threadsPerThreadgroup:",
+              (IMP)smeltr_dispatchThreads_swz, kSmeltrOrigDispatchThreads },
+            // MTL4-specific indirect variants (no indirectBufferOffset parameter).
+            { "dispatchThreadgroupsWithIndirectBuffer:threadsPerThreadgroup:",
+              (IMP)smeltr_dispatchTGNoOffset_swz, kSmeltrOrigDispatchTGNoOffset },
+            { "dispatchThreadsWithIndirectBuffer:",
+              (IMP)smeltr_dispatchThrIndirect_swz, kSmeltrOrigDispatchThrIndirect },
+            // MTL4 ML encoder: setPipelineState: (not setComputePipelineState:).
+            // Reuse smeltr_setComputePipelineState_swz — same ABI (id self, SEL, id pso).
+            { "setPipelineState:",
+              (IMP)smeltr_setComputePipelineState_swz, kSmeltrOrigSetPSO },
+            // MTL4 ML encoder dispatch: dispatchNetworkWithIntermediatesHeap:
+            // Reuse smeltr_dispatchThrIndirect_swz — ignores heap arg, records sentinel dispatch.
+            { "dispatchNetworkWithIntermediatesHeap:",
+              (IMP)smeltr_dispatchThrIndirect_swz, kSmeltrOrigDispatchThrIndirect },
+            { NULL, NULL, NULL },
+        };
+        for (int ei = 0; entries[ei].sel_name; ei++) {
+            SEL sel = sel_registerName(entries[ei].sel_name);
+            Method m = class_getInstanceMethod(ec, sel);
+            if (!m) continue;
+            IMP cur = method_getImplementation(m);
+            if (cur == entries[ei].wrapper) continue; // already swizzled
+            IMP orig = method_setImplementation(m, entries[ei].wrapper);
+            objc_setAssociatedObject((id)ec, entries[ei].key,
+                                      [NSValue valueWithPointer:(void *)orig],
+                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            smeltr_log("eager-swizzled %s.%s", encoder_class_names[ci], entries[ei].sel_name);
+        }
+    }
 }
 
 static void smeltr_install_mtl_command_queue_swizzles(void) {
@@ -708,6 +1323,11 @@ static void smeltr_hook_init(void) {
     smeltr_swizzle_device_class();
     smeltr_warn_init();
     smeltr_install_mtl_command_queue_swizzles();
+    // Install dispatch swizzles on known encoder classes immediately so that
+    // the first CB's dispatches are captured even before smeltr_commandBuffer
+    // fires for it (MLX 0.31+ encodes into the first CB before our lazy-install
+    // path has a chance to run).
+    smeltr_install_encoder_dispatch_swizzles_eager();
     smeltr_log("loaded; ring=%s, swizzles installed", ring_path);
 }
 

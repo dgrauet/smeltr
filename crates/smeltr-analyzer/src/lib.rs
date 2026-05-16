@@ -7,8 +7,8 @@ pub mod rules;
 
 pub mod breakdown;
 pub use breakdown::{
-    compute as compute_breakdown, render_chrome_trace, render_table, BreakdownError, Diagnostics,
-    ModuleBreakdown,
+    compute as compute_breakdown, render_chrome_trace, render_ops_flat, render_table,
+    BreakdownError, Diagnostics, ModuleBreakdown, OpAttribution,
 };
 
 pub use finding::{Category, EvidenceRef, Finding, Severity};

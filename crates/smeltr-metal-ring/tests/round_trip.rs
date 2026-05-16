@@ -1,4 +1,4 @@
-use smeltr_metal_ring::{create_ring, open_for_read, DecodedFrame};
+use smeltr_metal_ring::{create_ring, open_for_read, DecodedFrame, DecodedOpSample};
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -118,4 +118,94 @@ fn buffer_alloc_with_heap_round_trips() {
         e3.frame,
         DecodedFrame::BufferFree { buffer_id: 0xb1 }
     ));
+}
+
+#[test]
+fn cb_ops_round_trips() {
+    let dir = tempdir().unwrap();
+    let path = tmp_ring(dir.path());
+    {
+        let mut w = create_ring(&path, 1 << 16).unwrap();
+        w.write_cb_ops(
+            1_000,
+            0xdead_beef,
+            &[
+                ("Matmul", 6_200_000u64, 3u32),
+                ("Softmax", 1_500_000u64, 1u32),
+                ("RMSNorm", 400_000u64, 2u32),
+            ],
+        )
+        .unwrap();
+    }
+    let mut r = open_for_read(&path).unwrap();
+    let e = r.next().unwrap().unwrap();
+    let ops = match e.frame {
+        DecodedFrame::CbOps { cb_id, ops } => {
+            assert_eq!(cb_id, 0xdead_beef);
+            ops
+        }
+        other => panic!("expected CbOps, got {other:?}"),
+    };
+    assert_eq!(ops.len(), 3);
+    assert_eq!(
+        ops[0],
+        DecodedOpSample {
+            name: "Matmul".into(),
+            gpu_ns: 6_200_000,
+            count: 3
+        }
+    );
+    assert_eq!(
+        ops[1],
+        DecodedOpSample {
+            name: "Softmax".into(),
+            gpu_ns: 1_500_000,
+            count: 1
+        }
+    );
+    assert_eq!(
+        ops[2],
+        DecodedOpSample {
+            name: "RMSNorm".into(),
+            gpu_ns: 400_000,
+            count: 2
+        }
+    );
+    assert!(r.next().unwrap().is_none());
+}
+
+#[test]
+fn cb_ops_empty_round_trips() {
+    let dir = tempdir().unwrap();
+    let path = tmp_ring(dir.path());
+    {
+        let mut w = create_ring(&path, 1 << 12).unwrap();
+        w.write_cb_ops(7, 42, &[]).unwrap();
+    }
+    let mut r = open_for_read(&path).unwrap();
+    let e = r.next().unwrap().unwrap();
+    match e.frame {
+        DecodedFrame::CbOps { cb_id: 42, ops } => assert!(ops.is_empty()),
+        other => panic!("got {other:?}"),
+    }
+}
+
+#[test]
+fn cb_ops_long_name_round_trips() {
+    let dir = tempdir().unwrap();
+    let path = tmp_ring(dir.path());
+    let long = "A".repeat(200);
+    {
+        let mut w = create_ring(&path, 1 << 16).unwrap();
+        w.write_cb_ops(7, 42, &[(long.as_str(), 99, 1)]).unwrap();
+    }
+    let mut r = open_for_read(&path).unwrap();
+    let e = r.next().unwrap().unwrap();
+    match e.frame {
+        DecodedFrame::CbOps { ops, .. } => {
+            assert_eq!(ops.len(), 1);
+            assert_eq!(ops[0].name.len(), 200);
+        }
+        other => panic!("got {other:?}"),
+    }
 }
