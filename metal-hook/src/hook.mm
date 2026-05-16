@@ -682,8 +682,26 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
             att.startOfEncoderSampleIndex = 0;
             att.endOfEncoderSampleIndex   = 1;
         } else {
-            smeltr_log("stage sample buffer alloc failed (encoder substitution): %s",
-                       err ? [[err localizedDescription] UTF8String] : "(no error)");
+            // Stage sample buffer allocation can fail under sustained load
+            // (device has a per-process quota of these). Log the first failure
+            // and after N consecutive failures disable stage sampling for the
+            // rest of the session; from then on the analyzer falls back to
+            // Phase 2.5a per-CB pro-rata attribution.
+            static atomic_int g_stage_alloc_failures = 0;
+            static atomic_bool g_stage_alloc_logged = false;
+            int n = atomic_fetch_add(&g_stage_alloc_failures, 1) + 1;
+            if (!atomic_exchange(&g_stage_alloc_logged, true)) {
+                smeltr_log("stage sample buffer alloc failed: %s (further failures silenced)",
+                           err ? [[err localizedDescription] UTF8String] : "(no error)");
+            }
+            if (n >= 16) {
+                BOOL was_enabled = g_stage_sampling_enabled;
+                g_stage_sampling_enabled = NO;
+                if (was_enabled) {
+                    smeltr_emit_metal_hook_skipped(
+                        "stage sampling disabled after sustained alloc failures (pro-rata fallback)");
+                }
+            }
         }
         // Forward to the original WithDescriptor: (after swap, this calls the
         // real Metal implementation for computeCommandEncoderWithDescriptor:).
