@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-module GPU time breakdown** for MLX inference (`smeltr breakdown
+  [<id>|--last]`). Python sidecar emits `ModuleEntered`/`ModuleReturned`
+  events around every `mlx.nn.Module.__call__`; `MlxEvalEntered` now
+  carries a `module_stack` snapshot of active call ids. Analyzer
+  correlates command-buffer `in_flight_ns` to the leaf module on the
+  active stack at MLX eval time.
+- **Per-op GPU attribution under each module leaf**, surfaced as
+  indented `└ op:K_<pso>_<tg>` lines in the breakdown table.
+  Kernels are identified by their `MTLComputePipelineState` pointer
+  plus threadgroup-dim signature (MLX does not emit `pushDebugGroup`
+  consistently, so semantic names like "Matmul" are not recoverable
+  this way). Per-encoder timing via
+  `MTLCounterSamplingPointAtStageBoundary` when supported, with a
+  pro-rata fallback over the CB's `in_flight_ns` otherwise. Time within
+  an encoder is split pro-rata by dispatch count.
+- **`smeltr breakdown` flags**: `--top-ops N` (default 5),
+  `--no-ops`, `--ops-flat`, plus `--flamegraph <out.svg>` (folded-stack
+  flamegraph via the `inferno` crate) and `--chrome-trace <out.json>`
+  (Chrome Trace Event Format, viewable in Perfetto and Speedscope).
+- **Scoped sessions** per `smeltr record` invocation. The daemon's
+  ambient session stays running across all processes; each `smeltr
+  record` opens its own session keyed by child PID and routes only
+  that process's events into it. `smeltr breakdown --last` defaults
+  to the most-recent scoped session; `--include-ambient` opts back to
+  the legacy behavior.
+- **Python auto-attach** for `smeltr record`. A `.pth` file in
+  site-packages triggers `smeltr.attach()` + `decorate_eval()` on
+  `import smeltr` when `SMELTR_AUTOLOAD=1` is set (which `smeltr
+  record` sets for the child). Unrelated Python processes (pytest,
+  notebooks) are unaffected.
+- **TUI Notices panel** (renamed from "Log feed"). Surfaces incidents
+  (`MetalCbWarning`, `MlxPanicTriggered`), probe-health degradations,
+  `smeltr mark`s, and crash-report emissions in one place. Breakdown
+  view also gains an op side panel on the selected module (toggled by
+  `O`).
+- **MCP**: new `get_inference_breakdown` tool returning the
+  `ModuleBreakdown` tree with `include_ops` / `top_ops_per_leaf`
+  filters; new `get_op_summary` tool for flat cross-module aggregation
+  by kernel signature.
+- **Kill switches**: `SMELTR_HOOK_NO_OPS=1` disables op-level capture
+  in the metal-hook (CB-level capture stays active); the existing
+  `SMELTR_HOOK_DISABLE=1` continues to disable the hook entirely.
+
+### Changed
+
+- Metal-hook constructor eagerly swizzles the three concrete encoder
+  classes MLX instantiates on macOS 14/26 + Apple Silicon
+  (`AGXG14XFamilyComputeContext`,
+  `AGXG14XFamilyComputeContext_mtlnext`, `_MTL4ComputeCommandEncoder`)
+  to track dispatch / pipeline state per encoder. Debug/Tools/ML
+  encoder classes are deliberately not swizzled — they crash on
+  method-IMP replacement.
+- Analyzer applies a 500 ms async-grace window on `MlxEvalReturned`
+  intervals so command buffers committed after the MLX eval returns
+  (lazy materialization) still attribute to the originating eval call.
+
 ## [0.1.0] - 2026-05-14
 
 ### Added

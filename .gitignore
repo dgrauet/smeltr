@@ -27,3 +27,6 @@ python/.pytest_cache/
 .coverage
 htmlcov/
 coverage.xml
+
+# Local-only Claude Code artifacts (scheduled tasks, etc.)
+.claude/
