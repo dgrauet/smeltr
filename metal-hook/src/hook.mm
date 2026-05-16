@@ -27,6 +27,21 @@
 static smeltr_ring_t *g_ring = NULL;
 static atomic_bool    g_enabled = false;
 
+static BOOL    g_counter_sampling_supported = NO;
+static id<MTLCounterSet> g_timestamp_counter_set = nil;
+static double  g_ns_per_tick = 0.0;
+static const NSUInteger kMaxSamplesPerEncoder __attribute__((unused)) = 4096;
+
+/* Associated-object keys for compute-encoder instrumentation (used by T5/T6/T7). */
+static const void *kSmeltrSampleBufKey  = &kSmeltrSampleBufKey;
+static const void *kSmeltrSampleIdxKey  = &kSmeltrSampleIdxKey;
+static const void *kSmeltrRangesKey     = &kSmeltrRangesKey;
+static const void *kSmeltrOpenStackKey  = &kSmeltrOpenStackKey;
+static const void *kSmeltrEncodersKey   = &kSmeltrEncodersKey;
+
+/* Forward declaration — defined later, used in smeltr_swizzle_device_class. */
+static void smeltr_emit_metal_hook_skipped(const char *reason);
+
 static BOOL smeltr_trace_enabled(void) {
     static BOOL cached = NO;
     static BOOL checked = NO;
@@ -437,9 +452,59 @@ static void smeltr_install_heap_suballoc_swizzles(id<MTLHeap> heap) {
     });
 }
 
+static void smeltr_detect_counter_sampling(id<MTLDevice> device) {
+    for (id<MTLCounterSet> cs in [device counterSets]) {
+        if ([[cs name] isEqualToString:MTLCommonCounterSetTimestamp]) {
+            g_timestamp_counter_set = cs;
+            break;
+        }
+    }
+    if (!g_timestamp_counter_set) return;
+    if (![device supportsCounterSampling:MTLCounterSamplingPointAtDispatchBoundary]) {
+        g_timestamp_counter_set = nil;
+        return;
+    }
+    g_counter_sampling_supported = YES;
+}
+
+static void smeltr_calibrate_ticks(id<MTLDevice> device) {
+    MTLTimestamp cpu1 = 0, gpu1 = 0, cpu2 = 0, gpu2 = 0;
+    [device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    [device sampleTimestamps:&cpu2 gpuTimestamp:&gpu2];
+    if (gpu2 <= gpu1) {
+        g_counter_sampling_supported = NO;
+        return;
+    }
+    double ratio = (double)(cpu2 - cpu1) / (double)(gpu2 - gpu1);
+    if (ratio < 0.1 || ratio > 100.0) {
+        g_counter_sampling_supported = NO;
+        return;
+    }
+    g_ns_per_tick = ratio;
+}
+
+static inline uint64_t __attribute__((unused)) smeltr_ticks_to_ns(uint64_t ticks) {
+    return (uint64_t)((double)ticks * g_ns_per_tick);
+}
+
 static void smeltr_swizzle_device_class(void) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     if (!d) { smeltr_log("no Metal device available"); return; }
+
+    smeltr_detect_counter_sampling(d);
+    if (g_counter_sampling_supported) smeltr_calibrate_ticks(d);
+
+    const char *no_ops = getenv("SMELTR_HOOK_NO_OPS");
+    if (no_ops && strcmp(no_ops, "1") == 0) {
+        g_counter_sampling_supported = NO;
+        smeltr_emit_metal_hook_skipped("op-level capture disabled: SMELTR_HOOK_NO_OPS=1");
+    } else if (!g_counter_sampling_supported) {
+        smeltr_emit_metal_hook_skipped(
+            "op-level capture disabled: counter sampling unsupported (no timestamp counterSet or no AtDispatchBoundary)");
+    }
+
     Class dcls = object_getClass(d);
     if (swizzle_instance(dcls, @selector(newCommandQueue),
                                 @selector(smeltr_newCommandQueue))) {
