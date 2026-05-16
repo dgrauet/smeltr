@@ -51,6 +51,11 @@ pub fn dispatch_call(name: &str, args: serde_json::Value) -> Result<serde_json::
             let r = tools::inference_breakdown::run(p)?;
             Ok(serde_json::to_value(r)?)
         }
+        "get_op_summary" => {
+            let p: tools::op_summary::Params = serde_json::from_value(args)?;
+            let r = tools::op_summary::run(p)?;
+            Ok(serde_json::to_value(r)?)
+        }
         other => Err(ToolError::BadArgs(format!("unknown tool {other:?}"))),
     }
 }
@@ -179,6 +184,10 @@ impl ServerHandler for SmeltrMcpServer {
             tool::<crate::tools::inference_breakdown::Params>(
                 "get_inference_breakdown",
                 "Per-module GPU time breakdown for an MLX inference session.",
+            ),
+            tool::<crate::tools::op_summary::Params>(
+                "get_op_summary",
+                "Flat cross-module aggregation of GPU time per op kind (Matmul, Softmax, ...).",
             ),
         ];
         Ok(ListToolsResult::with_all_items(tools))
