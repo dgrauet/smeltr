@@ -38,10 +38,52 @@ static atomic_bool    g_enabled = false;
 
 static BOOL g_op_capture_enabled = YES;  // toggled by SMELTR_HOOK_NO_OPS
 
+static BOOL g_stage_sampling_enabled = NO;
+static id<MTLCounterSet> g_timestamp_counter_set = nil;
+static double g_ns_per_tick = 0.0;
+
+/// Detect MTLCounterSamplingPointAtStageBoundary support and find the
+/// timestamp counter set. Called once at hook init.
+static void smeltr_detect_stage_sampling(id<MTLDevice> device) {
+    for (id<MTLCounterSet> cs in [device counterSets]) {
+        if ([[cs name] isEqualToString:MTLCommonCounterSetTimestamp]) {
+            g_timestamp_counter_set = cs;
+            break;
+        }
+    }
+    if (!g_timestamp_counter_set) return;
+    if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+        g_timestamp_counter_set = nil;
+        return;
+    }
+    g_stage_sampling_enabled = YES;
+}
+
+/// Two timestamp samples 50ms apart, compute CPU-ns / GPU-tick ratio.
+/// Sanity-check the result; disable stage sampling if the ratio is absurd.
+static void smeltr_calibrate_ticks(id<MTLDevice> device) {
+    MTLTimestamp cpu1 = 0, gpu1 = 0, cpu2 = 0, gpu2 = 0;
+    [device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    [device sampleTimestamps:&cpu2 gpuTimestamp:&gpu2];
+    if (gpu2 <= gpu1) { g_stage_sampling_enabled = NO; return; }
+    double ratio = (double)(cpu2 - cpu1) / (double)(gpu2 - gpu1);
+    if (ratio < 0.1 || ratio > 100.0) { g_stage_sampling_enabled = NO; return; }
+    g_ns_per_tick = ratio;
+}
+
+static inline uint64_t smeltr_ticks_to_ns(uint64_t ticks) {
+    return (uint64_t)((double)ticks * g_ns_per_tick);
+}
+
 /* Associated-object keys for CB/encoder tracking. */
 static const void *kSmeltrEncodersKey    = &kSmeltrEncodersKey;   // NSMutableArray of encoders per CB
 static const void *kSmeltrEncoderPsoKey  = &kSmeltrEncoderPsoKey; // current PSO on encoder (NSValue wrapping uintptr_t)
 static const void *kSmeltrEncoderDispKey = &kSmeltrEncoderDispKey; // NSMutableArray of dispatch records per encoder
+static const void *kSmeltrEncoderSBKey   = &kSmeltrEncoderSBKey;  // id<MTLCounterSampleBuffer> per encoder (stage-boundary)
+
+static const NSUInteger kStageBoundarySampleCount = 2;  // start + end
 
 /* Keys for saved original IMPs (stored on the encoder class object). */
 static const void *kSmeltrOrigSetPSO              = &kSmeltrOrigSetPSO;
@@ -310,26 +352,93 @@ static void smeltr_dispatchThrIndirect_swz(id self, SEL cmd, id<MTLBuffer> buf) 
 
 /* ============ CB-completion helper: emit MetalCbOps from PSO+tg buckets ============ */
 
-/// Aggregate dispatch records per CB into (pso, tg) buckets, compute
-/// pro-rata gpu_ns from in_flight_ns, emit one MetalCbOps frame.
+/// Aggregate dispatch records per CB into (pso, tg) buckets. For each encoder,
+/// use the stage-boundary sample buffer (if available) for its true GPU duration;
+/// fall back to pro-rata distribution of in_flight_ns for untimed encoders.
+/// Emit one MetalCbOps frame.
 static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
                                     uint64_t in_flight_ns) {
-    if (!g_op_capture_enabled || !g_ring || in_flight_ns == 0) return;
+    if (!g_op_capture_enabled || !g_ring) return;
     NSMutableArray *encs = objc_getAssociatedObject(done_cb, kSmeltrEncodersKey);
     if (encs.count == 0) return;
 
-    // Aggregate (pso, tg.w, tg.h, tg.d) → dispatch_count across all encoders.
-    NSMutableDictionary<NSArray *, NSNumber *> *agg = [NSMutableDictionary new];
-    uint64_t total_dispatches = 0;
-    for (id enc in encs) {
+    NSUInteger n_encs = encs.count;
+    uint64_t *enc_gpu_ns = (uint64_t *)calloc(n_encs, sizeof(uint64_t));
+    if (!enc_gpu_ns) return;
+    NSMutableArray<NSArray *> *enc_dispatches = [NSMutableArray new];
+    BOOL all_encoders_timed = YES;
+
+    // First pass: gather per-encoder dispatch lists + per-encoder timing.
+    for (NSUInteger i = 0; i < n_encs; i++) {
+        id enc = encs[i];
         NSArray *list = objc_getAssociatedObject(enc, kSmeltrEncoderDispKey);
-        for (NSArray *d in list) {
-            total_dispatches++;
-            NSNumber *cur = agg[d];
-            agg[d] = @([cur unsignedLongLongValue] + 1);
+        if (!list) list = @[];
+        [enc_dispatches addObject:list];
+
+        id<MTLCounterSampleBuffer> sb = objc_getAssociatedObject(enc, kSmeltrEncoderSBKey);
+        if (sb && g_stage_sampling_enabled) {
+            NSData *raw = [sb resolveCounterRange:NSMakeRange(0, kStageBoundarySampleCount)];
+            if (raw.length >= kStageBoundarySampleCount * sizeof(MTLCounterResultTimestamp)) {
+                const MTLCounterResultTimestamp *ts =
+                    (const MTLCounterResultTimestamp *)raw.bytes;
+                uint64_t s = ts[0].timestamp;
+                uint64_t e = ts[1].timestamp;
+                if (s != MTLCounterErrorValue && e != MTLCounterErrorValue && e > s) {
+                    enc_gpu_ns[i] = smeltr_ticks_to_ns(e - s);
+                    continue;
+                }
+            }
+        }
+        all_encoders_timed = NO;
+        // enc_gpu_ns[i] stays 0 — filled below via fallback.
+    }
+
+    // Fill encoders without sample buffers via pro-rata of the leftover
+    // in_flight_ns budget.
+    if (!all_encoders_timed) {
+        uint64_t accounted = 0;
+        uint64_t untimed_dispatches = 0;
+        for (NSUInteger i = 0; i < n_encs; i++) {
+            if (enc_gpu_ns[i] > 0) {
+                accounted += enc_gpu_ns[i];
+            } else {
+                untimed_dispatches += ((NSArray *)enc_dispatches[i]).count;
+            }
+        }
+        uint64_t leftover = (in_flight_ns > accounted) ? (in_flight_ns - accounted) : 0;
+        for (NSUInteger i = 0; i < n_encs; i++) {
+            if (enc_gpu_ns[i] == 0 && untimed_dispatches > 0) {
+                uint64_t dcount = ((NSArray *)enc_dispatches[i]).count;
+                enc_gpu_ns[i] = (leftover * dcount) / untimed_dispatches;
+            }
         }
     }
-    if (total_dispatches == 0) return;
+
+    // Second pass: aggregate per encoder into global (pso, tg) → (gpu_ns, count).
+    // Within each encoder, distribute enc_gpu_ns pro-rata by dispatch count.
+    NSMutableDictionary<NSArray *, NSArray *> *agg = [NSMutableDictionary new];
+    for (NSUInteger i = 0; i < n_encs; i++) {
+        NSArray *list = enc_dispatches[i];
+        if (list.count == 0) continue;
+        uint64_t enc_ns = enc_gpu_ns[i];
+        NSMutableDictionary<NSArray *, NSNumber *> *enc_buckets = [NSMutableDictionary new];
+        for (NSArray *d in list) {
+            NSNumber *cur = enc_buckets[d];
+            enc_buckets[d] = @([cur unsignedLongLongValue] + 1);
+        }
+        for (NSArray *key in enc_buckets) {
+            uint64_t dcount = [enc_buckets[key] unsignedLongLongValue];
+            uint64_t kernel_ns = (enc_ns * dcount) / list.count;
+            NSArray *cur = agg[key] ?: @[@(0ULL), @(0ULL)];
+            agg[key] = @[
+                @([cur[0] unsignedLongLongValue] + kernel_ns),
+                @([cur[1] unsignedLongLongValue] + dcount),
+            ];
+        }
+    }
+    free(enc_gpu_ns);
+
+    if (agg.count == 0) return;
 
     // Build C arrays for smeltr_write_cb_ops.
     uint32_t n = (uint32_t)agg.count;
@@ -342,18 +451,16 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
     }
     uint32_t i = 0;
     for (NSArray *key in agg) {
-        uint64_t pso   = [key[0] unsignedLongLongValue];
+        uint64_t pso        = [key[0] unsignedLongLongValue];
         unsigned long w     = [key[1] unsignedLongValue];
         unsigned long h     = [key[2] unsignedLongValue];
         unsigned long depth = [key[3] unsignedLongValue];
         uint16_t pso_short = (uint16_t)(pso & 0xFFFF);
         char *name = (char *)malloc(48);
         snprintf(name, 48, "K_%04x_%lux%lux%lu", pso_short, w, h, depth);
-        names_buf[i] = name;
-        uint64_t dcount = [agg[key] unsignedLongLongValue];
-        counts[i] = (uint32_t)dcount;
-        // Pro-rata: kernel_ns = in_flight_ns * dcount / total_dispatches
-        gpu_ns_arr[i] = (in_flight_ns * dcount) / total_dispatches;
+        names_buf[i]  = name;
+        gpu_ns_arr[i] = [agg[key][0] unsignedLongLongValue];
+        counts[i]     = (uint32_t)[agg[key][1] unsignedLongLongValue];
         i++;
     }
     smeltr_write_cb_ops(g_ring, smeltr_mono_ns(), cb_id,
@@ -537,9 +644,45 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
 }
 
 - (id)smeltr_computeCommandEncoderWithDispatchType:(NSUInteger)dt {
-    id enc = [self smeltr_computeCommandEncoderWithDispatchType:dt]; // original
+    id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
+    id enc;
+    id<MTLCounterSampleBuffer> sb_for_this_encoder = nil;
+
+    if (g_op_capture_enabled && g_stage_sampling_enabled) {
+        // Substitute WithDispatchType: with WithDescriptor: so we can attach a
+        // per-encoder stage-boundary counter sample buffer.
+        MTLComputePassDescriptor *desc = [MTLComputePassDescriptor computePassDescriptor];
+        desc.dispatchType = (MTLDispatchType)dt;
+
+        MTLCounterSampleBufferDescriptor *sbd = [MTLCounterSampleBufferDescriptor new];
+        sbd.counterSet = g_timestamp_counter_set;
+        sbd.storageMode = MTLStorageModeShared;
+        sbd.sampleCount = kStageBoundarySampleCount;
+        NSError *err = nil;
+        sb_for_this_encoder = [[cb device] newCounterSampleBufferWithDescriptor:sbd error:&err];
+        if (sb_for_this_encoder) {
+            MTLComputePassSampleBufferAttachmentDescriptor *att =
+                desc.sampleBufferAttachments[0];
+            att.sampleBuffer = sb_for_this_encoder;
+            att.startOfEncoderSampleIndex = 0;
+            att.endOfEncoderSampleIndex   = 1;
+        } else {
+            smeltr_log("stage sample buffer alloc failed (encoder substitution): %s",
+                       err ? [[err localizedDescription] UTF8String] : "(no error)");
+        }
+        // Forward to the original WithDescriptor: (after swap, this calls the
+        // real Metal implementation for computeCommandEncoderWithDescriptor:).
+        enc = [self smeltr_computeCommandEncoderWithDescriptor:desc];
+    } else {
+        // Fallback: call the original WithDispatchType: as before.
+        enc = [self smeltr_computeCommandEncoderWithDispatchType:dt]; // original (after swap)
+    }
+
     if (enc && g_op_capture_enabled) {
-        id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
+        if (sb_for_this_encoder) {
+            objc_setAssociatedObject(enc, kSmeltrEncoderSBKey, sb_for_this_encoder,
+                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
         smeltr_install_dispatch_swizzles((id<MTLComputeCommandEncoder>)enc);
         objc_setAssociatedObject(enc, kSmeltrEncoderDispKey,
                                   [NSMutableArray new],
@@ -774,6 +917,20 @@ static void smeltr_install_heap_suballoc_swizzles(id<MTLHeap> heap) {
 static void smeltr_swizzle_device_class(void) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     if (!d) { smeltr_log("no Metal device available"); return; }
+
+    // Detect + calibrate stage-boundary counter sampling BEFORE the NO_OPS
+    // check so we know whether to use per-encoder timing.
+    smeltr_detect_stage_sampling(d);
+    if (g_stage_sampling_enabled) {
+        smeltr_calibrate_ticks(d);
+        if (g_stage_sampling_enabled) {
+            smeltr_log("stage_sampling enabled (ns_per_tick=%.6f)", g_ns_per_tick);
+        } else {
+            smeltr_log("stage_sampling: calibration failed, falling back to 2.5a pro-rata");
+        }
+    } else {
+        smeltr_log("stage_sampling not supported on this device, using 2.5a pro-rata");
+    }
 
     const char *no_ops = getenv("SMELTR_HOOK_NO_OPS");
     if (no_ops && strcmp(no_ops, "1") == 0) {
