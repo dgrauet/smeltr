@@ -75,6 +75,8 @@ Hardened binaries (Apple-shipped Python on Sonoma/Sequoia, e.g. `/usr/bin/python
 Workaround: use a Homebrew-installed Python (`brew install python`), or any Python launched via a non-hardened wrapper, to keep the hook active.
 
 Kill switch: `SMELTR_HOOK_DISABLE=1` makes the loaded dylib inert.
+`SMELTR_HOOK_NO_OPS=1` disables op-level GPU capture only (CB-level capture
+stays on). Use when counter sampling overhead is undesirable.
 
 ## CLI reference
 
@@ -125,7 +127,31 @@ Phase-1 limitation: when a model's entire forward pass batches into a single
 top-level `mx.eval()` call, the active module stack is empty at the evaluation
 point and GPU time is attributed to `<unscoped>`. Module names still appear in
 the tree via `ModuleEntered` events with `gpu_ns_self = 0`. Phase 2 (op-level
-attribution via Metal debug groups) will lift this limitation.
+attribution via Metal debug groups) lifts this limitation — see below.
+
+### Op-level decomposition (Phase 2)
+
+Under each module leaf, `smeltr breakdown` lists the top-N GPU ops
+(Matmul, Softmax, LayerNorm, RMSNorm, ...) captured by intercepting
+MLX's `pushDebugGroup` / `popDebugGroup` calls on every
+`MTLComputeCommandEncoder`. Requires a device that supports
+`MTLCounterSamplingPointAtDispatchBoundary` — every M-series Mac since M1.
+
+Useful when a forward pass collapses into a single top-level `mx.eval()`
+(typical for autoregressive LLMs): the module-level attribution shows
+100% under `<unscoped>`, but the op-level view decomposes that bucket
+into `Matmul / Softmax / RMSNorm / …`.
+
+Flags:
+
+- `--top-ops N` (default 5) — max ops shown per module leaf.
+- `--no-ops` — hide the per-op lines.
+- `--ops-flat` — cross-module flat table instead of the module tree.
+
+Kill switch: `SMELTR_HOOK_NO_OPS=1` disables op-level capture in the
+metal-hook (CB-level capture stays active). When counter sampling is
+unsupported on the device, the hook emits a `MetalHookSkipped` event
+with reason starting `"op-level capture disabled: …"`.
 
 ## Development
 
