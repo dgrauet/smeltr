@@ -160,14 +160,10 @@ def test_op_breakdown_records_some_op(short_tmp_dir, tmp_path):
     # part of `record`'s stderr), NOT to `smeltr breakdown` stdout.  Check
     # the record run's stderr for the skip condition.
     if "op-level capture disabled" in record.stderr:
-        pytest.skip(
-            "op-level capture disabled — SMELTR_HOOK_NO_OPS=1 or hook inactive"
-        )
+        pytest.skip("op-level capture disabled — SMELTR_HOOK_NO_OPS=1 or hook inactive")
 
     # Phase 2.5: op names are PSO+threadgroup signatures, e.g. "K_a3f7_32x1x1".
     # We assert at least one such line appears in the breakdown table. The
     # semantic names (Matmul, Softmax, ...) are not recoverable without MLX
     # emitting debug groups, which it doesn't in 0.31.
-    assert "└ op:K_" in out, (
-        f"expected at least one K_<sig>_<dims> op line in breakdown:\n{out}"
-    )
+    assert "└ op:K_" in out, f"expected at least one K_<sig>_<dims> op line in breakdown:\n{out}"
