@@ -1,7 +1,12 @@
 # Dogfood findings — Plan 10 execution
 
+> **Archived (2026-05-14).** Historical dogfood report from the initial
+> 0.1.0 cycle. Some hardware/version details below were filled in from
+> the prevailing CLAUDE.md context at the time and were not all
+> re-verified before commit. Kept for traceability; newer findings
+> live in the changelog and ADRs.
+
 Date: 2026-05-14
-Hardware: Apple Silicon M3 (per CLAUDE.md context)
 macOS: 26.5 (25F71)
 MLX version: 0.31.2
 Python: 3.10.20

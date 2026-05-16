@@ -85,8 +85,60 @@ smeltr daemon uninstall
 | `smeltr sessions list` | After | List sessions on disk |
 | `smeltr sessions show <id>` | After | One-line per event-kind summary |
 | `smeltr analyze <id>` | After | Run analyzer rules → findings (queue pressure, crash correlation, etc.) |
-| `smeltr breakdown [--last] [<id>]` | After | Per-module GPU time breakdown for an MLX inference session |
+| `smeltr breakdown [--last] [<id>]` | After | Per-module + per-op GPU time breakdown for an MLX inference session |
 | `smeltr mcp` (in Claude) | After | Query sessions from a Claude conversation via MCP tools |
+
+### Breakdown — recipe
+
+```
+smeltr record python my_inference.py
+smeltr breakdown --last --top-ops 10
+```
+
+Output: a tree of MLX modules with their cumulative GPU time, and
+under each leaf an indented list of the top-N kernels that ran during
+that module's evaluations:
+
+```
+Transformer                          1     45.300us self    45.300us subtree   30.2%
+  Linear                             1     18.100us self    18.100us subtree   12.0%
+    └ op:K_3900_128x33x1             3      6.200us
+    └ op:K_5b00_0x0x0                1      1.500us
+```
+
+Kernel names are synthetic: `K_<pso_hash>_<tg_w>x<tg_h>x<tg_d>`.
+`<pso_hash>` is the bottom 16 bits of the kernel's
+`MTLComputePipelineState` pointer; threadgroup dims help distinguish
+the same kernel launched with different shapes. `0x0x0` indicates an
+indirect dispatch (count computed at runtime by the GPU).
+
+Useful flags on `smeltr breakdown`:
+
+| Flag | Effect |
+|---|---|
+| `--top-ops N` | Max kernels shown per module leaf (default 5). |
+| `--no-ops` | Hide kernel lines (module tree only). |
+| `--ops-flat` | Flat cross-module kernel table instead of the tree. |
+| `--flamegraph out.svg` | Folded-stack flamegraph SVG (via `inferno`). |
+| `--chrome-trace out.json` | Chrome Trace Event Format, open in Perfetto or Speedscope. |
+
+When a forward pass collapses into a single top-level MLX eval (common
+for autoregressive LLMs), all module attributions land under
+`<unscoped>` — but the op-level breakdown under `<unscoped>` still
+gives you the kernel-level decomposition for that bucket.
+
+Kill switch: `SMELTR_HOOK_NO_OPS=1` disables op-level capture entirely
+(module-level breakdown stays active). See the
+[ADR](adr/0002-op-attribution-pso-signature.md) for the design
+rationale behind PSO-signature naming and stage-boundary timing.
+
+#### MCP equivalents
+
+- `get_inference_breakdown` — returns the full `ModuleBreakdown` tree
+  including ops. Accepts `max_depth`, `top_n`, `min_gpu_ns`,
+  `include_ops`, `top_ops_per_leaf`.
+- `get_op_summary` — flat list of kernel signatures with GPU time and
+  percentage, aggregated across all module leaves.
 
 ## Typical workflow
 
