@@ -210,3 +210,38 @@ void smeltr_write_skipped(smeltr_ring_t *r, uint64_t ts, const char *reason) {
     push_label(buf, &off, reason);
     write_frame(r, SMELTR_KIND_SKIPPED, ts, buf, off);
 }
+
+void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
+    uint64_t cb_id,
+    const char *const *names,
+    const uint64_t *gpu_ns,
+    const uint32_t *counts,
+    uint32_t op_count)
+{
+    /* upper bound: 8 (cb_id) + 4 (op_count) + op_count * (4 + 1024 + 8 + 4)
+       Names are bounded in practice by MLX primitive names (~30 chars), but
+       cap each at 1024 for safety to keep buffer size sane. */
+    size_t cap = 16;
+    for (uint32_t i = 0; i < op_count; i++) {
+        size_t nl = names[i] ? strlen(names[i]) : 0;
+        if (nl > 1024) nl = 1024;
+        cap += 4 + nl + 8 + 4;
+    }
+    uint8_t *buf = (uint8_t *)malloc(cap);
+    if (!buf) return;
+    size_t off = 0;
+    BUF_PUSH_U64(buf, off, cb_id);
+    BUF_PUSH_U32(buf, off, op_count);
+    for (uint32_t i = 0; i < op_count; i++) {
+        const char *name = names[i] ? names[i] : "";
+        size_t nl = strlen(name);
+        if (nl > 1024) nl = 1024;
+        uint32_t nl32 = (uint32_t)nl;
+        BUF_PUSH_U32(buf, off, nl32);
+        memcpy(buf + off, name, nl); off += nl;
+        BUF_PUSH_U64(buf, off, gpu_ns[i]);
+        BUF_PUSH_U32(buf, off, counts[i]);
+    }
+    write_frame(r, SMELTR_KIND_CB_OPS, ts, buf, off);
+    free(buf);
+}

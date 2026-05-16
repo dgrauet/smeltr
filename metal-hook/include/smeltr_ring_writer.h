@@ -39,6 +39,15 @@ void smeltr_write_texture_alloc(smeltr_ring_t *r, uint64_t ts,
 void smeltr_write_texture_free(smeltr_ring_t *r, uint64_t ts, uint64_t texture_id);
 void smeltr_write_skipped(smeltr_ring_t *r, uint64_t ts, const char *reason);
 
+/* MetalCbOps: per-CB aggregated op-level GPU timing.
+   ops_count entries packed as: u32 name_len; char name[name_len]; u64 gpu_ns; u32 count. */
+void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
+    uint64_t cb_id,
+    const char *const *names,   /* op_count C strings, non-NULL each */
+    const uint64_t *gpu_ns,
+    const uint32_t *counts,
+    uint32_t op_count);
+
 #ifdef __cplusplus
 }
 #endif

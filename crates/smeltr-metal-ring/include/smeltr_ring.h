@@ -21,6 +21,7 @@
 #define SMELTR_KIND_TEXTURE_FREE   10u
 #define SMELTR_KIND_DROPPED        11u
 #define SMELTR_KIND_SKIPPED        12u
+#define SMELTR_KIND_CB_OPS         13u
 
 typedef struct {
     uint32_t magic;
