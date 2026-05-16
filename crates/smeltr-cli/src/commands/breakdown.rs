@@ -1,11 +1,14 @@
 //! `smeltr breakdown` command.
 
 use anyhow::{anyhow, Context, Result};
-use smeltr_analyzer::{compute_breakdown, render_chrome_trace, render_table, ModuleBreakdown};
+use smeltr_analyzer::{
+    compute_breakdown, render_chrome_trace, render_ops_flat, render_table, ModuleBreakdown,
+};
 use smeltr_core::reader::read_events;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     id: Option<String>,
     last: bool,
@@ -14,6 +17,9 @@ pub fn run(
     depth: u16,
     flamegraph: Option<PathBuf>,
     chrome_trace: Option<PathBuf>,
+    top_ops: usize,
+    no_ops: bool,
+    ops_flat: bool,
 ) -> Result<()> {
     let dir = crate::session_resolver::resolve(id, last, include_ambient)?;
     let events =
@@ -24,7 +30,12 @@ pub fn run(
     }
 
     let root = compute_breakdown(events).context("computing breakdown")?;
-    println!("{}", render_table(&root, top, depth, 5, true));
+    if ops_flat {
+        println!("{}", render_ops_flat(&root, top));
+    } else {
+        let show_ops = !no_ops;
+        println!("{}", render_table(&root, top, depth, top_ops, show_ops));
+    }
 
     if let Some(path) = flamegraph {
         write_flamegraph(&path, &root)
