@@ -23,8 +23,10 @@ fn breakdown_renders_qualnames() {
                 eval_count: 1,
                 cb_count: 1,
                 children: vec![],
+                ops: vec![],
                 diagnostics: None,
             }],
+            ops: vec![],
             diagnostics: Some(Diagnostics::default()),
         }),
         ..Default::default()

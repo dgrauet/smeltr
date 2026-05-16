@@ -24,7 +24,7 @@ pub fn run(
     }
 
     let root = compute_breakdown(events).context("computing breakdown")?;
-    println!("{}", render_table(&root, top, depth));
+    println!("{}", render_table(&root, top, depth, 5, true));
 
     if let Some(path) = flamegraph {
         write_flamegraph(&path, &root)

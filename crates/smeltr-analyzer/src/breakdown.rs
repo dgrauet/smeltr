@@ -321,7 +321,13 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
 }
 
 /// Render a flat table sorted by gpu_ns_subtree descending.
-pub fn render_table(root: &ModuleBreakdown, top: usize, max_depth: u16) -> String {
+pub fn render_table(
+    root: &ModuleBreakdown,
+    top: usize,
+    max_depth: u16,
+    top_ops: usize,
+    show_ops: bool,
+) -> String {
     let total = root.gpu_ns_subtree.max(1);
     let mut rows: Vec<(u16, &ModuleBreakdown)> = Vec::new();
     fn walk<'a>(
@@ -363,6 +369,19 @@ pub fn render_table(root: &ModuleBreakdown, top: usize, max_depth: u16) -> Strin
             n.gpu_ns_subtree as f64 / 1000.0,
             pct,
         ));
+        if show_ops && !n.ops.is_empty() {
+            for op in n.ops.iter().take(top_ops) {
+                let op_indent = "  ".repeat((depth as usize) + 1);
+                out.push_str(&format!(
+                    "{:<48} {:>8} {:>14.3} {:>14} {:>5}\n",
+                    truncate(&format!("{op_indent}\u{2514} op:{}", op.name), 48),
+                    op.count,
+                    op.gpu_ns as f64 / 1000.0,
+                    "",
+                    "",
+                ));
+            }
+        }
     }
     if let Some(d) = &root.diagnostics {
         out.push_str(&format!(
@@ -1197,12 +1216,86 @@ mod tests {
         }
     }
 
+    fn fixture_with_ops(ops: Vec<OpAttribution>) -> ModuleBreakdown {
+        ModuleBreakdown {
+            qualname: "<root>".into(),
+            class_name: "".into(),
+            calls: 0,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: 1500,
+            eval_count: 0,
+            cb_count: 0,
+            children: vec![ModuleBreakdown {
+                qualname: "Linear".into(),
+                class_name: "Linear".into(),
+                calls: 1,
+                gpu_ns_self: 1500,
+                gpu_ns_subtree: 1500,
+                eval_count: 1,
+                cb_count: 1,
+                children: vec![],
+                ops,
+                diagnostics: None,
+            }],
+            ops: vec![],
+            diagnostics: Some(Diagnostics::default()),
+        }
+    }
+
     #[test]
     fn render_table_shows_qualnames_and_durations() {
-        let s = render_table(&sample_breakdown(), 10, 6);
+        let s = render_table(&sample_breakdown(), 10, 6, 5, true);
         assert!(s.contains("Block"));
         assert!(s.contains("Linear"));
         assert!(s.contains("1.500")); // 1500 ns formatted as us
+    }
+
+    #[test]
+    fn render_table_includes_op_lines_by_default() {
+        let r = fixture_with_ops(vec![
+            OpAttribution {
+                name: "Matmul".into(),
+                gpu_ns: 1200,
+                count: 1,
+            },
+            OpAttribution {
+                name: "Softmax".into(),
+                gpu_ns: 300,
+                count: 1,
+            },
+        ]);
+        let s = render_table(&r, 10, 6, 5, true);
+        assert!(s.contains("Matmul"));
+        assert!(s.contains("Softmax"));
+        assert!(s.contains("op:"));
+    }
+
+    #[test]
+    fn render_table_no_ops_flag_hides_them() {
+        let r = fixture_with_ops(vec![OpAttribution {
+            name: "Matmul".into(),
+            gpu_ns: 1200,
+            count: 1,
+        }]);
+        let s = render_table(&r, 10, 6, 5, false);
+        assert!(!s.contains("Matmul"));
+    }
+
+    #[test]
+    fn render_table_top_ops_caps_at_n() {
+        let mut ops = Vec::new();
+        for i in 0..10u64 {
+            ops.push(OpAttribution {
+                name: format!("Op{i}"),
+                gpu_ns: 1000 - i * 10,
+                count: 1,
+            });
+        }
+        let r = fixture_with_ops(ops);
+        let s = render_table(&r, 10, 6, 3, true);
+        assert!(s.contains("Op0"));
+        assert!(s.contains("Op2"));
+        assert!(!s.contains("Op3"));
     }
 
     #[test]
