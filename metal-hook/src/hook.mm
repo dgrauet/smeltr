@@ -226,38 +226,53 @@ static void smeltr_install_dispatch_swizzles(id<MTLComputeCommandEncoder> enc) {
         SEL dtgi = @selector(dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:);
         SEL dtt  = @selector(dispatchThreads:threadsPerThreadgroup:);
         Method m;
+        // Guard: if the eager-swizzle pass already installed our wrappers on this
+        // class, skip — overwriting would store our OWN IMP as "orig", causing
+        // infinite recursion on the next dispatch call.
         if ((m = class_getInstanceMethod(ec, sps))) {
-            IMP orig = method_setImplementation(m, (IMP)smeltr_setComputePipelineState_swz);
-            objc_setAssociatedObject((id)ec, kSmeltrOrigSetPSO,
-                                      [NSValue valueWithPointer:(void *)orig],
-                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            smeltr_log("swizzled %s.setComputePipelineState:", class_getName(ec));
+            IMP cur = method_getImplementation(m);
+            if (cur != (IMP)smeltr_setComputePipelineState_swz) {
+                IMP orig = method_setImplementation(m, (IMP)smeltr_setComputePipelineState_swz);
+                objc_setAssociatedObject((id)ec, kSmeltrOrigSetPSO,
+                                          [NSValue valueWithPointer:(void *)orig],
+                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                smeltr_log("swizzled %s.setComputePipelineState:", class_getName(ec));
+            }
         }
         if ((m = class_getInstanceMethod(ec, dtg))) {
-            IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreadgroups_swz);
-            objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchTG,
-                                      [NSValue valueWithPointer:(void *)orig],
-                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            smeltr_log("swizzled %s.dispatchThreadgroups:threadsPerThreadgroup:", class_getName(ec));
+            IMP cur = method_getImplementation(m);
+            if (cur != (IMP)smeltr_dispatchThreadgroups_swz) {
+                IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreadgroups_swz);
+                objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchTG,
+                                          [NSValue valueWithPointer:(void *)orig],
+                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                smeltr_log("swizzled %s.dispatchThreadgroups:threadsPerThreadgroup:", class_getName(ec));
+            }
         }
         if ((m = class_getInstanceMethod(ec, dtgi))) {
-            IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreadgroupsIndirect_swz);
-            objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchTGI,
-                                      [NSValue valueWithPointer:(void *)orig],
-                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            smeltr_log("swizzled %s.dispatchThreadgroupsWithIndirectBuffer:offset:threadsPerThreadgroup:",
-                       class_getName(ec));
+            IMP cur = method_getImplementation(m);
+            if (cur != (IMP)smeltr_dispatchThreadgroupsIndirect_swz) {
+                IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreadgroupsIndirect_swz);
+                objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchTGI,
+                                          [NSValue valueWithPointer:(void *)orig],
+                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                smeltr_log("swizzled %s.dispatchThreadgroupsWithIndirectBuffer:offset:threadsPerThreadgroup:",
+                           class_getName(ec));
+            }
         }
         // MLX 0.31+ uses dispatchThreads:threadsPerThreadgroup: (non-fixed-threadgroup-count
         // variant). Swizzle it so we record the same (PSO pointer, 0x0x0) sentinel that
         // smeltr_record_dispatch uses for indirect dispatches — total-thread dims are
         // not known at encode time, so we treat them uniformly as size (0,0,0).
         if ((m = class_getInstanceMethod(ec, dtt))) {
-            IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreads_swz);
-            objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchThreads,
-                                      [NSValue valueWithPointer:(void *)orig],
-                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            smeltr_log("swizzled %s.dispatchThreads:threadsPerThreadgroup:", class_getName(ec));
+            IMP cur = method_getImplementation(m);
+            if (cur != (IMP)smeltr_dispatchThreads_swz) {
+                IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchThreads_swz);
+                objc_setAssociatedObject((id)ec, kSmeltrOrigDispatchThreads,
+                                          [NSValue valueWithPointer:(void *)orig],
+                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                smeltr_log("swizzled %s.dispatchThreads:threadsPerThreadgroup:", class_getName(ec));
+            }
         }
     });
 }
@@ -1128,27 +1143,15 @@ static void smeltr_install_encoder_dispatch_swizzles_eager(void) {
     //   setPipelineState: + dispatchNetworkWithIntermediatesHeap: instead of
     //   standard compute dispatch APIs.
     static const char *encoder_class_names[] = {
-        // MTL4 path on Apple Silicon (macOS 15+):
-        // The concrete hardware classes are the AGXG14XFamily* contexts.
-        // _MTL4ComputeCommandEncoder is a user-facing wrapper; the hardware
-        // dispatch path goes through AGXG14XFamilyComputeContext_mtlnext.
-        "AGXG14XFamilyComputeContext_mtlnext",
+        // Only the three concrete compute encoder classes that MLX actually
+        // instantiates. Debug/Tools wrappers are Apple-internal proxies with
+        // different semantics; swizzling them crashes non-debug workloads.
+        // MachineLearning encoders use a different dispatch shape
+        // (dispatchNetworkWithIntermediatesHeap:) that our wrappers cannot
+        // handle.
         "AGXG14XFamilyComputeContext",
-        // Legacy/standard Metal path (older macOS or non-MTL4 dispatch):
-        "MTLLegacySVComputeCommandEncoder",
-        // User-facing wrapper classes (may delegate to the above):
+        "AGXG14XFamilyComputeContext_mtlnext",
         "_MTL4ComputeCommandEncoder",
-        "_MTL4MachineLearningCommandEncoder",
-        // Wrapper/debug/tools variants — used when Metal GPU frame capture or
-        // diagnostic tools are active.
-        "MTL4ToolsComputeCommandEncoder",
-        "MTL4DebugComputeCommandEncoder",
-        "MTL4GPUDebugComputeCommandEncoder",
-        "MTL4ToolsMachineLearningCommandEncoder",
-        "MTL4DebugMachineLearningCommandEncoder",
-        "MTLDebugComputeCommandEncoder",
-        "MTLGPUDebugComputeCommandEncoder",
-        "MTLToolsComputeCommandEncoder",
         NULL,
     };
     for (int ci = 0; encoder_class_names[ci]; ci++) {
