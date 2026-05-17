@@ -51,6 +51,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Kill switches**: `SMELTR_HOOK_NO_OPS=1` disables op-level capture
   in the metal-hook (CB-level capture stays active); the existing
   `SMELTR_HOOK_DISABLE=1` continues to disable the hook entirely.
+- **Periodic ticks→ns recalibration** opt-in via
+  `SMELTR_HOOK_RECALIBRATE_SEC=<n>`. Re-samples the device CPU/GPU
+  tick ratio every N seconds and updates via EMA (alpha=0.2). Useful
+  on multi-hour sessions where thermal drift moves the ratio.
+  Sanity-rejected samples emit a throttled `MetalHookSkipped`
+  diagnostic. Off by default.
+- **Per-dispatch GPU timing on M3+** opt-in via
+  `SMELTR_HOOK_DISPATCH_BOUNDARY=1` (when the device exposes
+  `MTLCounterSamplingPointAtDispatchBoundary`). Replaces the
+  encoder-level + pro-rata-within-encoder attribution with exact
+  per-dispatch ns. Auto-falls-back to stage-boundary on M1/M2 or on
+  sustained sample-buffer alloc failure.
+- **MTL4 ML encoder visibility** opt-in via `SMELTR_HOOK_ML_ENCODER=1`
+  (macOS 26). Swizzles only `dispatchNetworkWithIntermediatesHeap:`
+  on `_MTL4MachineLearningCommandEncoder` (and Debug/Tools variants);
+  `setPipelineState:` is deliberately not touched. Dispatches show up
+  as `K_MLNet_<encoder_addr>` in the op breakdown.
+- **Live hot-kernels TUI panel**: press `K` in `smeltr tui` to toggle
+  a top-5 rolling-window (30s) panel that aggregates `MetalCbOps` by
+  signature and sorts by `gpu_ns`. Off by default; not part of the
+  Tab focus cycle; no layout impact when hidden.
 
 ### Changed
 
