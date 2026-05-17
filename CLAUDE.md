@@ -63,3 +63,8 @@ CBOR length-prefixed frames over a Unix socket. See
   multi-hour sessions where thermal drift can move the CPU/GPU tick
   ratio. Sanity-rejected samples emit a throttled `MetalHookSkipped`
   diagnostic.
+- `SMELTR_HOOK_DISPATCH_BOUNDARY=1` — opt-in per-dispatch GPU timing on
+  M3+ devices that expose `MTLCounterSamplingPointAtDispatchBoundary`.
+  Replaces the encoder-level stage-boundary + pro-rata attribution with
+  exact per-dispatch ns. Auto-falls-back to stage-boundary on M1/M2 (or
+  on sustained sample-buffer alloc failure).
