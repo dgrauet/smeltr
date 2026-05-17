@@ -1,6 +1,6 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use smeltr_core::event::{Event, Payload, Source};
+use smeltr_core::event::{Event, OpSample, Payload, Source};
 use smeltr_tui::render::{render, Panel, RenderCtx};
 use smeltr_tui::state::UiState;
 use uuid::Uuid;
@@ -67,6 +67,7 @@ fn render_after_synthetic_events_shows_all_panels() {
                 focus: Panel::Timeline,
                 paused: false,
                 mode_label: "live",
+                show_hot_kernels: false,
             },
         )
     })
@@ -85,6 +86,43 @@ fn render_after_synthetic_events_shows_all_panels() {
         "phase: encode",
         "depth=5",
     ] {
+        assert!(d.contains(marker), "missing {:?} in dump:\n{d}", marker);
+    }
+}
+
+#[test]
+fn hot_kernels_panel_renders_when_toggled_on() {
+    let mut state = UiState::default();
+    state.ingest(&ev(
+        1_000_000_000,
+        Payload::MetalCbOps {
+            cb_id: 1,
+            ops: vec![OpSample {
+                name: "K_demo_8x8x1".into(),
+                gpu_ns: 250_000,
+                count: 3,
+            }],
+        },
+    ));
+
+    let backend = TestBackend::new(120, 50);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| {
+        render(
+            f,
+            &state,
+            RenderCtx {
+                focus: Panel::Timeline,
+                paused: false,
+                mode_label: "live",
+                show_hot_kernels: true,
+            },
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let d = dump(buf);
+    for marker in ["Hot kernels", "K_demo_8x8x1"] {
         assert!(d.contains(marker), "missing {:?} in dump:\n{d}", marker);
     }
 }

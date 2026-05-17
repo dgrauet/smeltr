@@ -81,7 +81,7 @@ smeltr daemon uninstall
 
 | Tool | When | What |
 |---|---|---|
-| `smeltr tui` | During or after a run | Live UI: event feed, timeline, queue depth, MLX memory |
+| `smeltr tui` | During or after a run | Live UI: event feed, timeline, queue depth, MLX memory; press `K` to toggle a rolling top-5 hot-kernels panel |
 | `smeltr sessions list` | After | List sessions on disk |
 | `smeltr sessions show <id>` | After | One-line per event-kind summary |
 | `smeltr analyze <id>` | After | Run analyzer rules → findings (queue pressure, crash correlation, etc.) |

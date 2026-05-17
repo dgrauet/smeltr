@@ -35,18 +35,34 @@ pub struct RenderCtx {
     pub focus: Panel,
     pub paused: bool,
     pub mode_label: &'static str,
+    pub show_hot_kernels: bool,
 }
 
 pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx) {
     let area = frame.area();
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(10),
-        ])
-        .split(area);
+    // When the optional "Hot kernels" panel is hidden, layout is identical
+    // to the original 3-section grid. When visible, an extra 8-row strip is
+    // inserted between the mid grid and the notices panel.
+    let outer = if ctx.show_hot_kernels {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(8),
+                Constraint::Length(8),
+                Constraint::Length(10),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(8),
+                Constraint::Length(10),
+            ])
+            .split(area)
+    };
 
     render_timeline(frame, outer[0], state, ctx);
 
@@ -67,7 +83,12 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx) {
     render_memory(frame, row1[1], state, ctx);
     render_mlx(frame, row2[0], state, ctx);
     render_pressure(frame, row2[1], state, ctx);
-    render_notices(frame, outer[2], state, ctx);
+    if ctx.show_hot_kernels {
+        render_hot_kernels(frame, outer[2], state);
+        render_notices(frame, outer[3], state, ctx);
+    } else {
+        render_notices(frame, outer[2], state, ctx);
+    }
 }
 
 fn block(title: String, focused: bool) -> Block<'static> {
@@ -215,6 +236,37 @@ fn render_notices(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCtx
         ctx.focus == Panel::Notices,
     ));
     frame.render_widget(list, area);
+}
+
+fn render_hot_kernels(frame: &mut Frame, area: Rect, state: &UiState) {
+    let top = state.top_hot_kernels(5);
+    let mut lines: Vec<Line> = Vec::new();
+    if top.is_empty() {
+        lines.push(Line::from("(no MetalCbOps yet)"));
+    } else {
+        let total_gpu: u64 = top.iter().map(|(_, g, _)| *g).sum();
+        for (name, gpu_ns, count) in top {
+            let pct = if total_gpu == 0 {
+                0.0
+            } else {
+                (gpu_ns as f64 / total_gpu as f64) * 100.0
+            };
+            lines.push(Line::from(format!(
+                "{:>5.1}%  {:>8.2}ms  ×{:<5}  {}",
+                pct,
+                gpu_ns as f64 / 1e6,
+                count,
+                name,
+            )));
+        }
+    }
+    // Always-unfocused border — this panel is a toggleable side view,
+    // not part of the Tab focus cycle.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Hot kernels (last 30s · K to toggle)");
+    let widget = Paragraph::new(lines).block(block);
+    frame.render_widget(widget, area);
 }
 
 fn is_flagged(name: &str) -> bool {

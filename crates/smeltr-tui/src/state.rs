@@ -3,6 +3,9 @@
 use smeltr_core::event::{Event, Payload, ProbeHealthState, ProcEntry};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+const HOT_KERNELS_WINDOW_NS: u64 = 30 * 1_000_000_000;
+const HOT_KERNELS_CAP: usize = 4096;
+
 #[derive(Debug, Clone, Default)]
 pub struct UiState {
     pub events_total: u64,
@@ -15,6 +18,7 @@ pub struct UiState {
     pub vm_sample: Option<VmSample>,
     pub proc_top: Vec<ProcEntry>,
     pub log_feed: VecDeque<LogEntry>,
+    pub hot_kernels: VecDeque<HotKernelSample>,
     pub session_short: Option<String>,
     pub last_ts_wall_ns: u64,
     pub last_ts_mono_ns: u64,
@@ -45,6 +49,14 @@ pub struct VmSample {
     pub swap_used_bytes: u64,
     pub page_outs_per_sec: f32,
     pub ts_mono_ns: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HotKernelSample {
+    pub ts_mono_ns: u64,
+    pub name: String,
+    pub gpu_ns: u64,
+    pub count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -254,8 +266,44 @@ impl UiState {
             Payload::MlxPanicTriggered { condition } => {
                 self.push_log(ev.ts_mono_ns, "mlx-panic".into(), condition.clone());
             }
+            Payload::MetalCbOps { ops, .. } => {
+                for op in ops {
+                    self.hot_kernels.push_back(HotKernelSample {
+                        ts_mono_ns: ev.ts_mono_ns,
+                        name: op.name.clone(),
+                        gpu_ns: op.gpu_ns,
+                        count: op.count,
+                    });
+                }
+                let cutoff = ev.ts_mono_ns.saturating_sub(HOT_KERNELS_WINDOW_NS);
+                while let Some(front) = self.hot_kernels.front() {
+                    if front.ts_mono_ns < cutoff || self.hot_kernels.len() > HOT_KERNELS_CAP {
+                        self.hot_kernels.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Aggregate the rolling window by kernel name, sorted by total gpu_ns
+    /// descending. Returns `(name, gpu_ns_total, count_total)` tuples.
+    pub fn top_hot_kernels(&self, n: usize) -> Vec<(String, u64, u64)> {
+        let mut agg: HashMap<&str, (u64, u64)> = HashMap::new();
+        for s in self.hot_kernels.iter() {
+            let e = agg.entry(s.name.as_str()).or_insert((0, 0));
+            e.0 += s.gpu_ns;
+            e.1 += s.count as u64;
+        }
+        let mut v: Vec<(String, u64, u64)> = agg
+            .into_iter()
+            .map(|(k, (gpu, cnt))| (k.to_string(), gpu, cnt))
+            .collect();
+        v.sort_by_key(|(_, gpu, _)| std::cmp::Reverse(*gpu));
+        v.truncate(n);
+        v
     }
 
     fn push_log(&mut self, ts_mono_ns: u64, kind: String, summary: String) {
@@ -295,7 +343,7 @@ fn basename(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smeltr_core::event::Source;
+    use smeltr_core::event::{OpSample, Source};
     use uuid::Uuid;
 
     fn ev(ts: u64, payload: Payload) -> Event {
@@ -393,6 +441,79 @@ mod tests {
         }
         assert!(s.timeline_buckets.len() <= 61);
         assert!(s.timeline_buckets.back().unwrap().0 == 119);
+    }
+
+    #[test]
+    fn hot_kernels_aggregates_by_name_sorted_by_gpu_ns() {
+        let mut s = UiState::default();
+        s.ingest(&ev(
+            1,
+            Payload::MetalCbOps {
+                cb_id: 1,
+                ops: vec![
+                    OpSample {
+                        name: "K_a".into(),
+                        gpu_ns: 100,
+                        count: 1,
+                    },
+                    OpSample {
+                        name: "K_b".into(),
+                        gpu_ns: 500,
+                        count: 2,
+                    },
+                ],
+            },
+        ));
+        s.ingest(&ev(
+            2,
+            Payload::MetalCbOps {
+                cb_id: 2,
+                ops: vec![OpSample {
+                    name: "K_a".into(),
+                    gpu_ns: 50,
+                    count: 1,
+                }],
+            },
+        ));
+        let top = s.top_hot_kernels(5);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].0, "K_b");
+        assert_eq!(top[0].1, 500);
+        assert_eq!(top[0].2, 2);
+        assert_eq!(top[1].0, "K_a");
+        assert_eq!(top[1].1, 150);
+        assert_eq!(top[1].2, 2);
+    }
+
+    #[test]
+    fn hot_kernels_drops_samples_outside_window() {
+        let mut s = UiState::default();
+        s.ingest(&ev(
+            0,
+            Payload::MetalCbOps {
+                cb_id: 1,
+                ops: vec![OpSample {
+                    name: "old".into(),
+                    gpu_ns: 999,
+                    count: 1,
+                }],
+            },
+        ));
+        // 31s later — outside the 30s window, the old sample is evicted.
+        s.ingest(&ev(
+            31 * 1_000_000_000,
+            Payload::MetalCbOps {
+                cb_id: 2,
+                ops: vec![OpSample {
+                    name: "new".into(),
+                    gpu_ns: 10,
+                    count: 1,
+                }],
+            },
+        ));
+        let top = s.top_hot_kernels(5);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].0, "new");
     }
 
     #[test]
