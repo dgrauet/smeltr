@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-17
+
 ### Added
 
 - **Per-module GPU time breakdown** for MLX inference (`smeltr breakdown
@@ -117,6 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   {ls,show,open}`, `smeltr doctor`, `smeltr record`, `smeltr analyze`,
   `smeltr tui`, `smeltr mcp`.
 
-[Unreleased]: https://example.com/smeltr/compare/v0.1.0...HEAD
-[0.1.0]: https://example.com/smeltr/releases/tag/v0.1.0
+[Unreleased]: https://github.com/dgrauet/smeltr/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dgrauet/smeltr/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/dgrauet/smeltr/releases/tag/v0.1.0
 
