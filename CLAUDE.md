@@ -58,3 +58,8 @@ CBOR length-prefixed frames over a Unix socket. See
 - `SMELTR_HOOK_DISABLE=1` — kill switch for the metal-hook dylib.
 - `SMELTR_HOOK_FORCE_OS_MAJOR=<n>` — simulate a macOS major version
   (test override; on macOS < 14 the hook auto-skips).
+- `SMELTR_HOOK_RECALIBRATE_SEC=<n>` — opt-in periodic ticks→ns
+  recalibration interval (EMA, alpha=0.2). Off by default; useful on
+  multi-hour sessions where thermal drift can move the CPU/GPU tick
+  ratio. Sanity-rejected samples emit a throttled `MetalHookSkipped`
+  diagnostic.
