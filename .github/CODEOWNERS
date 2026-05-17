@@ -1,0 +1,3 @@
+# Default code owner for every path in the repo. Required by the strict
+# branch-protection policy on `main` (intendant rule RL005).
+* @dgrauet
