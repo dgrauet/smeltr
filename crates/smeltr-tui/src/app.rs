@@ -21,6 +21,7 @@ pub struct App {
     pub paused: bool,
     pub mode_label: &'static str,
     pub quit_requested: bool,
+    pub show_hot_kernels: bool,
 }
 
 impl App {
@@ -31,6 +32,7 @@ impl App {
             paused: false,
             mode_label,
             quit_requested: false,
+            show_hot_kernels: false,
         }
     }
 
@@ -82,6 +84,7 @@ impl App {
                     focus: self.focus,
                     paused: self.paused,
                     mode_label: self.mode_label,
+                    show_hot_kernels: self.show_hot_kernels,
                 };
                 term.draw(|f| render(f, &self.state, ctx))?;
                 last_draw = Instant::now();
@@ -99,6 +102,9 @@ impl App {
             }
             KeyCode::Char('s') => {
                 // Reserved: snapshot. No-op v1.
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') => {
+                self.show_hot_kernels = !self.show_hot_kernels;
             }
             _ => {}
         }
@@ -141,6 +147,16 @@ mod tests {
         assert!(app.paused);
         app.handle_key(KeyCode::Char(' '));
         assert!(!app.paused);
+    }
+
+    #[test]
+    fn handle_key_k_toggles_hot_kernels_panel() {
+        let mut app = App::new("test");
+        assert!(!app.show_hot_kernels);
+        app.handle_key(KeyCode::Char('k'));
+        assert!(app.show_hot_kernels);
+        app.handle_key(KeyCode::Char('K'));
+        assert!(!app.show_hot_kernels);
     }
 
     #[test]
