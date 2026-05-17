@@ -40,7 +40,26 @@ static BOOL g_op_capture_enabled = YES;  // toggled by SMELTR_HOOK_NO_OPS
 
 static BOOL g_stage_sampling_enabled = NO;
 static id<MTLCounterSet> g_timestamp_counter_set = nil;
-static double g_ns_per_tick = 0.0;
+// Holds the bit pattern of the current double ns-per-tick ratio. Stored as
+// _Atomic so the optional recalibration timer can update it concurrently
+// without tearing reads on the hot path (smeltr_ticks_to_ns).
+static _Atomic(uint64_t) g_ns_per_tick_bits = 0;
+static dispatch_source_t g_recal_timer = NULL;
+static id<MTLDevice> g_recal_device = nil;
+static _Atomic(uint64_t) g_recal_rejected_total = 0;
+
+static inline double smeltr_load_ns_per_tick(void) {
+    uint64_t bits = atomic_load_explicit(&g_ns_per_tick_bits, memory_order_relaxed);
+    double v;
+    memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+static inline void smeltr_store_ns_per_tick(double v) {
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    atomic_store_explicit(&g_ns_per_tick_bits, bits, memory_order_relaxed);
+}
 
 /// Detect MTLCounterSamplingPointAtStageBoundary support and find the
 /// timestamp counter set. Called once at hook init.
@@ -59,22 +78,85 @@ static void smeltr_detect_stage_sampling(id<MTLDevice> device) {
     g_stage_sampling_enabled = YES;
 }
 
-/// Two timestamp samples 50ms apart, compute CPU-ns / GPU-tick ratio.
-/// Sanity-check the result; disable stage sampling if the ratio is absurd.
-static void smeltr_calibrate_ticks(id<MTLDevice> device) {
+/// Take two timestamp samples 50ms apart and compute CPU-ns / GPU-tick.
+/// Returns YES on a sane ratio, NO otherwise (caller decides what to do).
+static BOOL smeltr_measure_tick_ratio(id<MTLDevice> device, double *out_ratio) {
     MTLTimestamp cpu1 = 0, gpu1 = 0, cpu2 = 0, gpu2 = 0;
     [device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
     struct timespec ts = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
     nanosleep(&ts, NULL);
     [device sampleTimestamps:&cpu2 gpuTimestamp:&gpu2];
-    if (gpu2 <= gpu1) { g_stage_sampling_enabled = NO; return; }
+    if (gpu2 <= gpu1) return NO;
     double ratio = (double)(cpu2 - cpu1) / (double)(gpu2 - gpu1);
-    if (ratio < 0.1 || ratio > 100.0) { g_stage_sampling_enabled = NO; return; }
-    g_ns_per_tick = ratio;
+    if (ratio < 0.1 || ratio > 100.0) return NO;
+    *out_ratio = ratio;
+    return YES;
+}
+
+/// Initial calibration. On failure, disables stage-boundary sampling
+/// entirely (the per-encoder timings would be meaningless without it).
+static void smeltr_calibrate_ticks(id<MTLDevice> device) {
+    double ratio = 0.0;
+    if (!smeltr_measure_tick_ratio(device, &ratio)) {
+        g_stage_sampling_enabled = NO;
+        return;
+    }
+    smeltr_store_ns_per_tick(ratio);
 }
 
 static inline uint64_t smeltr_ticks_to_ns(uint64_t ticks) {
-    return (uint64_t)((double)ticks * g_ns_per_tick);
+    return (uint64_t)((double)ticks * smeltr_load_ns_per_tick());
+}
+
+// Forward decls — full definitions appear later in this file.
+static int smeltr_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void smeltr_emit_metal_hook_skipped(const char *reason);
+
+/// Opt-in periodic ticks→ns recalibration, guarded by
+/// `SMELTR_HOOK_RECALIBRATE_SEC=<n>`. EMA-smoothed (alpha=0.2) so a single
+/// bad sample doesn't move the ratio sharply. Rejections (sanity-check
+/// failures) bump an atomic counter and emit a throttled diagnostic on
+/// the MetalHookSkipped channel.
+static void smeltr_recalibration_init(id<MTLDevice> device) {
+    const char *raw = getenv("SMELTR_HOOK_RECALIBRATE_SEC");
+    if (!raw || raw[0] == '\0') return;
+    char *end = NULL;
+    long secs = strtol(raw, &end, 10);
+    if (end == raw || *end != '\0' || secs <= 0 || secs > 86400) {
+        smeltr_log("SMELTR_HOOK_RECALIBRATE_SEC=%s: ignored (out of range 1..86400)", raw);
+        return;
+    }
+
+    g_recal_device = device;  // retained for the lifetime of the timer
+    dispatch_queue_t q = dispatch_queue_create("smeltr.recal", DISPATCH_QUEUE_SERIAL);
+    g_recal_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    uint64_t interval_ns = (uint64_t)secs * NSEC_PER_SEC;
+    dispatch_source_set_timer(g_recal_timer,
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval_ns),
+        interval_ns,
+        NSEC_PER_SEC);
+    dispatch_source_set_event_handler(g_recal_timer, ^{
+        double sample = 0.0;
+        if (!smeltr_measure_tick_ratio(g_recal_device, &sample)) {
+            uint64_t n = atomic_fetch_add_explicit(&g_recal_rejected_total, 1,
+                                                   memory_order_relaxed) + 1;
+            // Throttle: first occurrence, then every 16th.
+            if (n == 1 || (n % 16) == 0) {
+                char buf[96];
+                snprintf(buf, sizeof(buf),
+                         "tick recalibration rejected (total=%llu)",
+                         (unsigned long long)n);
+                smeltr_emit_metal_hook_skipped(buf);
+            }
+            return;
+        }
+        double cur = smeltr_load_ns_per_tick();
+        const double alpha = 0.2;
+        double ema = alpha * sample + (1.0 - alpha) * cur;
+        smeltr_store_ns_per_tick(ema);
+    });
+    dispatch_resume(g_recal_timer);
+    smeltr_log("recalibration enabled (interval=%lds, ema_alpha=0.2)", secs);
 }
 
 /* Associated-object keys for CB/encoder tracking. */
@@ -957,7 +1039,9 @@ static void smeltr_swizzle_device_class(void) {
     if (g_stage_sampling_enabled) {
         smeltr_calibrate_ticks(d);
         if (g_stage_sampling_enabled) {
-            smeltr_log("stage_sampling enabled (ns_per_tick=%.6f)", g_ns_per_tick);
+            smeltr_log("stage_sampling enabled (ns_per_tick=%.6f)",
+                       smeltr_load_ns_per_tick());
+            smeltr_recalibration_init(d);
         } else {
             smeltr_log("stage_sampling: calibration failed, falling back to 2.5a pro-rata");
         }
