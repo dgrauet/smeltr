@@ -39,6 +39,12 @@ static atomic_bool    g_enabled = false;
 static BOOL g_op_capture_enabled = YES;  // toggled by SMELTR_HOOK_NO_OPS
 
 static BOOL g_stage_sampling_enabled = NO;
+// AtDispatchBoundary support (M3+ devices). Probed once at init; the
+// per-dispatch path is only used when the env var SMELTR_HOOK_DISPATCH_BOUNDARY=1
+// is also set. When enabled, replaces the encoder-level stage-boundary
+// timing with exact per-dispatch ns instead of pro-rata.
+static BOOL g_dispatch_sampling_supported = NO;
+static BOOL g_dispatch_sampling_enabled = NO;
 static id<MTLCounterSet> g_timestamp_counter_set = nil;
 // Holds the bit pattern of the current double ns-per-tick ratio. Stored as
 // _Atomic so the optional recalibration timer can update it concurrently
@@ -76,6 +82,8 @@ static void smeltr_detect_stage_sampling(id<MTLDevice> device) {
         return;
     }
     g_stage_sampling_enabled = YES;
+    g_dispatch_sampling_supported =
+        [device supportsCounterSampling:MTLCounterSamplingPointAtDispatchBoundary];
 }
 
 /// Take two timestamp samples 50ms apart and compute CPU-ns / GPU-tick.
@@ -163,7 +171,14 @@ static void smeltr_recalibration_init(id<MTLDevice> device) {
 static const void *kSmeltrEncodersKey    = &kSmeltrEncodersKey;   // NSMutableArray of encoders per CB
 static const void *kSmeltrEncoderPsoKey  = &kSmeltrEncoderPsoKey; // current PSO on encoder (NSValue wrapping uintptr_t)
 static const void *kSmeltrEncoderDispKey = &kSmeltrEncoderDispKey; // NSMutableArray of dispatch records per encoder
-static const void *kSmeltrEncoderSBKey   = &kSmeltrEncoderSBKey;  // id<MTLCounterSampleBuffer> per encoder (stage-boundary)
+static const void *kSmeltrEncoderSBKey   = &kSmeltrEncoderSBKey;  // id<MTLCounterSampleBuffer> per encoder (stage or dispatch)
+static const void *kSmeltrEncoderSBIdxKey   = &kSmeltrEncoderSBIdxKey;   // NSNumber: next free dispatch-sample slot
+static const void *kSmeltrEncoderDispIdxKey = &kSmeltrEncoderDispIdxKey; // NSMutableArray<NSNumber>: per-dispatch start_idx (-1 if not sampled), parallel to kSmeltrEncoderDispKey
+
+// 512 dispatches max per encoder (2 samples per dispatch). Beyond this,
+// extra dispatches contribute to a pro-rata pool of the remaining
+// encoder-level time, like the stage-boundary path.
+static const NSUInteger kDispatchBoundarySampleCap = 1024;
 
 static const NSUInteger kStageBoundarySampleCount = 2;  // start + end
 
@@ -370,8 +385,84 @@ static void smeltr_setComputePipelineState_swz(id self, SEL cmd, id pso) {
     if (orig) ((void (*)(id, SEL, id))orig)(self, cmd, pso);
 }
 
-static void smeltr_record_dispatch(id enc, MTLSize tg) {
-    if (!g_op_capture_enabled) return;
+/// Allocate a per-encoder MTLCounterSampleBuffer sized for dispatch-boundary
+/// sampling. Failure path mirrors stage-boundary: throttle the log and
+/// auto-disable g_dispatch_sampling_enabled after 16 consecutive failures
+/// (subsequent encoders fall back to stage-boundary timing).
+static void smeltr_attach_dispatch_sample_buffer(id enc, id<MTLCommandBuffer> cb) {
+    if (!g_dispatch_sampling_enabled) return;
+    MTLCounterSampleBufferDescriptor *sbd = [MTLCounterSampleBufferDescriptor new];
+    sbd.counterSet = g_timestamp_counter_set;
+    sbd.storageMode = MTLStorageModeShared;
+    sbd.sampleCount = kDispatchBoundarySampleCap;
+    NSError *err = nil;
+    id<MTLCounterSampleBuffer> sb =
+        [[cb device] newCounterSampleBufferWithDescriptor:sbd error:&err];
+    if (!sb) {
+        static atomic_int g_disp_alloc_failures = 0;
+        static atomic_bool g_disp_alloc_logged = false;
+        int n = atomic_fetch_add(&g_disp_alloc_failures, 1) + 1;
+        if (!atomic_exchange(&g_disp_alloc_logged, true)) {
+            smeltr_log("dispatch sample buffer alloc failed: %s "
+                       "(further failures silenced)",
+                       err ? [[err localizedDescription] UTF8String] : "(no error)");
+        }
+        if (n >= 16) {
+            BOOL was_enabled = g_dispatch_sampling_enabled;
+            g_dispatch_sampling_enabled = NO;
+            if (was_enabled) {
+                smeltr_emit_metal_hook_skipped(
+                    "dispatch sampling disabled after sustained alloc failures "
+                    "(stage-boundary fallback)");
+            }
+        }
+        return;
+    }
+    objc_setAssociatedObject(enc, kSmeltrEncoderSBKey, sb,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(enc, kSmeltrEncoderSBIdxKey, @(0u),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+/// Insert a "start" GPU timestamp before a dispatch. Returns the sample
+/// slot index, or -1 if sampling isn't active or capacity is exhausted.
+static NSInteger smeltr_dispatch_sample_pre(id enc) {
+    if (!g_dispatch_sampling_enabled) return -1;
+    NSNumber *idxBox = objc_getAssociatedObject(enc, kSmeltrEncoderSBIdxKey);
+    if (!idxBox) return -1;
+    NSUInteger idx = [idxBox unsignedIntegerValue];
+    if (idx + 2 > kDispatchBoundarySampleCap) return -1;  // overflow → pro-rata
+    id<MTLCounterSampleBuffer> sb = objc_getAssociatedObject(enc, kSmeltrEncoderSBKey);
+    if (!sb) return -1;
+    SEL sel = sel_registerName("sampleCountersInBuffer:atSampleIndex:withBarrier:");
+    if (![enc respondsToSelector:sel]) return -1;
+    typedef void (*sampler_imp)(id, SEL, id<MTLCounterSampleBuffer>, NSUInteger, BOOL);
+    sampler_imp imp = (sampler_imp)[(id)enc methodForSelector:sel];
+    imp(enc, sel, sb, idx, NO);
+    objc_setAssociatedObject(enc, kSmeltrEncoderSBIdxKey, @(idx + 2),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return (NSInteger)idx;
+}
+
+/// Insert the matching "end" GPU timestamp after a dispatch. No-op when
+/// start_idx is -1 (sampling not active for this dispatch).
+static void smeltr_dispatch_sample_post(id enc, NSInteger start_idx) {
+    if (start_idx < 0) return;
+    id<MTLCounterSampleBuffer> sb = objc_getAssociatedObject(enc, kSmeltrEncoderSBKey);
+    if (!sb) return;
+    SEL sel = sel_registerName("sampleCountersInBuffer:atSampleIndex:withBarrier:");
+    if (![enc respondsToSelector:sel]) return;
+    typedef void (*sampler_imp)(id, SEL, id<MTLCounterSampleBuffer>, NSUInteger, BOOL);
+    sampler_imp imp = (sampler_imp)[(id)enc methodForSelector:sel];
+    imp(enc, sel, sb, (NSUInteger)(start_idx + 1), NO);
+}
+
+/// Append a dispatch record and (when dispatch sampling is on) insert the
+/// "start" GPU timestamp sample. Returns the sample slot index for the
+/// caller to pair with smeltr_dispatch_sample_post; -1 if no sample was
+/// inserted (sampling off, capacity exhausted, or op-capture disabled).
+static NSInteger smeltr_record_dispatch(id enc, MTLSize tg) {
+    if (!g_op_capture_enabled) return -1;
     SMELTR_TRACE("smeltr_record_dispatch enc=%p class=%s tg=%lux%lux%lu",
                  enc, class_getName(object_getClass(enc)),
                  (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth);
@@ -405,21 +496,36 @@ static void smeltr_record_dispatch(id enc, MTLSize tg) {
     }
     // Record (pso, tg.w, tg.h, tg.d) as a 4-element NSArray of NSNumbers.
     [list addObject:@[ @(pso_ptr), @(tg.width), @(tg.height), @(tg.depth) ]];
+
+    // Per-dispatch start_idx tracked in a parallel array. Always populated
+    // (even when sampling is off — value -1 — so completion can iterate by
+    // index rather than zipping two lists of potentially different lengths).
+    NSMutableArray *idx_list = objc_getAssociatedObject(enc, kSmeltrEncoderDispIdxKey);
+    if (!idx_list) {
+        idx_list = [NSMutableArray new];
+        objc_setAssociatedObject(enc, kSmeltrEncoderDispIdxKey, idx_list,
+                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    NSInteger start_idx = smeltr_dispatch_sample_pre(enc);
+    [idx_list addObject:@(start_idx)];
+    return start_idx;
 }
 
 static void smeltr_dispatchThreadgroups_swz(id self, SEL cmd, MTLSize tg, MTLSize tpt) {
-    smeltr_record_dispatch(self, tg);
+    NSInteger idx = smeltr_record_dispatch(self, tg);
     IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchTG);
     if (orig) ((void (*)(id, SEL, MTLSize, MTLSize))orig)(self, cmd, tg, tpt);
+    smeltr_dispatch_sample_post(self, idx);
 }
 
 static void smeltr_dispatchThreadgroupsIndirect_swz(id self, SEL cmd,
         id<MTLBuffer> buf, NSUInteger off, MTLSize tpt) {
     // For indirect dispatch, we don't know the threadgroup count at encode time.
     // Record with a sentinel tg=(0,0,0) so attribution still happens.
-    smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    NSInteger idx = smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
     IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchTGI);
     if (orig) ((void (*)(id, SEL, id<MTLBuffer>, NSUInteger, MTLSize))orig)(self, cmd, buf, off, tpt);
+    smeltr_dispatch_sample_post(self, idx);
 }
 
 static void smeltr_dispatchThreads_swz(id self, SEL cmd, MTLSize threads, MTLSize tpt) {
@@ -427,24 +533,27 @@ static void smeltr_dispatchThreads_swz(id self, SEL cmd, MTLSize threads, MTLSiz
     // The total thread count is not a threadgroup count; record sentinel (0,0,0)
     // for the tg dims so the key is (pso, 0, 0, 0). This distinguishes it from
     // dispatchThreadgroups but still groups by PSO.
-    smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    NSInteger idx = smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
     IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchThreads);
     if (orig) ((void (*)(id, SEL, MTLSize, MTLSize))orig)(self, cmd, threads, tpt);
+    smeltr_dispatch_sample_post(self, idx);
 }
 
 static void smeltr_dispatchTGNoOffset_swz(id self, SEL cmd, id<MTLBuffer> buf, MTLSize tpt) {
     // MTL4: dispatchThreadgroupsWithIndirectBuffer:threadsPerThreadgroup:
     // (no indirectBufferOffset parameter — different from the legacy variant).
-    smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    NSInteger idx = smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
     IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchTGNoOffset);
     if (orig) ((void (*)(id, SEL, id<MTLBuffer>, MTLSize))orig)(self, cmd, buf, tpt);
+    smeltr_dispatch_sample_post(self, idx);
 }
 
 static void smeltr_dispatchThrIndirect_swz(id self, SEL cmd, id<MTLBuffer> buf) {
     // MTL4: dispatchThreadsWithIndirectBuffer: (no threadsPerThreadgroup).
-    smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    NSInteger idx = smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
     IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchThrIndirect);
     if (orig) ((void (*)(id, SEL, id<MTLBuffer>))orig)(self, cmd, buf);
+    smeltr_dispatch_sample_post(self, idx);
 }
 
 /* ============ CB-completion helper: emit MetalCbOps from PSO+tg buckets ============ */
@@ -461,18 +570,50 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
 
     NSUInteger n_encs = encs.count;
     uint64_t *enc_gpu_ns = (uint64_t *)calloc(n_encs, sizeof(uint64_t));
-    if (!enc_gpu_ns) return;
+    BOOL    *enc_is_disp = (BOOL *)calloc(n_encs, sizeof(BOOL));
+    NSMutableArray<NSData *> *enc_disp_raw = [NSMutableArray new];
+    if (!enc_gpu_ns || !enc_is_disp) {
+        free(enc_gpu_ns); free(enc_is_disp);
+        return;
+    }
     NSMutableArray<NSArray *> *enc_dispatches = [NSMutableArray new];
+    NSMutableArray<NSArray *> *enc_disp_idxs  = [NSMutableArray new];
     BOOL all_encoders_timed = YES;
 
-    // First pass: gather per-encoder dispatch lists + per-encoder timing.
+    // First pass: classify each encoder (stage-boundary vs dispatch-boundary)
+    // and compute its encoder-level GPU time when stage-sampled. For
+    // dispatch-sampled encoders we keep the raw NSData for the second pass.
     for (NSUInteger i = 0; i < n_encs; i++) {
         id enc = encs[i];
         NSArray *list = objc_getAssociatedObject(enc, kSmeltrEncoderDispKey);
         if (!list) list = @[];
         [enc_dispatches addObject:list];
+        NSArray *idx_list = objc_getAssociatedObject(enc, kSmeltrEncoderDispIdxKey);
+        if (!idx_list) idx_list = @[];
+        [enc_disp_idxs addObject:idx_list];
+
+        // Was this encoder dispatch-sampled? Marker: at least one start_idx >= 0.
+        BOOL is_disp = NO;
+        if (idx_list.count == list.count && list.count > 0) {
+            for (NSNumber *n in (NSArray<NSNumber *> *)idx_list) {
+                if ([n integerValue] >= 0) { is_disp = YES; break; }
+            }
+        }
+        enc_is_disp[i] = is_disp;
 
         id<MTLCounterSampleBuffer> sb = objc_getAssociatedObject(enc, kSmeltrEncoderSBKey);
+        if (is_disp && sb) {
+            NSNumber *next_box = objc_getAssociatedObject(enc, kSmeltrEncoderSBIdxKey);
+            NSUInteger used = next_box ? [next_box unsignedIntegerValue] : 0;
+            NSData *raw = used > 0
+                ? [sb resolveCounterRange:NSMakeRange(0, used)]
+                : nil;
+            [enc_disp_raw addObject:(raw ?: (NSData *)[NSData data])];
+            continue;
+        }
+        // Placeholder so enc_disp_raw is index-aligned with encs.
+        [enc_disp_raw addObject:(NSData *)[NSData data]];
+
         if (sb && g_stage_sampling_enabled) {
             NSData *raw = [sb resolveCounterRange:NSMakeRange(0, kStageBoundarySampleCount)];
             if (raw.length >= kStageBoundarySampleCount * sizeof(MTLCounterResultTimestamp)) {
@@ -487,15 +628,18 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
             }
         }
         all_encoders_timed = NO;
-        // enc_gpu_ns[i] stays 0 — filled below via fallback.
+        // enc_gpu_ns[i] stays 0 — filled below via fallback (stage path only).
     }
 
     // Fill encoders without sample buffers via pro-rata of the leftover
-    // in_flight_ns budget.
+    // in_flight_ns budget. Dispatch-sampled encoders are excluded: they
+    // attribute time per-dispatch in the second pass and shouldn't share
+    // the global pro-rata pool.
     if (!all_encoders_timed) {
         uint64_t accounted = 0;
         uint64_t untimed_dispatches = 0;
         for (NSUInteger i = 0; i < n_encs; i++) {
+            if (enc_is_disp[i]) continue;
             if (enc_gpu_ns[i] > 0) {
                 accounted += enc_gpu_ns[i];
             } else {
@@ -504,6 +648,7 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
         }
         uint64_t leftover = (in_flight_ns > accounted) ? (in_flight_ns - accounted) : 0;
         for (NSUInteger i = 0; i < n_encs; i++) {
+            if (enc_is_disp[i]) continue;
             if (enc_gpu_ns[i] == 0 && untimed_dispatches > 0) {
                 uint64_t dcount = ((NSArray *)enc_dispatches[i]).count;
                 enc_gpu_ns[i] = (leftover * dcount) / untimed_dispatches;
@@ -512,11 +657,45 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
     }
 
     // Second pass: aggregate per encoder into global (pso, tg) → (gpu_ns, count).
-    // Within each encoder, distribute enc_gpu_ns pro-rata by dispatch count.
+    // - Dispatch-sampled encoders: exact per-dispatch ns from the resolved
+    //   sample buffer; overflow dispatches (cap exceeded) contribute 0.
+    // - Stage-sampled encoders: encoder time distributed pro-rata by dispatch
+    //   count within the encoder (unchanged from Phase 2.5b).
     NSMutableDictionary<NSArray *, NSArray *> *agg = [NSMutableDictionary new];
     for (NSUInteger i = 0; i < n_encs; i++) {
         NSArray *list = enc_dispatches[i];
         if (list.count == 0) continue;
+
+        if (enc_is_disp[i]) {
+            NSData *raw = enc_disp_raw[i];
+            const MTLCounterResultTimestamp *ts =
+                (const MTLCounterResultTimestamp *)raw.bytes;
+            NSUInteger n_ts = raw.length / sizeof(MTLCounterResultTimestamp);
+            NSArray<NSNumber *> *idx_list = enc_disp_idxs[i];
+            for (NSUInteger j = 0; j < list.count; j++) {
+                NSArray *d = list[j];
+                uint64_t kernel_ns = 0;
+                if (j < idx_list.count) {
+                    NSInteger sidx = [idx_list[j] integerValue];
+                    if (sidx >= 0 && (NSUInteger)(sidx + 1) < n_ts) {
+                        uint64_t s = ts[sidx].timestamp;
+                        uint64_t e = ts[sidx + 1].timestamp;
+                        if (s != MTLCounterErrorValue
+                            && e != MTLCounterErrorValue
+                            && e > s) {
+                            kernel_ns = smeltr_ticks_to_ns(e - s);
+                        }
+                    }
+                }
+                NSArray *cur = agg[d] ?: @[@(0ULL), @(0ULL)];
+                agg[d] = @[
+                    @([cur[0] unsignedLongLongValue] + kernel_ns),
+                    @([cur[1] unsignedLongLongValue] + 1),
+                ];
+            }
+            continue;
+        }
+
         uint64_t enc_ns = enc_gpu_ns[i];
         NSMutableDictionary<NSArray *, NSNumber *> *enc_buckets = [NSMutableDictionary new];
         for (NSArray *d in list) {
@@ -534,6 +713,7 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
         }
     }
     free(enc_gpu_ns);
+    free(enc_is_disp);
 
     if (agg.count == 0) return;
 
@@ -717,6 +897,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                                       OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         [encs addObject:enc];
+        smeltr_attach_dispatch_sample_buffer(enc, cb);
     }
     return enc;
 }
@@ -736,6 +917,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                                       OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         [encs addObject:enc];
+        smeltr_attach_dispatch_sample_buffer(enc, cb);
     }
     return enc;
 }
@@ -745,7 +927,15 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
     id enc;
     id<MTLCounterSampleBuffer> sb_for_this_encoder = nil;
 
-    if (g_op_capture_enabled && g_stage_sampling_enabled) {
+    // Dispatch-boundary path (M3+, opt-in via SMELTR_HOOK_DISPATCH_BOUNDARY=1):
+    // skip the stage-boundary descriptor substitution and attach a per-encoder
+    // sample buffer explicitly. Dispatch swizzles will record per-dispatch
+    // start/end samples via sampleCountersInBuffer:atSampleIndex:withBarrier:.
+    if (g_op_capture_enabled && g_dispatch_sampling_enabled) {
+        enc = [self smeltr_computeCommandEncoderWithDispatchType:dt]; // original
+        // sb_for_this_encoder stays nil; smeltr_attach_dispatch_sample_buffer
+        // associates the SB directly on the encoder below.
+    } else if (g_op_capture_enabled && g_stage_sampling_enabled) {
         // Substitute WithDispatchType: with WithDescriptor: so we can attach a
         // per-encoder stage-boundary counter sample buffer.
         MTLComputePassDescriptor *desc = [MTLComputePassDescriptor computePassDescriptor];
@@ -809,6 +999,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                                       OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         [encs addObject:enc];
+        smeltr_attach_dispatch_sample_buffer(enc, cb);
     }
     return enc;
 }
@@ -1041,6 +1232,16 @@ static void smeltr_swizzle_device_class(void) {
         if (g_stage_sampling_enabled) {
             smeltr_log("stage_sampling enabled (ns_per_tick=%.6f)",
                        smeltr_load_ns_per_tick());
+            const char *db = getenv("SMELTR_HOOK_DISPATCH_BOUNDARY");
+            if (db && strcmp(db, "1") == 0) {
+                if (g_dispatch_sampling_supported) {
+                    g_dispatch_sampling_enabled = YES;
+                    smeltr_log("dispatch_sampling enabled (per-dispatch timing)");
+                } else {
+                    smeltr_log("SMELTR_HOOK_DISPATCH_BOUNDARY=1 ignored: "
+                               "AtDispatchBoundary not supported on this device");
+                }
+            }
             smeltr_recalibration_init(d);
         } else {
             smeltr_log("stage_sampling: calibration failed, falling back to 2.5a pro-rata");

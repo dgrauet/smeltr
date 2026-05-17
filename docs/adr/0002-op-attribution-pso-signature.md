@@ -92,7 +92,9 @@ Concretely:
 - Per-encoder rather than per-dispatch granularity. On workloads where
   MLX packs many ops into one encoder, the pro-rata-by-count within
   the encoder will smear the time across them. Per-dispatch timing
-  requires `MTLCounterSamplingPointAtDispatchBoundary`.
+  requires `MTLCounterSamplingPointAtDispatchBoundary`, opt-in via
+  `SMELTR_HOOK_DISPATCH_BOUNDARY=1` on M3+ devices that expose it
+  (auto-falls-back to the stage-boundary path on M1/M2).
 - We substitute MLX's `WithDispatchType:` call internally. This is
   safe because the substituted `WithDescriptor:` carries the same
   `dispatchType` in the descriptor, but it is a non-trivial
