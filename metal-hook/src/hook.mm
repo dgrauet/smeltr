@@ -45,6 +45,11 @@ static BOOL g_stage_sampling_enabled = NO;
 // timing with exact per-dispatch ns instead of pro-rata.
 static BOOL g_dispatch_sampling_supported = NO;
 static BOOL g_dispatch_sampling_enabled = NO;
+// Opt-in MTL4 machine-learning encoder visibility (macOS 26). Only swizzles
+// `dispatchNetworkWithIntermediatesHeap:` on existing ML encoder classes;
+// `setPipelineState:` is deliberately untouched (replacing it crashes
+// Apple's ML proxy machinery). Off by default.
+static BOOL g_ml_encoder_enabled = NO;
 static id<MTLCounterSet> g_timestamp_counter_set = nil;
 // Holds the bit pattern of the current double ns-per-tick ratio. Stored as
 // _Atomic so the optional recalibration timer can update it concurrently
@@ -190,6 +195,14 @@ static const void *kSmeltrOrigDispatchThreads     = &kSmeltrOrigDispatchThreads;
 // MTL4-specific indirect dispatch variants (no indirectBufferOffset: parameter).
 static const void *kSmeltrOrigDispatchTGNoOffset  = &kSmeltrOrigDispatchTGNoOffset;
 static const void *kSmeltrOrigDispatchThrIndirect = &kSmeltrOrigDispatchThrIndirect;
+// MTL4 ML encoder: dispatchNetworkWithIntermediatesHeap: (opt-in).
+static const void *kSmeltrOrigDispatchNetwork     = &kSmeltrOrigDispatchNetwork;
+
+// Top byte marker stored in the per-encoder pso slot to flag this encoder
+// as an MTL4 ML-network encoder. User-space heap pointers on macOS arm64
+// never have 0xFF in the top byte, so this is collision-free with real
+// MTLComputePipelineState pointers.
+static const uint64_t kSmeltrMLEncoderPsoMarker = 0xFF00000000000000ULL;
 
 /* Forward declaration — defined later, used in smeltr_swizzle_device_class. */
 static void smeltr_emit_metal_hook_skipped(const char *reason);
@@ -304,6 +317,9 @@ static void smeltr_dispatchThreads_swz(id, SEL, MTLSize, MTLSize);
 // MTL4-specific: indirect dispatch without indirectBufferOffset parameter.
 static void smeltr_dispatchTGNoOffset_swz(id, SEL, id<MTLBuffer>, MTLSize);
 static void smeltr_dispatchThrIndirect_swz(id, SEL, id<MTLBuffer>);
+// MTL4 ML encoder: `-[T dispatchNetworkWithIntermediatesHeap:(id<MTLHeap>)]`.
+// Defined later; installed only when SMELTR_HOOK_ML_ENCODER=1.
+static void smeltr_dispatchNetwork_swz(id, SEL, id);
 
 /// Look up a saved original IMP stored on the encoder's concrete class.
 static IMP smeltr_orig_imp(id enc, const void *key) {
@@ -556,6 +572,61 @@ static void smeltr_dispatchThrIndirect_swz(id self, SEL cmd, id<MTLBuffer> buf) 
     smeltr_dispatch_sample_post(self, idx);
 }
 
+/// MTL4 ML encoder dispatch (one network = one dispatch from our point of
+/// view). Stamps the encoder with a marker pso so the name builder formats
+/// the bucket as `K_MLNet_<addr>` instead of `K_0000_0x0x0`. The network's
+/// internal op decomposition is opaque to us; we just record that an ML
+/// dispatch happened and forward to the original IMP.
+static void smeltr_dispatchNetwork_swz(id self, SEL cmd, id heap) {
+    uintptr_t enc_addr = (uintptr_t)(__bridge void *)self;
+    uintptr_t marker = (enc_addr & 0x00FFFFFFFFFFFFFFULL) | kSmeltrMLEncoderPsoMarker;
+    objc_setAssociatedObject(self, kSmeltrEncoderPsoKey,
+                             [NSValue valueWithPointer:(void *)marker],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSInteger idx = smeltr_record_dispatch(self, MTLSizeMake(0, 0, 0));
+    IMP orig = smeltr_orig_imp(self, kSmeltrOrigDispatchNetwork);
+    if (orig) ((void (*)(id, SEL, id))orig)(self, cmd, heap);
+    smeltr_dispatch_sample_post(self, idx);
+}
+
+/// Install `dispatchNetworkWithIntermediatesHeap:` on any MTL4 ML encoder
+/// classes present on this OS. Deliberately does NOT swizzle
+/// `setPipelineState:` or any other selector on these classes — replacing
+/// those crashes Apple's ML proxy machinery. No-op if no class is found.
+static void smeltr_install_ml_encoder_swizzle(void) {
+    static const char *const candidates[] = {
+        "_MTL4MachineLearningCommandEncoder",
+        "_MTL4DebugMachineLearningCommandEncoder",
+        "_MTL4ToolsMachineLearningCommandEncoder",
+        NULL,
+    };
+    SEL sel = sel_registerName("dispatchNetworkWithIntermediatesHeap:");
+    int installed = 0;
+    for (int i = 0; candidates[i]; i++) {
+        Class c = objc_getClass(candidates[i]);
+        if (!c) continue;
+        Method m = class_getInstanceMethod(c, sel);
+        if (!m) {
+            smeltr_log("ml_encoder: %s found but lacks "
+                       "dispatchNetworkWithIntermediatesHeap:", candidates[i]);
+            continue;
+        }
+        IMP cur = method_getImplementation(m);
+        if (cur == (IMP)smeltr_dispatchNetwork_swz) continue;
+        IMP orig = method_setImplementation(m, (IMP)smeltr_dispatchNetwork_swz);
+        objc_setAssociatedObject((id)c, kSmeltrOrigDispatchNetwork,
+                                 [NSValue valueWithPointer:(void *)orig],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        smeltr_log("swizzled %s.dispatchNetworkWithIntermediatesHeap:",
+                   candidates[i]);
+        installed++;
+    }
+    if (installed == 0) {
+        smeltr_emit_metal_hook_skipped(
+            "SMELTR_HOOK_ML_ENCODER=1: no MTL4 ML encoder classes found");
+    }
+}
+
 /* ============ CB-completion helper: emit MetalCbOps from PSO+tg buckets ============ */
 
 /// Aggregate dispatch records per CB into (pso, tg) buckets. For each encoder,
@@ -732,9 +803,15 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
         unsigned long w     = [key[1] unsignedLongValue];
         unsigned long h     = [key[2] unsignedLongValue];
         unsigned long depth = [key[3] unsignedLongValue];
-        uint16_t pso_short = (uint16_t)(pso & 0xFFFF);
         char *name = (char *)malloc(48);
-        snprintf(name, 48, "K_%04x_%lux%lux%lu", pso_short, w, h, depth);
+        if ((pso & 0xFF00000000000000ULL) == kSmeltrMLEncoderPsoMarker) {
+            // MTL4 ML encoder dispatch — name format K_MLNet_<encoder_addr>.
+            uint64_t addr = pso & 0x00FFFFFFFFFFFFFFULL;
+            snprintf(name, 48, "K_MLNet_%llx", (unsigned long long)addr);
+        } else {
+            uint16_t pso_short = (uint16_t)(pso & 0xFFFF);
+            snprintf(name, 48, "K_%04x_%lux%lux%lu", pso_short, w, h, depth);
+        }
         names_buf[i]  = name;
         gpu_ns_arr[i] = [agg[key][0] unsignedLongLongValue];
         counts[i]     = (uint32_t)[agg[key][1] unsignedLongLongValue];
@@ -1243,6 +1320,11 @@ static void smeltr_swizzle_device_class(void) {
                 }
             }
             smeltr_recalibration_init(d);
+            const char *ml = getenv("SMELTR_HOOK_ML_ENCODER");
+            if (ml && strcmp(ml, "1") == 0) {
+                g_ml_encoder_enabled = YES;
+                smeltr_install_ml_encoder_swizzle();
+            }
         } else {
             smeltr_log("stage_sampling: calibration failed, falling back to 2.5a pro-rata");
         }

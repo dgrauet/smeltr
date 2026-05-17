@@ -68,3 +68,9 @@ CBOR length-prefixed frames over a Unix socket. See
   Replaces the encoder-level stage-boundary + pro-rata attribution with
   exact per-dispatch ns. Auto-falls-back to stage-boundary on M1/M2 (or
   on sustained sample-buffer alloc failure).
+- `SMELTR_HOOK_ML_ENCODER=1` — opt-in MTL4 machine-learning encoder
+  visibility (macOS 26). Swizzles `dispatchNetworkWithIntermediatesHeap:`
+  on `_MTL4MachineLearningCommandEncoder` (and Debug/Tools variants) to
+  record one dispatch per network. Emits `K_MLNet_<encoder_addr>` in the
+  op breakdown. `setPipelineState:` is deliberately NOT swizzled (Apple's
+  ML proxy machinery crashes if it is).

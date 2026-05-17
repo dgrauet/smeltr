@@ -100,12 +100,15 @@ Concretely:
   `dispatchType` in the descriptor, but it is a non-trivial
   interception.
 - The Debug/Tools/ML encoder classes (`MTLDebugComputeCommandEncoder`,
-  `MTL4ToolsComputeCommandEncoder`, `_MTL4MachineLearningCommandEncoder`,
-  etc.) are deliberately not swizzled. Replacing their dispatch IMPs
-  with our wrappers crashes them (Apple's proxy machinery has stronger
-  expectations about the method signatures). The cost is missed
-  visibility when running under Xcode GPU debugging or Metal ML
-  primitives.
+  `MTL4ToolsComputeCommandEncoder`, etc.) are deliberately not swizzled
+  by default. Replacing their dispatch IMPs with our wrappers crashes
+  them (Apple's proxy machinery has stronger expectations about the
+  method signatures). The cost is missed visibility when running under
+  Xcode GPU debugging. For the MTL4 ML encoder family
+  (`_MTL4MachineLearningCommandEncoder`), an opt-in path via
+  `SMELTR_HOOK_ML_ENCODER=1` swizzles ONLY
+  `dispatchNetworkWithIntermediatesHeap:` (avoiding `setPipelineState:`)
+  and surfaces dispatches as `K_MLNet_<addr>` in the breakdown.
 
 ## Alternatives considered
 
