@@ -964,7 +964,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
     // Method-exchange: this call dispatches to the ORIGINAL implementation.
     id<MTLComputePipelineState> pso =
         [self smeltr_newComputePipelineStateWithFunction:function error:error];
-    if (pso != nil) {
+    if (pso != nil && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
         NSString *fname = [function name];
         if (fname != nil) {
             smeltr_pso_map_insert((uintptr_t)pso, [fname UTF8String]);
@@ -982,7 +982,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                                                  options:options
                                               reflection:reflection
                                                    error:error];
-    if (pso != nil) {
+    if (pso != nil && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
         NSString *fname = [function name];
         if (fname != nil) {
             smeltr_pso_map_insert((uintptr_t)pso, [fname UTF8String]);
