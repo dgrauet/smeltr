@@ -140,6 +140,34 @@ rationale behind PSO-signature naming and stage-boundary timing.
 - `get_op_summary` — flat list of kernel signatures with GPU time and
   percentage, aggregated across all module leaves.
 
+### Profiling scopes
+
+Annotate code blocks with `smeltr.scope("name")` to attribute Metal kernel
+time to semantic regions instead of relying on `mlx.nn.Module` class names
+alone. Scopes nest freely and interleave with module-call tracking.
+
+```python
+import smeltr
+smeltr.attach()
+
+@smeltr.scope("denoise.guided_step")
+def guided_step(...): ...
+
+with smeltr.scope("denoise.pass:cond"):
+    cond_x0 = model(**cond_kwargs)
+    mx.core.eval(cond_x0)  # eval must occur inside the scope
+```
+
+`get_inference_breakdown` then returns a tree where `denoise.pass:cond`
+appears as a node with its rolled-up `gpu_ns_subtree`, `kernel_count`,
+and top kernel ops.
+
+**Important:** kernels are attributed by the `module_stack` snapshot
+taken at `mx.core.eval()` time. If your eval (or implicit eval at array
+materialization) happens *outside* the `with smeltr.scope(...)` block,
+the kernels go into `unscoped_gpu_ns`. The general pattern is "compute
+and materialize inside the scope".
+
 ## Typical workflow
 
 ```
