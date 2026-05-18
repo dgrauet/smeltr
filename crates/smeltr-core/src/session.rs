@@ -325,7 +325,11 @@ argv = ["smeltrd", "--foreground"]
     }
 
     #[test]
+    #[serial_test::serial]
     fn session_name_none_omitted_from_toml() {
+        // Defensive: clear env so now_starting yields name=None even if a
+        // sibling test or CI environment set SMELTR_SESSION_NAME.
+        std::env::remove_var("SMELTR_SESSION_NAME");
         let m = SessionMetadata::now_starting(SessionId::new());
         let serialized = toml::to_string(&m).unwrap();
         assert!(
