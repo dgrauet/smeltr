@@ -81,6 +81,7 @@ pub fn frame_to_payload(f: DecodedFrame) -> Payload {
                 .into_iter()
                 .map(|o| smeltr_core::event::OpSample {
                     name: o.name,
+                    symbol: None,
                     gpu_ns: o.gpu_ns,
                     count: o.count,
                 })

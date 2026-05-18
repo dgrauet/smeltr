@@ -546,6 +546,7 @@ mod tests {
     fn op_sample(name: &str, gpu_ns: u64, count: u32) -> OpSample {
         OpSample {
             name: name.into(),
+            symbol: None,
             gpu_ns,
             count,
         }

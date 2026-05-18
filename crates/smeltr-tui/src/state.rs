@@ -453,11 +453,13 @@ mod tests {
                 ops: vec![
                     OpSample {
                         name: "K_a".into(),
+                        symbol: None,
                         gpu_ns: 100,
                         count: 1,
                     },
                     OpSample {
                         name: "K_b".into(),
+                        symbol: None,
                         gpu_ns: 500,
                         count: 2,
                     },
@@ -470,6 +472,7 @@ mod tests {
                 cb_id: 2,
                 ops: vec![OpSample {
                     name: "K_a".into(),
+                    symbol: None,
                     gpu_ns: 50,
                     count: 1,
                 }],
@@ -494,6 +497,7 @@ mod tests {
                 cb_id: 1,
                 ops: vec![OpSample {
                     name: "old".into(),
+                    symbol: None,
                     gpu_ns: 999,
                     count: 1,
                 }],
@@ -506,6 +510,7 @@ mod tests {
                 cb_id: 2,
                 ops: vec![OpSample {
                     name: "new".into(),
+                    symbol: None,
                     gpu_ns: 10,
                     count: 1,
                 }],

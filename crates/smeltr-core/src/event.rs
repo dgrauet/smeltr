@@ -37,6 +37,8 @@ pub enum ProbeHealthState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpSample {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
     pub gpu_ns: u64,
     pub count: u32,
 }
@@ -665,6 +667,7 @@ mod tests {
     fn cbor_round_trip_op_sample() {
         let s = OpSample {
             name: "Matmul".into(),
+            symbol: None,
             gpu_ns: 1_234_567,
             count: 3,
         };
@@ -682,16 +685,19 @@ mod tests {
                 ops: vec![
                     OpSample {
                         name: "Matmul".into(),
+                        symbol: None,
                         gpu_ns: 6_200_000,
                         count: 3,
                     },
                     OpSample {
                         name: "Softmax".into(),
+                        symbol: None,
                         gpu_ns: 1_500_000,
                         count: 1,
                     },
                     OpSample {
                         name: "RMSNorm".into(),
+                        symbol: None,
                         gpu_ns: 400_000,
                         count: 2,
                     },
@@ -710,5 +716,64 @@ mod tests {
             },
             Source::MetalHook,
         );
+    }
+
+    #[test]
+    fn opsample_round_trip_with_symbol() {
+        let s = OpSample {
+            name: "K_f900_64x64x1".into(),
+            symbol: Some("gemm_t_n_bf16_64_64_32_2_2_8".into()),
+            gpu_ns: 12345,
+            count: 7,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&s, &mut buf).unwrap();
+        let decoded: OpSample = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn opsample_round_trip_without_symbol_is_compact() {
+        let s = OpSample {
+            name: "K_f900_64x64x1".into(),
+            symbol: None,
+            gpu_ns: 12345,
+            count: 7,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&s, &mut buf).unwrap();
+        let v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let map = v.as_map().expect("OpSample must serialize as a CBOR map");
+        let has_symbol_key = map
+            .iter()
+            .any(|(k, _)| k.as_text().map(|t| t == "symbol").unwrap_or(false));
+        assert!(!has_symbol_key, "symbol=None must not emit a key");
+        let decoded: OpSample = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(s, decoded);
+    }
+
+    #[test]
+    fn opsample_legacy_cbor_decodes_with_none_symbol() {
+        let legacy = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("name".into()),
+                ciborium::Value::Text("K_old".into()),
+            ),
+            (
+                ciborium::Value::Text("gpu_ns".into()),
+                ciborium::Value::Integer(99u64.into()),
+            ),
+            (
+                ciborium::Value::Text("count".into()),
+                ciborium::Value::Integer(3u32.into()),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut buf).unwrap();
+        let decoded: OpSample = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(decoded.name, "K_old");
+        assert_eq!(decoded.symbol, None);
+        assert_eq!(decoded.gpu_ns, 99);
+        assert_eq!(decoded.count, 3);
     }
 }

@@ -280,6 +280,7 @@ mod tests {
                     cb_id: 9,
                     ops: vec![smeltr_core::event::OpSample {
                         name: "Matmul".into(),
+                        symbol: None,
                         gpu_ns: 50,
                         count: 1,
                     }],

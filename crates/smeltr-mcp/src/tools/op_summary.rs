@@ -149,11 +149,13 @@ mod tests {
                     ops: vec![
                         smeltr_core::event::OpSample {
                             name: "Matmul".into(),
+                            symbol: None,
                             gpu_ns: 150,
                             count: 1,
                         },
                         smeltr_core::event::OpSample {
                             name: "Softmax".into(),
+                            symbol: None,
                             gpu_ns: 50,
                             count: 2,
                         },
