@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 from collections.abc import Callable, Generator
 from typing import Any, TypeVar
 
@@ -34,6 +35,19 @@ def _scope_cm(name: str) -> Generator[None, None, None]:
 
 def _scope_decorator(name: str) -> Callable[[F], F]:
     def decorator(fn: F) -> F:
+        if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
+            raise TypeError(
+                f"smeltr.scope() decorator does not support async functions "
+                f"({fn.__qualname__!r}); use `with smeltr.scope({name!r}): ...` "
+                f"inside the async body, or wrap the eval call directly."
+            )
+        if inspect.isgeneratorfunction(fn):
+            raise TypeError(
+                f"smeltr.scope() decorator does not support generator functions "
+                f"({fn.__qualname__!r}); use `with smeltr.scope({name!r}): ...` "
+                f"inside the generator body."
+            )
+
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             with _scope_cm(name):

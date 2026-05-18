@@ -168,6 +168,16 @@ materialization) happens *outside* the `with smeltr.scope(...)` block,
 the kernels go into `unscoped_gpu_ns`. The general pattern is "compute
 and materialize inside the scope".
 
+**Scopes are thread-local.** A scope active on the thread that opened the
+`with` block is invisible to work submitted to other threads (e.g. a
+`ThreadPoolExecutor`). Open a scope inside the worker if you need
+attribution there.
+
+**Async and generators:** the decorator form (`@smeltr.scope("...")`) is
+rejected for `async def` functions and generator functions, because the
+scope would enter and exit before the coroutine or generator body runs.
+Use the `with` form inside the body instead.
+
 ## Typical workflow
 
 ```

@@ -70,3 +70,27 @@ def test_scope_is_exported_from_top_level_smeltr():
     assert hasattr(smeltr, "scope")
     with smeltr.scope("via-top-level"):
         assert _modules._stack()[-1]["qualname"] == "via-top-level"
+
+
+def test_decorator_rejects_async_function():
+    async def async_fn():
+        pass
+
+    with pytest.raises(TypeError, match="does not support async functions"):
+        scope("bad")(async_fn)
+
+
+def test_decorator_rejects_generator_function():
+    def gen_fn():
+        yield 1
+
+    with pytest.raises(TypeError, match="does not support generator functions"):
+        scope("bad")(gen_fn)
+
+
+def test_decorator_rejects_async_generator():
+    async def async_gen():
+        yield 1
+
+    with pytest.raises(TypeError, match="does not support async functions"):
+        scope("bad")(async_gen)
