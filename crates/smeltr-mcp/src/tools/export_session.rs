@@ -29,9 +29,8 @@ pub struct Response {
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
     let dir = resolve_session(&params.session)?;
-    let meta =
-        read_metadata(&dir).map_err(|e| ToolError::BadArgs(format!("read metadata: {e}")))?;
-    let events = read_events(&dir).map_err(|e| ToolError::BadArgs(format!("read events: {e}")))?;
+    let meta = read_metadata(&dir)?;
+    let events = read_events(&dir)?;
     let event_count = events.len();
 
     let bytes = match params.format.as_str() {
@@ -44,8 +43,12 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         }
     };
 
-    std::fs::write(&params.output_path, &bytes)
-        .map_err(|e| ToolError::BadArgs(format!("write {}: {e}", params.output_path)))?;
+    if let Some(parent) = std::path::Path::new(&params.output_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(&params.output_path, &bytes)?;
 
     Ok(Response {
         path: params.output_path.clone(),
@@ -124,5 +127,27 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, ToolError::BadArgs(_)));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn creates_parent_directory_when_missing() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let id = make_minimal_session();
+        // Nested dir that does NOT exist yet.
+        let out = home.path().join("nested/deeper/trace.json");
+        assert!(!out.parent().unwrap().exists());
+
+        let r = run(Params {
+            session: id.short(),
+            format: "chrome-trace".into(),
+            output_path: out.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+
+        assert!(out.exists());
+        assert!(r.bytes_written > 0);
     }
 }
