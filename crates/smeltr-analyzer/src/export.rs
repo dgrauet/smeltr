@@ -24,8 +24,8 @@ pub fn to_json_raw(events: &[Event], meta: &SessionMetadata) -> String {
 ///
 /// Mapping summary (full table in spec):
 /// - Module/Scope pairs    → ph="X" on pid=1 "Python", tid=depth
-/// - MetalCb pairs         → ph="X" on pid=2 "Metal CBs", tid=queue_id
-/// - MetalCbOps entries    → ph="X" on pid=3 "Kernels", tid=cb_id,
+/// - MetalCb pairs         → ph="X" on pid=2 "Metal CBs", tid="queue_{queue_id}"
+/// - MetalCbOps entries    → ph="X" on pid=3 "Kernels", tid="cb_{cb_id}",
 ///   ts=cb_committed.ts, dur=op.gpu_ns/1000
 /// - Marks                 → ph="i" instant on pid=1
 /// - SessionStarted/Ended  → ph="i" instant on pid=1
@@ -111,7 +111,7 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                         "ph": "X",
                         "name": name,
                         "pid": 2,
-                        "tid": queue_id,
+                        "tid": format!("queue_{queue_id}"),
                         "ts": t_commit,
                         "dur": dur,
                         "args": {
@@ -128,7 +128,7 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                                 "ph": "X",
                                 "name": op_name,
                                 "pid": 3,
-                                "tid": cb_id,
+                                "tid": format!("cb_{cb_id}"),
                                 "ts": t_commit,
                                 "dur": op.gpu_ns as f64 / 1000.0,
                                 "args": {
@@ -340,7 +340,7 @@ mod tests {
             .collect();
         assert_eq!(cb_events.len(), 1);
         assert_eq!(cb_events[0]["name"], "forward");
-        assert_eq!(cb_events[0]["tid"], 1);
+        assert_eq!(cb_events[0]["tid"], "queue_1");
         assert_eq!(cb_events[0]["ts"], 10.0);
         assert_eq!(cb_events[0]["dur"], 5.0);
     }
@@ -398,7 +398,7 @@ mod tests {
             .collect();
         assert_eq!(kernel_events.len(), 1);
         assert_eq!(kernel_events[0]["name"], "gemm_t_n_bf16_64_64_32");
-        assert_eq!(kernel_events[0]["tid"], 9);
+        assert_eq!(kernel_events[0]["tid"], "cb_9");
         assert_eq!(kernel_events[0]["ts"], 10.0);
         assert_eq!(kernel_events[0]["dur"], 2.0);
         assert_eq!(kernel_events[0]["args"]["raw_name"], "K_abcd_64x64x1");
@@ -448,6 +448,39 @@ mod tests {
             "hello"
         );
         assert!(v["metadata"]["session_id"].is_string());
+    }
+
+    #[test]
+    fn chrome_trace_ops_without_matching_cb_are_dropped() {
+        // Ops arrive but the CB never completes (e.g., process crashed mid-CB).
+        // Contract: drop the orphan ops; do NOT emit a kernel event.
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![ev(
+            1,
+            11_000,
+            Source::MetalHook,
+            Payload::MetalCbOps {
+                cb_id: 99,
+                ops: vec![OpSample {
+                    name: "K_orphan_64x64x1".into(),
+                    symbol: Some("gemm_orphan".into()),
+                    gpu_ns: 1_000,
+                    count: 1,
+                }],
+            },
+        )];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let kernel_events: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["pid"] == 3 && e["ph"] == "X")
+            .collect();
+        assert!(
+            kernel_events.is_empty(),
+            "orphan MetalCbOps must not emit kernel events; got {kernel_events:?}"
+        );
     }
 
     #[test]
