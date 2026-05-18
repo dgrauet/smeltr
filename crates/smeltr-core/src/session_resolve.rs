@@ -24,7 +24,10 @@ pub fn resolve_session_dir_by_name(name: &str) -> Option<PathBuf> {
             }
         })
         .collect();
-    matches.sort_by(|(a, _), (b, _)| b.cmp(a));
+    matches.sort_by(|(ts_a, dir_a), (ts_b, dir_b)| {
+        ts_b.cmp(ts_a)
+            .then_with(|| dir_b.file_name().cmp(&dir_a.file_name()))
+    });
     matches.into_iter().next().map(|(_, p)| p)
 }
 
@@ -96,10 +99,16 @@ mod tests {
     fn most_recent_wins_on_collision() {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_HOME", home.path());
+        // Older session via the normal path.
         let _older = session_with_name("dup");
-        // RFC3339 has second resolution so a >=1.1s sleep is sufficient.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        let newer = session_with_name("dup");
+        // Newer session: construct metadata manually with a forced-later
+        // timestamp to keep the test deterministic and instantaneous.
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.name = Some("dup".into());
+        meta.started_rfc3339 = "2099-01-01T00:00:00Z".into();
+        let w = SessionWriter::create(meta).unwrap();
+        let newer = w.dir().to_path_buf();
+        drop(w);
         assert_eq!(resolve_session_dir_by_name("dup"), Some(newer));
     }
 }
