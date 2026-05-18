@@ -198,6 +198,29 @@ The pattern table is MLX-version-sensitive; new MLX releases may add
 shaders not yet covered. Unknown symbols still surface as `symbol`
 without a `kind`.
 
+### Naming sessions
+
+Label a session via `SMELTR_SESSION_NAME` or `smeltr record --name`:
+
+```bash
+SMELTR_SESSION_NAME="ltx2-baseline-480x704x33" ./pipeline.py
+smeltr record --name "ltx2-batched-cfg" -- ./pipeline.py
+```
+
+`smeltr session ls` shows the name (when set) as a `name="..."` suffix.
+`list_sessions` (MCP) surfaces it as the `name` field per session.
+
+Any MCP tool or CLI command that takes a session id (short id, full
+UUID) also accepts the name. On collision (multiple sessions sharing
+a name), the **most recent** wins — use the short id when you need a
+specific older session.
+
+**Validation:** names are trimmed and capped at 200 chars; inputs
+containing NUL, control characters, or `/` are silently dropped (the
+session records with no name and a warning is logged). The session
+directory format (`YYYY-MM-DD-HHMMSS-<8hex>`) is unchanged — the name
+is metadata only.
+
 ## Typical workflow
 
 ```
