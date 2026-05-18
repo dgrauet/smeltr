@@ -15,7 +15,7 @@ import contextlib
 import functools
 import inspect
 from collections.abc import Callable, Generator
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from smeltr import _modules
 
@@ -53,7 +53,7 @@ def _scope_decorator(name: str) -> Callable[[F], F]:
             with _scope_cm(name):
                 return fn(*args, **kwargs)
 
-        return wrapper  # type: ignore[return-value]
+        return cast(F, wrapper)
 
     return decorator
 
