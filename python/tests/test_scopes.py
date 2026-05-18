@@ -62,3 +62,11 @@ def test_decorator_preserves_function_metadata():
 
     assert my_func.__name__ == "my_func"
     assert my_func(2) == 7
+
+
+def test_scope_is_exported_from_top_level_smeltr():
+    import smeltr
+
+    assert hasattr(smeltr, "scope")
+    with smeltr.scope("via-top-level"):
+        assert _modules._stack()[-1]["qualname"] == "via-top-level"
