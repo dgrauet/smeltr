@@ -8,7 +8,7 @@ OBJCXXFLAGS := -fobjc-arc $(COMMON)
 CFLAGS := -std=c11 $(COMMON)
 LDFLAGS := -dynamiclib -framework Foundation -framework Metal
 
-OBJS := build/hook.o build/ring.o
+OBJS := build/hook.o build/ring.o build/pso_map.o
 OUT  := build/libmetal_hook.dylib
 
 .PHONY: all clean codesign
@@ -21,6 +21,10 @@ build/hook.o: src/hook.mm include/smeltr_ring.h include/smeltr_ring_writer.h
 build/ring.o: src/ring.c include/smeltr_ring.h include/smeltr_ring_writer.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
+
+build/pso_map.o: src/pso_map.mm src/pso_map.h
+	@mkdir -p build
+	$(CXX) $(OBJCXXFLAGS) -c $< -o $@
 
 $(OUT): $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $^
