@@ -37,6 +37,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Build metal-hook dylib (required for hook integration tests)
+        run: make -C metal-hook clean all
+
       - name: Build metal harness for e2e tests
         run: cargo build -p smeltr-metal-harness
 

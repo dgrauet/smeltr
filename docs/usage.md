@@ -178,6 +178,26 @@ rejected for `async def` functions and generator functions, because the
 scope would enter and exit before the coroutine or generator body runs.
 Use the `with` form inside the body instead.
 
+### Symbolic kernel names
+
+The Metal hook captures each Compute Pipeline State Object's underlying
+function name at creation time (`MTLDevice newComputePipelineStateWithFunction:error:`).
+Op rows in `get_inference_breakdown` and `get_op_summary` carry two
+enrichment fields:
+
+- `symbol` — the MLX shader name, e.g. `gemm_t_n_bf16_64_64_32_2_2_8`.
+- `kind` — a canonical op label derived from `symbol`, e.g. `Matmul`.
+  Computed via a static pattern table in `smeltr-analyzer`; returns
+  `None` when no pattern matches.
+
+`name` (the legacy `K_<pso_hash>_<wxhxd>` fingerprint) is preserved as a
+secondary identifier — useful for distinguishing same-kind dispatches
+that share a `symbol` but differ by tile size.
+
+The pattern table is MLX-version-sensitive; new MLX releases may add
+shaders not yet covered. Unknown symbols still surface as `symbol`
+without a `kind`.
+
 ## Typical workflow
 
 ```

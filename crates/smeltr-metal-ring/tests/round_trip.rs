@@ -130,9 +130,9 @@ fn cb_ops_round_trips() {
             1_000,
             0xdead_beef,
             &[
-                ("Matmul", 6_200_000u64, 3u32),
-                ("Softmax", 1_500_000u64, 1u32),
-                ("RMSNorm", 400_000u64, 2u32),
+                ("Matmul", None, 6_200_000u64, 3u32),
+                ("Softmax", None, 1_500_000u64, 1u32),
+                ("RMSNorm", None, 400_000u64, 2u32),
             ],
         )
         .unwrap();
@@ -151,6 +151,7 @@ fn cb_ops_round_trips() {
         ops[0],
         DecodedOpSample {
             name: "Matmul".into(),
+            symbol: None,
             gpu_ns: 6_200_000,
             count: 3
         }
@@ -159,6 +160,7 @@ fn cb_ops_round_trips() {
         ops[1],
         DecodedOpSample {
             name: "Softmax".into(),
+            symbol: None,
             gpu_ns: 1_500_000,
             count: 1
         }
@@ -167,6 +169,7 @@ fn cb_ops_round_trips() {
         ops[2],
         DecodedOpSample {
             name: "RMSNorm".into(),
+            symbol: None,
             gpu_ns: 400_000,
             count: 2
         }
@@ -197,7 +200,8 @@ fn cb_ops_long_name_round_trips() {
     let long = "A".repeat(200);
     {
         let mut w = create_ring(&path, 1 << 16).unwrap();
-        w.write_cb_ops(7, 42, &[(long.as_str(), 99, 1)]).unwrap();
+        w.write_cb_ops(7, 42, &[(long.as_str(), None, 99, 1)])
+            .unwrap();
     }
     let mut r = open_for_read(&path).unwrap();
     let e = r.next().unwrap().unwrap();
@@ -207,5 +211,40 @@ fn cb_ops_long_name_round_trips() {
             assert_eq!(ops[0].name.len(), 200);
         }
         other => panic!("got {other:?}"),
+    }
+}
+
+#[test]
+fn cb_ops_round_trip_with_and_without_symbol() {
+    let dir = tempdir().unwrap();
+    let path = tmp_ring(dir.path());
+    {
+        let mut w = create_ring(&path, 1 << 16).unwrap();
+        w.write_cb_ops(
+            42,
+            123,
+            &[
+                ("K_a", Some("gemm_t_n_bf16"), 1000u64, 5u32),
+                ("K_b", None, 2000u64, 3u32),
+            ],
+        )
+        .unwrap();
+    }
+    let mut r = open_for_read(&path).unwrap();
+    let e = r.next().unwrap().unwrap();
+    match e.frame {
+        DecodedFrame::CbOps { cb_id, ops } => {
+            assert_eq!(cb_id, 123);
+            assert_eq!(ops.len(), 2);
+            assert_eq!(ops[0].name, "K_a");
+            assert_eq!(ops[0].symbol.as_deref(), Some("gemm_t_n_bf16"));
+            assert_eq!(ops[0].gpu_ns, 1000);
+            assert_eq!(ops[0].count, 5);
+            assert_eq!(ops[1].name, "K_b");
+            assert_eq!(ops[1].symbol, None);
+            assert_eq!(ops[1].gpu_ns, 2000);
+            assert_eq!(ops[1].count, 3);
+        }
+        other => panic!("expected CbOps, got {other:?}"),
     }
 }

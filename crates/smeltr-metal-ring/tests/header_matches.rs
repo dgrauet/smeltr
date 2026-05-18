@@ -54,6 +54,17 @@ fn kinds_match() {
 }
 
 #[test]
+fn cb_ops_symbol_len_none_sentinel_matches() {
+    // Both sides must agree on the "no symbol" sentinel for CB_OPS frames.
+    assert_eq!(CB_OPS_SYMBOL_LEN_NONE, 0xFFFF_FFFF);
+    let normalized: String = HEADER.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalized.contains("#define SMELTR_CB_OPS_SYMBOL_LEN_NONE 0xFFFFFFFFu"),
+        "header must define SMELTR_CB_OPS_SYMBOL_LEN_NONE to 0xFFFFFFFFu"
+    );
+}
+
+#[test]
 fn header_size_const_correct() {
     assert_eq!(RING_HEADER_BYTES, 40);
     assert_eq!(FRAME_HEADER_BYTES, 16);

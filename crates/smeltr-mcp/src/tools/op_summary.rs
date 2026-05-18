@@ -18,6 +18,10 @@ pub struct OpSummary {
     pub gpu_ns: u64,
     pub count: u64,
     pub pct: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -31,13 +35,21 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let root =
         compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
+    /// (gpu_ns, count, symbol, kind) — symbol/kind take first non-None.
+    type OpAgg = (u64, u64, Option<String>, Option<String>);
     let top = params.top_n.unwrap_or(10) as usize;
-    let mut agg: HashMap<String, (u64, u64)> = HashMap::new();
-    fn walk(n: &ModuleBreakdown, agg: &mut HashMap<String, (u64, u64)>) {
+    let mut agg: HashMap<String, OpAgg> = HashMap::new();
+    fn walk(n: &ModuleBreakdown, agg: &mut HashMap<String, OpAgg>) {
         for op in &n.ops {
-            let e = agg.entry(op.name.clone()).or_insert((0, 0));
+            let e = agg.entry(op.name.clone()).or_insert((0, 0, None, None));
             e.0 += op.gpu_ns;
             e.1 += op.count;
+            if e.2.is_none() {
+                e.2 = op.symbol.clone();
+            }
+            if e.3.is_none() {
+                e.3 = op.kind.clone();
+            }
         }
         for c in &n.children {
             walk(c, agg);
@@ -45,14 +57,16 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     }
     walk(&root, &mut agg);
 
-    let total: u64 = agg.values().map(|(ns, _)| *ns).sum::<u64>().max(1);
+    let total: u64 = agg.values().map(|(ns, ..)| *ns).sum::<u64>().max(1);
     let mut rows: Vec<OpSummary> = agg
         .into_iter()
-        .map(|(name, (gpu_ns, count))| OpSummary {
+        .map(|(name, (gpu_ns, count, symbol, kind))| OpSummary {
             name,
             gpu_ns,
             count,
             pct: (gpu_ns as f64 / total as f64) * 100.0,
+            symbol,
+            kind,
         })
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.gpu_ns));
@@ -149,11 +163,13 @@ mod tests {
                     ops: vec![
                         smeltr_core::event::OpSample {
                             name: "Matmul".into(),
+                            symbol: None,
                             gpu_ns: 150,
                             count: 1,
                         },
                         smeltr_core::event::OpSample {
                             name: "Softmax".into(),
+                            symbol: None,
                             gpu_ns: 50,
                             count: 2,
                         },
@@ -198,5 +214,136 @@ mod tests {
         assert_eq!(resp.ops[0].count, 1);
         assert_eq!(resp.ops[1].name, "Softmax");
         assert!(resp.ops[0].pct > resp.ops[1].pct);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn op_with_symbol_gets_kind_resolved() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        let evs: Vec<Event> = vec![
+            Event {
+                ts_mono_ns: 1,
+                ts_wall_ns: 1,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 1,
+                payload: Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 1,
+                    qualname: "A".into(),
+                    class_name: "A".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                },
+            },
+            Event {
+                ts_mono_ns: 10,
+                ts_wall_ns: 10,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 2,
+                payload: Payload::MlxEvalEntered {
+                    call_id: 1,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![1],
+                },
+            },
+            Event {
+                ts_mono_ns: 20,
+                ts_wall_ns: 20,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 3,
+                payload: Payload::MetalCbCommitted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+            },
+            Event {
+                ts_mono_ns: 30,
+                ts_wall_ns: 30,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 4,
+                payload: Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 200,
+                },
+            },
+            Event {
+                ts_mono_ns: 31,
+                ts_wall_ns: 31,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 5,
+                payload: Payload::MetalCbOps {
+                    cb_id: 9,
+                    ops: vec![smeltr_core::event::OpSample {
+                        name: "K_attn_1".into(),
+                        symbol: Some("sdpa_vector_2pass_1_float16_64".into()),
+                        gpu_ns: 200,
+                        count: 1,
+                    }],
+                },
+            },
+            Event {
+                ts_mono_ns: 40,
+                ts_wall_ns: 40,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 6,
+                payload: Payload::MlxEvalReturned {
+                    call_id: 1,
+                    duration_ns: 30,
+                    was_async: false,
+                },
+            },
+            Event {
+                ts_mono_ns: 50,
+                ts_wall_ns: 50,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 7,
+                payload: Payload::ModuleReturned { module_call_id: 1 },
+            },
+        ];
+        for e in &evs {
+            w.write_event(e).unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+            top_n: None,
+        })
+        .unwrap();
+        let row = resp
+            .ops
+            .iter()
+            .find(|r| r.name == "K_attn_1")
+            .expect("row present");
+        assert_eq!(
+            row.symbol.as_deref(),
+            Some("sdpa_vector_2pass_1_float16_64")
+        );
+        assert_eq!(row.kind.as_deref(), Some("ScaledDotProductAttention"));
     }
 }

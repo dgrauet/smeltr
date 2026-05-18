@@ -280,6 +280,7 @@ mod tests {
                     cb_id: 9,
                     ops: vec![smeltr_core::event::OpSample {
                         name: "Matmul".into(),
+                        symbol: None,
                         gpu_ns: 50,
                         count: 1,
                     }],
@@ -342,5 +343,137 @@ mod tests {
             .find(|c| c.qualname == "A")
             .unwrap();
         assert!(a2.ops.is_empty(), "include_ops=false should clear ops");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn op_with_symbol_gets_kind_resolved() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        let evs: Vec<Event> = vec![
+            Event {
+                ts_mono_ns: 1,
+                ts_wall_ns: 1,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 1,
+                payload: Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 1,
+                    qualname: "denoise.pass:cond".into(),
+                    class_name: "Scope".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                },
+            },
+            Event {
+                ts_mono_ns: 10,
+                ts_wall_ns: 10,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 2,
+                payload: Payload::MlxEvalEntered {
+                    call_id: 1,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![1],
+                },
+            },
+            Event {
+                ts_mono_ns: 20,
+                ts_wall_ns: 20,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 3,
+                payload: Payload::MetalCbCommitted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+            },
+            Event {
+                ts_mono_ns: 30,
+                ts_wall_ns: 30,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 4,
+                payload: Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 1_000_000,
+                },
+            },
+            Event {
+                ts_mono_ns: 31,
+                ts_wall_ns: 31,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 5,
+                payload: Payload::MetalCbOps {
+                    cb_id: 9,
+                    ops: vec![smeltr_core::event::OpSample {
+                        name: "K_abcd_64x64x1".into(),
+                        symbol: Some("gemm_t_n_bf16_64_64_32".into()),
+                        gpu_ns: 1_000_000,
+                        count: 1,
+                    }],
+                },
+            },
+            Event {
+                ts_mono_ns: 40,
+                ts_wall_ns: 40,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 6,
+                payload: Payload::MlxEvalReturned {
+                    call_id: 1,
+                    duration_ns: 30,
+                    was_async: false,
+                },
+            },
+            Event {
+                ts_mono_ns: 50,
+                ts_wall_ns: 50,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 7,
+                payload: Payload::ModuleReturned { module_call_id: 1 },
+            },
+        ];
+        for e in &evs {
+            w.write_event(e).unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let scope = resp
+            .root
+            .children
+            .iter()
+            .find(|c| c.qualname == "denoise.pass:cond")
+            .expect("scope present");
+        let op = scope.ops.first().expect("op present");
+        assert_eq!(op.name, "K_abcd_64x64x1");
+        assert_eq!(op.symbol.as_deref(), Some("gemm_t_n_bf16_64_64_32"));
+        assert_eq!(op.kind.as_deref(), Some("Matmul"));
     }
 }

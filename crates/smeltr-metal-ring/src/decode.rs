@@ -4,6 +4,7 @@ use crate::wire::kind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedOpSample {
     pub name: String,
+    pub symbol: Option<String>,
     pub gpu_ns: u64,
     pub count: u32,
 }
@@ -195,10 +196,25 @@ pub fn decode_frame(kind_val: u32, payload: &[u8]) -> Result<DecodedFrame, RingE
                 }
                 let name = std::str::from_utf8(&c.buf[c.pos..c.pos + name_len])?.to_string();
                 c.pos += name_len;
+
+                let symbol_len_raw = c.read_u32()?;
+                let symbol = if symbol_len_raw == crate::wire::CB_OPS_SYMBOL_LEN_NONE {
+                    None
+                } else {
+                    let symbol_len = symbol_len_raw as usize;
+                    if c.pos + symbol_len > c.buf.len() {
+                        return Err(RingError::Truncated(c.pos as u64));
+                    }
+                    let s = std::str::from_utf8(&c.buf[c.pos..c.pos + symbol_len])?.to_string();
+                    c.pos += symbol_len;
+                    Some(s)
+                };
+
                 let gpu_ns = c.read_u64()?;
                 let count = c.read_u32()?;
                 ops.push(DecodedOpSample {
                     name,
+                    symbol,
                     gpu_ns,
                     count,
                 });

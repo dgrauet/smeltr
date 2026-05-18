@@ -11,3 +11,7 @@ path = "src/main.rs"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.30"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+smeltr-metal-ring = { path = "../smeltr-metal-ring" }
+tempfile = { workspace = true }

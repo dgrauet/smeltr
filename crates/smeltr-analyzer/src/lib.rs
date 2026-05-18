@@ -11,6 +11,9 @@ pub use breakdown::{
     BreakdownError, Diagnostics, ModuleBreakdown, OpAttribution,
 };
 
+pub mod op_kinds;
+pub use op_kinds::resolve_kind;
+
 pub use finding::{Category, EvidenceRef, Finding, Severity};
 pub use report::Report;
 pub use rule::Rule;

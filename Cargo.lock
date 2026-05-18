@@ -2233,6 +2233,8 @@ name = "smeltr-metal-harness"
 version = "0.2.0"
 dependencies = [
  "metal",
+ "smeltr-metal-ring",
+ "tempfile",
 ]
 
 [[package]]

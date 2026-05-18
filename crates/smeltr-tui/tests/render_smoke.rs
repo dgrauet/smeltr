@@ -99,6 +99,7 @@ fn hot_kernels_panel_renders_when_toggled_on() {
             cb_id: 1,
             ops: vec![OpSample {
                 name: "K_demo_8x8x1".into(),
+                symbol: None,
                 gpu_ns: 250_000,
                 count: 3,
             }],
