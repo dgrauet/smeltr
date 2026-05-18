@@ -126,3 +126,64 @@ def session(name: str) -> Generator[None, None, None]:
         yield
     finally:
         mark(f"session-close: {name}")
+
+
+def export(
+    filepath: str,
+    format: str = "chrome-trace",
+    session: str | None = None,
+) -> None:
+    """Export a recorded session to a structured file via the `smeltr` CLI.
+
+    Args:
+        filepath: Output path on disk. The CLI will write to this path.
+        format: "chrome-trace" (default, openable in chrome://tracing /
+            Perfetto / Speedscope) or "json" (raw event dump).
+        session: Session reference (short id, UUID, or name). Defaults to
+            the active session known by the connected daemon (set up at
+            attach()).
+
+    Raises:
+        RuntimeError: if smeltr is not attached and `session` is None, the
+            daemon does not expose an active session, the `smeltr` CLI is
+            not on PATH, or the subprocess exits non-zero.
+    """
+    import shutil
+    import subprocess
+
+    resolved_session = session
+    if resolved_session is None:
+        if _client is None:
+            raise RuntimeError(
+                "smeltr.attach() must be called first, or pass session=… explicitly"
+            )
+        active = _client.active_session
+        if not active:
+            raise RuntimeError(
+                "no active session known by the daemon; pass session=… explicitly"
+            )
+        resolved_session = active
+
+    smeltr_bin = shutil.which("smeltr")
+    if smeltr_bin is None:
+        raise RuntimeError(
+            "smeltr CLI not found on PATH; install smeltr or invoke the CLI directly"
+        )
+
+    cmd = [
+        smeltr_bin,
+        "export",
+        resolved_session,
+        "--format",
+        format,
+        "--output",
+        filepath,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+        stdout = e.stdout.decode("utf-8", errors="replace") if e.stdout else ""
+        raise RuntimeError(
+            f"smeltr export failed (exit {e.returncode}): {stderr.strip() or stdout.strip()}"
+        ) from e
