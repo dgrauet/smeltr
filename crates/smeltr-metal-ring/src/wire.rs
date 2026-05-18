@@ -1,7 +1,7 @@
 //! Wire format mirroring metal-hook/include/smeltr_ring.h.
 
 pub const RING_MAGIC: u32 = 0x534D_4C52; // "SMLR"
-pub const RING_VERSION: u32 = 1;
+pub const RING_VERSION: u32 = 2;
 
 pub mod kind {
     pub const PAD: u32 = 0;

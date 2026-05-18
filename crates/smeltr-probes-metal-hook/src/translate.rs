@@ -148,11 +148,13 @@ mod tests {
             ops: vec![
                 DecodedOpSample {
                     name: "Matmul".into(),
+                    symbol: None,
                     gpu_ns: 6_200_000,
                     count: 3,
                 },
                 DecodedOpSample {
                     name: "Softmax".into(),
+                    symbol: None,
                     gpu_ns: 1_500_000,
                     count: 1,
                 },

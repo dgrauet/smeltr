@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define SMELTR_RING_MAGIC   0x534D4C52u   /* "SMLR" */
-#define SMELTR_RING_VERSION 1u
+#define SMELTR_RING_VERSION 2u
 
 #define SMELTR_KIND_PAD            0u
 #define SMELTR_KIND_CB_COMMITTED   1u
