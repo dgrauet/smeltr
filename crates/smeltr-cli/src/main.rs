@@ -72,6 +72,20 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         ops_flat: bool,
     },
+    /// Export a recorded session to chrome-trace JSON (openable in
+    /// chrome://tracing / Perfetto / Speedscope) or raw JSON.
+    Export {
+        /// Session reference: 8-char short id, full UUID, or
+        /// SessionMetadata.name. Same resolution rules as other smeltr
+        /// commands (most-recent-wins on name collision).
+        session: String,
+        /// Output format. Default: `chrome-trace`.
+        #[arg(long, default_value = "chrome-trace")]
+        format: String,
+        /// Output path. Use `-` for stdout. Default: `<short_id>.json`.
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+    },
     /// Run the MCP stdio server (used by LLM clients, e.g. Claude Desktop).
     Mcp,
     /// Spawn a child process under smeltr's scoped probes.
@@ -136,6 +150,11 @@ fn main() -> anyhow::Result<()> {
                 no_ops,
                 ops_flat,
             ),
+            Cmd::Export {
+                session,
+                format,
+                output,
+            } => commands::export::run(&session, &format, output.as_deref()),
             Cmd::Mcp => commands::mcp::run().await,
             Cmd::Record {
                 cmd,

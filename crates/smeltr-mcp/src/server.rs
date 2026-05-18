@@ -51,6 +51,11 @@ pub fn dispatch_call(name: &str, args: serde_json::Value) -> Result<serde_json::
             let r = tools::inference_breakdown::run(p)?;
             Ok(serde_json::to_value(r)?)
         }
+        "export_session" => {
+            let p: tools::export_session::Params = serde_json::from_value(args)?;
+            let r = tools::export_session::run(p)?;
+            Ok(serde_json::to_value(r)?)
+        }
         "get_op_summary" => {
             let p: tools::op_summary::Params = serde_json::from_value(args)?;
             let r = tools::op_summary::run(p)?;
@@ -188,6 +193,10 @@ impl ServerHandler for SmeltrMcpServer {
             tool::<crate::tools::op_summary::Params>(
                 "get_op_summary",
                 "Flat cross-module aggregation of GPU time per op kind (Matmul, Softmax, ...).",
+            ),
+            tool::<crate::tools::export_session::Params>(
+                "export_session",
+                "Export a recorded session to chrome-trace JSON (openable in chrome://tracing / Perfetto / Speedscope) or raw JSON. Writes to disk and returns the file path.",
             ),
         ];
         Ok(ListToolsResult::with_all_items(tools))

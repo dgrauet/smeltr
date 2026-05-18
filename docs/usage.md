@@ -221,6 +221,40 @@ session records with no name and a warning is logged). The session
 directory format (`YYYY-MM-DD-HHMMSS-<8hex>`) is unchanged — the name
 is metadata only.
 
+### Exporting sessions
+
+Dump a recorded session to chrome-trace JSON for visual analysis:
+
+```bash
+smeltr export ltx2-baseline --format chrome-trace --output trace.json
+# then open trace.json in chrome://tracing, Perfetto, or Speedscope
+```
+
+Equivalent paths:
+
+- **CLI:** `smeltr export <session-ref> [--format chrome-trace|json] [--output PATH]`
+  (default format chrome-trace, default output `<short_id>.json`, use `-` for stdout).
+- **MCP:** `export_session(session, format, output_path)` writes the
+  file and returns its path.
+- **Python:** `smeltr.export(filepath, format="chrome-trace", session=None)`.
+  With no `session`, uses the active session known to the connected
+  daemon. Drop it in an `atexit` or `finally` block to dump traces at
+  end of a CI run.
+
+The chrome-trace output uses three swimlanes:
+
+- **Python** — user scopes (`smeltr.scope(...)` and `mlx.nn.Module`
+  calls) and instant marks.
+- **Metal CBs** — command-buffer commits with `in_flight_ns` duration,
+  grouped by queue (`tid="queue_<id>"`).
+- **Kernels** — per-op events labeled by `symbol` (the MLX shader name)
+  when available, falling back to the legacy `K_xxxx_AxBxC` fingerprint.
+  Grouped by CB (`tid="cb_<id>"`).
+
+Sessions without a `symbol` (recorded before symbolic kernel name
+capture landed) export with only the fingerprint name on the Kernels
+lane — still useful, just less readable.
+
 ## Typical workflow
 
 ```

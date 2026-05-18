@@ -3,6 +3,7 @@
 pub mod compare_sessions;
 pub mod correlations;
 pub mod crash_report;
+pub mod export_session;
 pub mod inference_breakdown;
 pub mod list_sessions;
 pub mod metal_cb_history;
