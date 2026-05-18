@@ -11,6 +11,8 @@ pub use breakdown::{
     BreakdownError, Diagnostics, ModuleBreakdown, OpAttribution,
 };
 
+pub mod export;
+
 pub mod op_kinds;
 pub use op_kinds::resolve_kind;
 
