@@ -5,6 +5,7 @@ pub mod codec;
 pub mod event;
 pub mod reader;
 pub mod session;
+pub mod session_resolve;
 pub mod writer;
 
 pub use clock::MonoClock;
