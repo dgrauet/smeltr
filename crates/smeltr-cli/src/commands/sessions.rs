@@ -51,17 +51,25 @@ async fn ls() -> anyhow::Result<()> {
     let root = smeltr_core::session::sessions_root();
     for d in &dirs {
         let dir = root.join(d);
-        let kind_label = match read_metadata(&dir) {
-            Ok(meta) => match meta.kind {
+        let meta = read_metadata(&dir).ok();
+        let kind_label = match &meta {
+            Some(m) => match &m.kind {
                 smeltr_core::session::SessionKind::Ambient => "ambient".to_string(),
                 smeltr_core::session::SessionKind::Scoped { pid, argv } => {
                     let cmd = argv.first().map(|s| s.as_str()).unwrap_or("?");
                     format!("scoped pid={pid} cmd={cmd}")
                 }
             },
-            Err(_) => "?".to_string(),
+            None => "?".to_string(),
         };
-        println!("{d}  [{kind_label}]");
+        let name_suffix = match &meta {
+            Some(m) => match m.name.as_deref() {
+                Some(n) => format!("  name=\"{n}\""),
+                None => String::new(),
+            },
+            None => String::new(),
+        };
+        println!("{d}  [{kind_label}]{name_suffix}");
     }
     Ok(())
 }

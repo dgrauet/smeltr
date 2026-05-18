@@ -61,10 +61,51 @@ pub struct SessionMetadata {
     pub argv: Vec<String>,
     #[serde(default)]
     pub kind: SessionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+const SESSION_NAME_MAX_LEN: usize = 200;
+
+/// Validate and normalize a session name candidate.
+///
+/// - Trims surrounding whitespace.
+/// - Drops if empty after trim.
+/// - Drops (with `warn`) if it contains NUL, other control chars, or `/`.
+/// - Truncates to 200 chars (with `warn`).
+fn validate_session_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().any(|c| c == '\0') {
+        tracing::warn!("SMELTR_SESSION_NAME contains NUL — ignoring");
+        return None;
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        tracing::warn!("SMELTR_SESSION_NAME contains control characters — ignoring");
+        return None;
+    }
+    if trimmed.contains('/') {
+        tracing::warn!("SMELTR_SESSION_NAME contains '/' — ignoring");
+        return None;
+    }
+    if trimmed.len() > SESSION_NAME_MAX_LEN {
+        tracing::warn!("SMELTR_SESSION_NAME longer than {SESSION_NAME_MAX_LEN} chars — truncating");
+        let mut end = SESSION_NAME_MAX_LEN;
+        while !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        return Some(trimmed[..end].to_string());
+    }
+    Some(trimmed.to_string())
 }
 
 impl SessionMetadata {
     pub fn now_starting(session_id: SessionId) -> Self {
+        let name = std::env::var("SMELTR_SESSION_NAME")
+            .ok()
+            .and_then(|raw| validate_session_name(&raw));
         Self {
             session_id,
             started_rfc3339: OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
@@ -74,6 +115,7 @@ impl SessionMetadata {
             exit_code: None,
             argv: std::env::args().collect(),
             kind: SessionKind::Ambient,
+            name,
         }
     }
 }
@@ -200,5 +242,111 @@ argv = ["smeltrd", "--foreground"]
 "#;
         let m: SessionMetadata = toml::from_str(legacy).unwrap();
         assert!(matches!(m.kind, SessionKind::Ambient));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn now_starting_reads_session_name_env() {
+        std::env::set_var("SMELTR_SESSION_NAME", "ltx2-baseline");
+        let m = SessionMetadata::now_starting(SessionId::new());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        assert_eq!(m.name.as_deref(), Some("ltx2-baseline"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn now_starting_no_env_yields_none() {
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let m = SessionMetadata::now_starting(SessionId::new());
+        assert_eq!(m.name, None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_name_validator_trims_whitespace() {
+        std::env::set_var("SMELTR_SESSION_NAME", "  foo  ");
+        let m = SessionMetadata::now_starting(SessionId::new());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        assert_eq!(m.name.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_name_validator_drops_empty_after_trim() {
+        std::env::set_var("SMELTR_SESSION_NAME", "   ");
+        let m = SessionMetadata::now_starting(SessionId::new());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        assert_eq!(m.name, None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_name_validator_truncates_to_200() {
+        let long = "x".repeat(300);
+        std::env::set_var("SMELTR_SESSION_NAME", &long);
+        let m = SessionMetadata::now_starting(SessionId::new());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        assert_eq!(m.name.as_deref().map(str::len), Some(200));
+    }
+
+    #[test]
+    fn session_name_validator_drops_nul() {
+        // `std::env::set_var` panics on NUL, so call the validator directly
+        // to cover the defensive NUL check in `validate_session_name`.
+        assert_eq!(validate_session_name("foo\0bar"), None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_name_validator_drops_control_chars() {
+        std::env::set_var("SMELTR_SESSION_NAME", "foo\x07bar");
+        let m = SessionMetadata::now_starting(SessionId::new());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        assert_eq!(m.name, None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_name_validator_drops_slash() {
+        std::env::set_var("SMELTR_SESSION_NAME", "foo/bar");
+        let m = SessionMetadata::now_starting(SessionId::new());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        assert_eq!(m.name, None);
+    }
+
+    #[test]
+    fn session_name_round_trips_in_toml() {
+        let mut m = SessionMetadata::now_starting(SessionId::new());
+        m.name = Some("ltx2-experiment".into());
+        let serialized = toml::to_string(&m).unwrap();
+        assert!(serialized.contains("name = \"ltx2-experiment\""));
+        let back: SessionMetadata = toml::from_str(&serialized).unwrap();
+        assert_eq!(back.name.as_deref(), Some("ltx2-experiment"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_name_none_omitted_from_toml() {
+        // Defensive: clear env so now_starting yields name=None even if a
+        // sibling test or CI environment set SMELTR_SESSION_NAME.
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let m = SessionMetadata::now_starting(SessionId::new());
+        let serialized = toml::to_string(&m).unwrap();
+        assert!(
+            !serialized.contains("\nname ="),
+            "TOML must not contain a name key when None"
+        );
+    }
+
+    #[test]
+    fn legacy_toml_without_name_decodes_as_none() {
+        let legacy = r#"
+session_id = "00000000-0000-0000-0000-000000000001"
+started_rfc3339 = "2024-01-01T00:00:00Z"
+host = "h"
+argv = []
+"#;
+        let m: SessionMetadata = toml::from_str(legacy).unwrap();
+        assert_eq!(m.name, None);
     }
 }

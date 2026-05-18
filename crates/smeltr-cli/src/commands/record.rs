@@ -78,7 +78,20 @@ fn smeltr_home() -> PathBuf {
 /// Spawn `cmd` with `args`, attach scoped probes (and optionally the Metal
 /// hook) via the daemon, wait for it to exit, then detach probes with the
 /// observed exit code. Returns the child's exit code (or -1 on signal).
-pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i32> {
+/// Apply session-naming env var to the child process command builder.
+/// `name` takes precedence over any inherited `SMELTR_SESSION_NAME`.
+fn apply_session_name_env(builder: &mut std::process::Command, name: Option<&str>) {
+    if let Some(n) = name {
+        builder.env("SMELTR_SESSION_NAME", n);
+    }
+}
+
+pub async fn run(
+    cmd: &str,
+    args: &[String],
+    no_hook: bool,
+    name: Option<&str>,
+) -> anyhow::Result<i32> {
     let mut client = Client::connect().await?;
 
     let mut hook_decision: Option<(PathBuf, PathBuf)> = None;
@@ -130,6 +143,8 @@ pub async fn run(cmd: &str, args: &[String], no_hook: bool) -> anyhow::Result<i3
     // explicit `smeltr.attach()` call in user code. Unset by default → no
     // effect on unrelated Python processes (pytest, notebooks, ...).
     builder.env("SMELTR_AUTOLOAD", "1");
+
+    apply_session_name_env(&mut builder, name);
 
     let mut child = builder.spawn()?;
     let pid = child.id();
@@ -220,5 +235,49 @@ mod tests {
         let resolved = resolve_dylib_path().expect("embedded must always resolve");
         assert!(resolved.exists());
         assert!(resolved.to_string_lossy().contains("libmetal_hook"));
+    }
+
+    #[test]
+    fn apply_name_sets_env_when_some() {
+        let mut cmd = std::process::Command::new("/bin/true");
+        apply_session_name_env(&mut cmd, Some("foo"));
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter(|(k, _)| *k == std::ffi::OsStr::new("SMELTR_SESSION_NAME"))
+            .collect();
+        assert_eq!(envs.len(), 1);
+        let (_, v) = envs[0];
+        assert_eq!(
+            v.map(|s| s.to_string_lossy().into_owned()),
+            Some("foo".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_name_no_change_when_none() {
+        let mut cmd = std::process::Command::new("/bin/true");
+        apply_session_name_env(&mut cmd, None);
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter(|(k, _)| *k == std::ffi::OsStr::new("SMELTR_SESSION_NAME"))
+            .collect();
+        assert!(envs.is_empty(), "no env should be set when name=None");
+    }
+
+    #[test]
+    fn apply_name_overrides_previously_set_env() {
+        let mut cmd = std::process::Command::new("/bin/true");
+        cmd.env("SMELTR_SESSION_NAME", "previously-set");
+        apply_session_name_env(&mut cmd, Some("override"));
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter(|(k, _)| *k == std::ffi::OsStr::new("SMELTR_SESSION_NAME"))
+            .collect();
+        assert_eq!(envs.len(), 1);
+        let (_, v) = envs[0];
+        assert_eq!(
+            v.map(|s| s.to_string_lossy().into_owned()),
+            Some("override".to_string())
+        );
     }
 }

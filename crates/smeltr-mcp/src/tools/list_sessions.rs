@@ -29,6 +29,8 @@ pub struct SessionSummary {
     pub exit_code: Option<i32>,
     pub event_count: usize,
     pub root_cause_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -50,14 +52,15 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
 
         let report = smeltr_analyzer::analyze(&events);
         let root_cause_title = report.root_cause().map(|f| f.title.clone());
-        let (full_id, started, ended, exit_code) = match meta {
+        let (full_id, started, ended, exit_code, name) = match &meta {
             Some(m) => (
                 m.session_id.to_string(),
                 m.started_rfc3339.clone(),
                 m.ended_rfc3339.clone(),
                 m.exit_code,
+                m.name.clone(),
             ),
-            None => (String::new(), String::new(), None, None),
+            None => (String::new(), String::new(), None, None, None),
         };
         let short_id = if full_id.len() >= 8 {
             full_id[..8].to_string()
@@ -73,6 +76,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             exit_code,
             event_count: events.len(),
             root_cause_title,
+            name,
         });
     }
     Ok(Response { sessions: out })
@@ -183,5 +187,64 @@ mod tests {
         })
         .unwrap();
         assert_eq!(resp.sessions.len(), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn lists_session_name_when_present() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.name = Some("ltx2-experiment".into());
+        let mut w = SessionWriter::create(meta).unwrap();
+        for i in 0..25 {
+            w.write_event(&Event {
+                ts_mono_ns: i,
+                ts_wall_ns: i,
+                session_id: Uuid::nil(),
+                source: Source::Mark,
+                pid: None,
+                seq: i,
+                payload: Payload::Mark {
+                    label: format!("m{i}"),
+                },
+            })
+            .unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params::default()).unwrap();
+        assert_eq!(resp.sessions.len(), 1);
+        assert_eq!(resp.sessions[0].name.as_deref(), Some("ltx2-experiment"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn lists_session_name_as_none_when_absent() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        for i in 0..25 {
+            w.write_event(&Event {
+                ts_mono_ns: i,
+                ts_wall_ns: i,
+                session_id: Uuid::nil(),
+                source: Source::Mark,
+                pid: None,
+                seq: i,
+                payload: Payload::Mark {
+                    label: format!("m{i}"),
+                },
+            })
+            .unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params::default()).unwrap();
+        assert_eq!(resp.sessions[0].name, None);
     }
 }
