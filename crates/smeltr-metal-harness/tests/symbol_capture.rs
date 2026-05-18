@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use smeltr_metal_ring::{create_ring, open_for_read, DecodedFrame};
 
@@ -65,22 +66,37 @@ fn hook_captures_function_name_via_pso_swizzle() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let mut reader = open_for_read(&ring_path).expect("open ring");
+    // Poll for the symbol with a 5-second budget. The harness already sleeps
+    // 750ms post-`wait_until_completed` to let the completion-handler dispatch
+    // queue flush, but on slow CI runners that may not be enough. Reopening
+    // the reader each iteration forces a clean re-scan from the start; since
+    // the harness has already exited (`status.success()` above), the ring is
+    // final and there is no writer race.
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut saw_symbol = false;
     let mut total_cb_ops_frames = 0usize;
     let mut all_symbols: Vec<Option<String>> = Vec::new();
     let mut all_names: Vec<String> = Vec::new();
 
-    while let Ok(Some(event)) = reader.next() {
-        if let DecodedFrame::CbOps { ops, .. } = event.frame {
-            total_cb_ops_frames += 1;
-            for op in ops {
-                all_names.push(op.name.clone());
-                all_symbols.push(op.symbol.clone());
-                if op.symbol.as_deref() == Some("gemm_test_kernel") {
-                    saw_symbol = true;
+    while Instant::now() < deadline && !saw_symbol {
+        let mut reader = open_for_read(&ring_path).expect("open ring");
+        total_cb_ops_frames = 0;
+        all_symbols.clear();
+        all_names.clear();
+        while let Ok(Some(event)) = reader.next() {
+            if let DecodedFrame::CbOps { ops, .. } = event.frame {
+                total_cb_ops_frames += 1;
+                for op in ops {
+                    all_names.push(op.name.clone());
+                    all_symbols.push(op.symbol.clone());
+                    if op.symbol.as_deref() == Some("gemm_test_kernel") {
+                        saw_symbol = true;
+                    }
                 }
             }
+        }
+        if !saw_symbol {
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 

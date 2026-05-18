@@ -55,7 +55,7 @@ fn main() {
     cb.wait_until_completed();
 
     // Let the hook flush completion handlers before exit.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(std::time::Duration::from_millis(750));
     println!("harness done");
 }
 
