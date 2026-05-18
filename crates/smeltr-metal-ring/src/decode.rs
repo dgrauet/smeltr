@@ -198,7 +198,7 @@ pub fn decode_frame(kind_val: u32, payload: &[u8]) -> Result<DecodedFrame, RingE
                 c.pos += name_len;
 
                 let symbol_len_raw = c.read_u32()?;
-                let symbol = if symbol_len_raw == 0xFFFF_FFFF {
+                let symbol = if symbol_len_raw == crate::wire::CB_OPS_SYMBOL_LEN_NONE {
                     None
                 } else {
                     let symbol_len = symbol_len_raw as usize;

@@ -23,6 +23,9 @@
 #define SMELTR_KIND_SKIPPED        12u
 #define SMELTR_KIND_CB_OPS         13u
 
+/* Sentinel for the per-op symbol_len field in CB_OPS frames: no symbol present. */
+#define SMELTR_CB_OPS_SYMBOL_LEN_NONE 0xFFFFFFFFu
+
 typedef struct {
     uint32_t magic;
     uint32_t version;

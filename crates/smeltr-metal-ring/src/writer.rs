@@ -286,7 +286,7 @@ impl RingWriter {
             push_u32(&mut p, name.len() as u32);
             p.extend_from_slice(name.as_bytes());
             match symbol {
-                None => push_u32(&mut p, 0xFFFF_FFFF),
+                None => push_u32(&mut p, crate::wire::CB_OPS_SYMBOL_LEN_NONE),
                 Some(s) => {
                     push_u32(&mut p, s.len() as u32);
                     p.extend_from_slice(s.as_bytes());

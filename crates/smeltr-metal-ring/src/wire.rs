@@ -3,6 +3,11 @@
 pub const RING_MAGIC: u32 = 0x534D_4C52; // "SMLR"
 pub const RING_VERSION: u32 = 2;
 
+/// Sentinel value for the per-op `symbol_len` field in CB_OPS frames,
+/// meaning "no symbol present" (no bytes follow). Chosen because the
+/// frame envelope `len: u32` bounds any real symbol well below 4 GiB.
+pub const CB_OPS_SYMBOL_LEN_NONE: u32 = u32::MAX;
+
 pub mod kind {
     pub const PAD: u32 = 0;
     pub const CB_COMMITTED: u32 = 1;
