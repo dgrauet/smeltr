@@ -81,7 +81,7 @@ pub fn frame_to_payload(f: DecodedFrame) -> Payload {
                 .into_iter()
                 .map(|o| smeltr_core::event::OpSample {
                     name: o.name,
-                    symbol: None,
+                    symbol: o.symbol,
                     gpu_ns: o.gpu_ns,
                     count: o.count,
                 })
@@ -167,6 +167,38 @@ mod tests {
                 assert_eq!(ops[0].name, "Matmul");
                 assert_eq!(ops[0].gpu_ns, 6_200_000);
                 assert_eq!(ops[0].count, 3);
+            }
+            other => panic!("expected MetalCbOps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cb_ops_translation_preserves_symbol() {
+        let p = frame_to_payload(DecodedFrame::CbOps {
+            cb_id: 7,
+            ops: vec![
+                DecodedOpSample {
+                    name: "K_a".into(),
+                    symbol: Some("gemm_t_n_bf16".into()),
+                    gpu_ns: 100,
+                    count: 1,
+                },
+                DecodedOpSample {
+                    name: "K_b".into(),
+                    symbol: None,
+                    gpu_ns: 200,
+                    count: 2,
+                },
+            ],
+        });
+        match p {
+            Payload::MetalCbOps { cb_id, ops } => {
+                assert_eq!(cb_id, 7);
+                assert_eq!(ops.len(), 2);
+                assert_eq!(ops[0].name, "K_a");
+                assert_eq!(ops[0].symbol.as_deref(), Some("gemm_t_n_bf16"));
+                assert_eq!(ops[1].name, "K_b");
+                assert_eq!(ops[1].symbol, None);
             }
             other => panic!("expected MetalCbOps, got {other:?}"),
         }
