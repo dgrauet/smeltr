@@ -54,13 +54,19 @@ class _Scope:
         self._cm: contextlib.AbstractContextManager[None] | None = None
 
     def __enter__(self) -> None:
+        assert self._cm is None, (
+            "smeltr.scope() instance is not re-entrant; "
+            "call smeltr.scope(name) again to obtain a fresh scope"
+        )
         self._cm = _scope_cm(self._name)
         self._cm.__enter__()
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool | None:
         assert self._cm is not None
-        self._cm.__exit__(exc_type, exc, tb)
-        self._cm = None
+        try:
+            return self._cm.__exit__(exc_type, exc, tb)
+        finally:
+            self._cm = None
 
     def __call__(self, fn: F) -> F:
         return _scope_decorator(self._name)(fn)
