@@ -32,6 +32,7 @@
 #include <sys/stat.h>
 #include "smeltr_ring.h"
 #include "smeltr_ring_writer.h"
+#import "pso_map.h"
 
 static smeltr_ring_t *g_ring = NULL;
 static atomic_bool    g_enabled = false;
@@ -791,10 +792,11 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
     // Build C arrays for smeltr_write_cb_ops.
     uint32_t n = (uint32_t)agg.count;
     char **names_buf  = (char **)malloc(sizeof(char *) * n);
+    const char **symbols_buf = (const char **)malloc(sizeof(char *) * n);
     uint64_t *gpu_ns_arr = (uint64_t *)malloc(sizeof(uint64_t) * n);
     uint32_t *counts  = (uint32_t *)malloc(sizeof(uint32_t) * n);
-    if (!names_buf || !gpu_ns_arr || !counts) {
-        free(names_buf); free(gpu_ns_arr); free(counts);
+    if (!names_buf || !symbols_buf || !gpu_ns_arr || !counts) {
+        free(names_buf); free(symbols_buf); free(gpu_ns_arr); free(counts);
         return;
     }
     uint32_t i = 0;
@@ -812,17 +814,19 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
             uint16_t pso_short = (uint16_t)(pso & 0xFFFF);
             snprintf(name, 48, "K_%04x_%lux%lux%lu", pso_short, w, h, depth);
         }
-        names_buf[i]  = name;
-        gpu_ns_arr[i] = [agg[key][0] unsignedLongLongValue];
-        counts[i]     = (uint32_t)[agg[key][1] unsignedLongLongValue];
+        names_buf[i]   = name;
+        symbols_buf[i] = smeltr_pso_map_lookup((uintptr_t)pso);  // borrowed; may be NULL
+        gpu_ns_arr[i]  = [agg[key][0] unsignedLongLongValue];
+        counts[i]      = (uint32_t)[agg[key][1] unsignedLongLongValue];
         i++;
     }
     smeltr_write_cb_ops(g_ring, smeltr_mono_ns(), cb_id,
                         (const char *const *)names_buf,
-                        NULL,  /* symbols — wired in Task 8 */
+                        (const char *const *)symbols_buf,
                         gpu_ns_arr, counts, n);
     for (uint32_t k = 0; k < n; k++) free(names_buf[k]);
     free(names_buf);
+    free(symbols_buf);
     free(gpu_ns_arr);
     free(counts);
 }
@@ -833,6 +837,12 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
 - (id<MTLCommandBuffer>)smeltr_commandBuffer;
 - (void)smeltr_commit;
 - (id<MTLCommandQueue>)smeltr_newCommandQueue;
+- (id<MTLComputePipelineState>)smeltr_newComputePipelineStateWithFunction:(id<MTLFunction>)function
+                                                                    error:(__autoreleasing NSError **)error;
+- (id<MTLComputePipelineState>)smeltr_newComputePipelineStateWithFunction:(id<MTLFunction>)function
+                                                                  options:(MTLPipelineOption)options
+                                                               reflection:(MTLAutoreleasedComputePipelineReflection * __nullable)reflection
+                                                                    error:(__autoreleasing NSError **)error;
 @end
 
 /* Forward decls for lazy-install fns */
@@ -947,6 +957,38 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
         });
     }
     return q;
+}
+
+- (id<MTLComputePipelineState>)smeltr_newComputePipelineStateWithFunction:(id<MTLFunction>)function
+                                                                    error:(__autoreleasing NSError **)error {
+    // Method-exchange: this call dispatches to the ORIGINAL implementation.
+    id<MTLComputePipelineState> pso =
+        [self smeltr_newComputePipelineStateWithFunction:function error:error];
+    if (pso != nil) {
+        NSString *fname = [function name];
+        if (fname != nil) {
+            smeltr_pso_map_insert((uintptr_t)pso, [fname UTF8String]);
+        }
+    }
+    return pso;
+}
+
+- (id<MTLComputePipelineState>)smeltr_newComputePipelineStateWithFunction:(id<MTLFunction>)function
+                                                                  options:(MTLPipelineOption)options
+                                                               reflection:(MTLAutoreleasedComputePipelineReflection * __nullable)reflection
+                                                                    error:(__autoreleasing NSError **)error {
+    id<MTLComputePipelineState> pso =
+        [self smeltr_newComputePipelineStateWithFunction:function
+                                                 options:options
+                                              reflection:reflection
+                                                   error:error];
+    if (pso != nil) {
+        NSString *fname = [function name];
+        if (fname != nil) {
+            smeltr_pso_map_insert((uintptr_t)pso, [fname UTF8String]);
+        }
+    }
+    return pso;
 }
 
 @end
@@ -1303,6 +1345,8 @@ static void smeltr_swizzle_device_class(void) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     if (!d) { smeltr_log("no Metal device available"); return; }
 
+    smeltr_pso_map_init();
+
     // Detect + calibrate stage-boundary counter sampling BEFORE the NO_OPS
     // check so we know whether to use per-encoder timing.
     smeltr_detect_stage_sampling(d);
@@ -1354,6 +1398,14 @@ static void smeltr_swizzle_device_class(void) {
     if (swizzle_instance(dcls, @selector(newHeapWithDescriptor:),
                                 @selector(smeltr_newHeapWithDescriptor:))) {
         smeltr_log("swizzled %s.newHeapWithDescriptor:", class_getName(dcls));
+    }
+    if (swizzle_instance(dcls, @selector(newComputePipelineStateWithFunction:error:),
+                                @selector(smeltr_newComputePipelineStateWithFunction:error:))) {
+        smeltr_log("swizzled %s.newComputePipelineStateWithFunction:error:", class_getName(dcls));
+    }
+    if (swizzle_instance(dcls, @selector(newComputePipelineStateWithFunction:options:reflection:error:),
+                                @selector(smeltr_newComputePipelineStateWithFunction:options:reflection:error:))) {
+        smeltr_log("swizzled %s.newComputePipelineStateWithFunction:options:reflection:error:", class_getName(dcls));
     }
 }
 
