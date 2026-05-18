@@ -154,14 +154,10 @@ def export(
     resolved_session = session
     if resolved_session is None:
         if _client is None:
-            raise RuntimeError(
-                "smeltr.attach() must be called first, or pass session=… explicitly"
-            )
+            raise RuntimeError("smeltr.attach() must be called first, or pass session=… explicitly")
         active = _client.active_session
         if not active:
-            raise RuntimeError(
-                "no active session known by the daemon; pass session=… explicitly"
-            )
+            raise RuntimeError("no active session known by the daemon; pass session=… explicitly")
         resolved_session = active
 
     smeltr_bin = shutil.which("smeltr")
