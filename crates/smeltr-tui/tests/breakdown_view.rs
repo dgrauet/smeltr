@@ -36,6 +36,8 @@ fn fixture_with_op() -> ModuleBreakdown {
                 name: "Matmul".into(),
                 gpu_ns: 1200,
                 count: 1,
+                symbol: None,
+                kind: None,
             }],
             diagnostics: None,
         }],

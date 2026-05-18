@@ -12,6 +12,10 @@ pub struct OpAttribution {
     pub name: String,
     pub gpu_ns: u64,
     pub count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,6 +49,11 @@ pub enum BreakdownError {
     EmptySession,
 }
 
+/// Aggregation bucket for ops keyed by op name: (gpu_ns, count, symbol).
+/// `symbol` is set on first non-None occurrence; same kernel name is
+/// assumed to come from the same PSO and thus same symbol.
+type OpAgg = (u64, u64, Option<String>);
+
 #[derive(Default)]
 struct CallNode {
     qualname: String,
@@ -54,7 +63,7 @@ struct CallNode {
     gpu_ns_self: u64,
     eval_count: u64,
     cb_count: u64,
-    ops_buf: HashMap<String, (u64, u64)>,
+    ops_buf: HashMap<String, OpAgg>,
 }
 
 struct EvalInterval {
@@ -183,9 +192,9 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     let mut unmatched_cb_count: u64 = 0;
     let mut per_eval_gpu_ns: Vec<u64> = vec![0; eval_intervals.len()];
     let mut per_eval_cb_count: Vec<u64> = vec![0; eval_intervals.len()];
-    let mut per_eval_ops: Vec<HashMap<String, (u64, u64)>> =
+    let mut per_eval_ops: Vec<HashMap<String, OpAgg>> =
         (0..eval_intervals.len()).map(|_| HashMap::new()).collect();
-    let mut unscoped_ops: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut unscoped_ops: HashMap<String, OpAgg> = HashMap::new();
     let mut ops_cbs_without_samples: u64 = 0;
     for (cb_id, commit_ts, ns) in &cb_completed {
         let idx = eval_intervals
@@ -201,9 +210,14 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 per_eval_cb_count[i] += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
-                        let e = per_eval_ops[i].entry(op.name.clone()).or_insert((0, 0));
+                        let e = per_eval_ops[i]
+                            .entry(op.name.clone())
+                            .or_insert((0, 0, None));
                         e.0 += op.gpu_ns;
                         e.1 += op.count as u64;
+                        if e.2.is_none() {
+                            e.2 = op.symbol.clone();
+                        }
                     }
                 }
             }
@@ -212,9 +226,12 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 unmatched_cb_count += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
-                        let e = unscoped_ops.entry(op.name.clone()).or_insert((0, 0));
+                        let e = unscoped_ops.entry(op.name.clone()).or_insert((0, 0, None));
                         e.0 += op.gpu_ns;
                         e.1 += op.count as u64;
+                        if e.2.is_none() {
+                            e.2 = op.symbol.clone();
+                        }
                     }
                 }
             }
@@ -232,10 +249,13 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 node.gpu_ns_self += gpu;
                 node.eval_count += 1;
                 node.cb_count += cbs;
-                for (name, (ns, c)) in per_eval_ops[i].drain() {
-                    let e = node.ops_buf.entry(name).or_insert((0, 0));
+                for (name, (ns, c, sym)) in per_eval_ops[i].drain() {
+                    let e = node.ops_buf.entry(name).or_insert((0, 0, None));
                     e.0 += ns;
                     e.1 += c;
+                    if e.2.is_none() {
+                        e.2 = sym;
+                    }
                 }
                 continue;
             }
@@ -243,10 +263,13 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         unscoped_gpu_ns += gpu;
         unscoped_eval_count += 1;
         unscoped_cb_count_from_evals += cbs;
-        for (name, (ns, c)) in per_eval_ops[i].drain() {
-            let e = unscoped_ops.entry(name).or_insert((0, 0));
+        for (name, (ns, c, sym)) in per_eval_ops[i].drain() {
+            let e = unscoped_ops.entry(name).or_insert((0, 0, None));
             e.0 += ns;
             e.1 += c;
+            if e.2.is_none() {
+                e.2 = sym;
+            }
         }
     }
 
@@ -260,10 +283,18 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         let mut ops: Vec<OpAttribution> = n
             .ops_buf
             .iter()
-            .map(|(name, (ns, c))| OpAttribution {
-                name: name.clone(),
-                gpu_ns: *ns,
-                count: *c,
+            .map(|(name, (ns, c, sym))| {
+                let kind = sym
+                    .as_deref()
+                    .and_then(crate::op_kinds::resolve_kind)
+                    .map(str::to_string);
+                OpAttribution {
+                    name: name.clone(),
+                    gpu_ns: *ns,
+                    count: *c,
+                    symbol: sym.clone(),
+                    kind,
+                }
             })
             .collect();
         ops.sort_by_key(|o| std::cmp::Reverse(o.gpu_ns));
@@ -292,10 +323,18 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     if unscoped_gpu_ns > 0 || unscoped_eval_count > 0 || unmatched_cb_count > 0 {
         let mut unscoped_ops_vec: Vec<OpAttribution> = unscoped_ops
             .into_iter()
-            .map(|(name, (ns, c))| OpAttribution {
-                name,
-                gpu_ns: ns,
-                count: c,
+            .map(|(name, (ns, c, sym))| {
+                let kind = sym
+                    .as_deref()
+                    .and_then(crate::op_kinds::resolve_kind)
+                    .map(str::to_string);
+                OpAttribution {
+                    name,
+                    gpu_ns: ns,
+                    count: c,
+                    symbol: sym,
+                    kind,
+                }
             })
             .collect();
         unscoped_ops_vec.sort_by_key(|o| std::cmp::Reverse(o.gpu_ns));
@@ -1329,11 +1368,15 @@ mod tests {
                 name: "Matmul".into(),
                 gpu_ns: 1200,
                 count: 1,
+                symbol: None,
+                kind: None,
             },
             OpAttribution {
                 name: "Softmax".into(),
                 gpu_ns: 300,
                 count: 1,
+                symbol: None,
+                kind: None,
             },
         ]);
         let s = render_table(&r, 10, 6, 5, true);
@@ -1348,6 +1391,8 @@ mod tests {
             name: "Matmul".into(),
             gpu_ns: 1200,
             count: 1,
+            symbol: None,
+            kind: None,
         }]);
         let s = render_table(&r, 10, 6, 5, false);
         assert!(!s.contains("Matmul"));
@@ -1361,6 +1406,8 @@ mod tests {
                 name: format!("Op{i}"),
                 gpu_ns: 1000 - i * 10,
                 count: 1,
+                symbol: None,
+                kind: None,
             });
         }
         let r = fixture_with_ops(ops);
@@ -1385,6 +1432,8 @@ mod tests {
             name: "Matmul".into(),
             gpu_ns: 1000,
             count: 1,
+            symbol: None,
+            kind: None,
         }]);
         let json = render_chrome_trace(&r);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1418,6 +1467,8 @@ mod tests {
                         name: "Matmul".into(),
                         gpu_ns: 1000,
                         count: 1,
+                        symbol: None,
+                        kind: None,
                     }],
                     diagnostics: None,
                 },
@@ -1435,11 +1486,15 @@ mod tests {
                             name: "Matmul".into(),
                             gpu_ns: 500,
                             count: 2,
+                            symbol: None,
+                            kind: None,
                         },
                         OpAttribution {
                             name: "Softmax".into(),
                             gpu_ns: 200,
                             count: 1,
+                            symbol: None,
+                            kind: None,
                         },
                     ],
                     diagnostics: None,
