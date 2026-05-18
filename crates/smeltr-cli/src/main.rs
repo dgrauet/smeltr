@@ -84,6 +84,12 @@ enum Cmd {
         /// Skip the Metal hook (no DYLD_INSERT_LIBRARIES).
         #[arg(long)]
         no_hook: bool,
+        /// Human-readable name for the recorded session. Sets
+        /// SMELTR_SESSION_NAME in the child process environment. The
+        /// session metadata records the name and `list_sessions`
+        /// surfaces it. Overrides any inherited SMELTR_SESSION_NAME.
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -131,8 +137,13 @@ fn main() -> anyhow::Result<()> {
                 ops_flat,
             ),
             Cmd::Mcp => commands::mcp::run().await,
-            Cmd::Record { cmd, args, no_hook } => {
-                let code = commands::record::run(&cmd, &args, no_hook).await?;
+            Cmd::Record {
+                cmd,
+                args,
+                no_hook,
+                name,
+            } => {
+                let code = commands::record::run(&cmd, &args, no_hook, name.as_deref()).await?;
                 std::process::exit(code);
             }
         }
