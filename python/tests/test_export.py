@@ -10,8 +10,12 @@ import pytest
 import smeltr
 
 
+@patch("smeltr._api._client", None)
 def test_export_requires_attach_when_session_is_none():
-    """Without attach() and without explicit session, raise."""
+    """Without attach() and without explicit session, raise.
+    Explicitly pins _client=None so the test is isolated from any prior
+    attach() call leftover in the same pytest process.
+    """
     with pytest.raises(RuntimeError, match="attach"):
         smeltr.export("/tmp/whatever.json")
 
