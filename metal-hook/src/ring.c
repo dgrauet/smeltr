@@ -214,19 +214,25 @@ void smeltr_write_skipped(smeltr_ring_t *r, uint64_t ts, const char *reason) {
 void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
     uint64_t cb_id,
     const char *const *names,
+    const char *const *symbols,
     const uint64_t *gpu_ns,
     const uint32_t *counts,
     uint32_t op_count)
 {
-    /* upper bound: 8 (cb_id) + 4 (op_count) + op_count * (4 + 1024 + 4 + 8 + 4)
-       Names are bounded in practice by MLX primitive names (~30 chars), but
-       cap each at 1024 for safety to keep buffer size sane. The extra 4 bytes
-       per op are the V2 symbol_len sentinel (Task 4 will wire real symbols). */
+    /* per-op upper bound: 4 (name_len) + 1024 (name) + 4 (symbol_len) +
+       1024 (symbol) + 8 (gpu_ns) + 4 (count). Names/symbols are bounded
+       in practice by MLX primitive/kernel names (~30 / ~80 chars), but
+       cap each at 1024 for safety to keep buffer size sane. */
     size_t cap = 16;
     for (uint32_t i = 0; i < op_count; i++) {
         size_t nl = names[i] ? strlen(names[i]) : 0;
         if (nl > 1024) nl = 1024;
-        cap += 4 + nl + 4 + 8 + 4;  /* name_len + name + symbol_len_sentinel + gpu_ns + count */
+        size_t sl = 0;
+        if (symbols != NULL && symbols[i] != NULL) {
+            sl = strlen(symbols[i]);
+            if (sl > 1024) sl = 1024;
+        }
+        cap += 4 + nl + 4 + sl + 8 + 4;
     }
     uint8_t *buf = (uint8_t *)malloc(cap);
     if (!buf) return;
@@ -240,7 +246,17 @@ void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
         uint32_t nl32 = (uint32_t)nl;
         BUF_PUSH_U32(buf, off, nl32);
         memcpy(buf + off, name, nl); off += nl;
-        BUF_PUSH_U32(buf, off, SMELTR_CB_OPS_SYMBOL_LEN_NONE);  /* no symbol yet; Task 4 wires this */
+
+        if (symbols != NULL && symbols[i] != NULL) {
+            size_t sl = strlen(symbols[i]);
+            if (sl > 1024) sl = 1024;
+            uint32_t sl32 = (uint32_t)sl;
+            BUF_PUSH_U32(buf, off, sl32);
+            memcpy(buf + off, symbols[i], sl); off += sl;
+        } else {
+            BUF_PUSH_U32(buf, off, SMELTR_CB_OPS_SYMBOL_LEN_NONE);
+        }
+
         BUF_PUSH_U64(buf, off, gpu_ns[i]);
         BUF_PUSH_U32(buf, off, counts[i]);
     }

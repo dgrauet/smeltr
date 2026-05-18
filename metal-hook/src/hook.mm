@@ -818,7 +818,9 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
         i++;
     }
     smeltr_write_cb_ops(g_ring, smeltr_mono_ns(), cb_id,
-                        (const char *const *)names_buf, gpu_ns_arr, counts, n);
+                        (const char *const *)names_buf,
+                        NULL,  /* symbols — wired in Task 8 */
+                        gpu_ns_arr, counts, n);
     for (uint32_t k = 0; k < n; k++) free(names_buf[k]);
     free(names_buf);
     free(gpu_ns_arr);
