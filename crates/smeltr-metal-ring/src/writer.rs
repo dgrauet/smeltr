@@ -332,7 +332,7 @@ pub unsafe extern "C" fn smeltr_write_device_mem_sample(
         return;
     }
     let writer = &mut *r;
-    let evt = if at_event.is_null() {
+    let evt_full = if at_event.is_null() {
         ""
     } else {
         match std::ffi::CStr::from_ptr(at_event).to_str() {
@@ -340,5 +340,12 @@ pub unsafe extern "C" fn smeltr_write_device_mem_sample(
             Err(_) => return,
         }
     };
+    // Mirror the C writer's 64-byte sanity cap (see metal-hook/src/ring.c).
+    // Truncate at a char boundary to keep UTF-8 valid.
+    let mut end = evt_full.len().min(64);
+    while end > 0 && !evt_full.is_char_boundary(end) {
+        end -= 1;
+    }
+    let evt = &evt_full[..end];
     let _ = writer.write_device_mem_sample(ts, allocated_bytes, recommended_max_bytes, evt);
 }
