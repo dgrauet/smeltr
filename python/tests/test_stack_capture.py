@@ -8,8 +8,8 @@ from unittest.mock import patch
 from smeltr._mlx import _capture_stack
 
 
-def test_capture_returns_empty_when_env_unset():
-    os.environ.pop("SMELTR_STACK_CAPTURE", None)
+def test_capture_returns_empty_when_env_unset(monkeypatch):
+    monkeypatch.delenv("SMELTR_STACK_CAPTURE", raising=False)
     assert _capture_stack() == []
 
 

@@ -20,7 +20,7 @@ _STACK_CAPTURE_DEPTH = 3  # top N non-smeltr frames
 # Directory prefix of the smeltr sidecar package; frames inside this prefix
 # are skipped during stack capture so callers see their own code, not the
 # sidecar's wrappers.
-_SMELTR_PKG_DIR = os.path.dirname(os.path.abspath(__file__)) + os.sep
+_SMELTR_PKG_DIR = os.path.realpath(os.path.dirname(os.path.abspath(__file__))) + os.sep
 
 
 def _stack_capture_enabled() -> bool:
@@ -45,7 +45,7 @@ def _capture_stack(depth: int = _STACK_CAPTURE_DEPTH) -> list[dict]:
         return out
     while frame is not None and len(out) < depth:
         filename = frame.f_code.co_filename
-        if not filename.startswith(_SMELTR_PKG_DIR):
+        if not os.path.realpath(filename).startswith(_SMELTR_PKG_DIR):
             out.append(
                 {
                     "filename": filename,
