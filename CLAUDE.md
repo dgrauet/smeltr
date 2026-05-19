@@ -54,6 +54,11 @@ Project: Metal/MLX observability tool for macOS Apple Silicon.
   `pub fn run(...) -> anyhow::Result<()>` + `pub(crate) fn render(...) -> String` (testable
   without a child process), register `pub mod` in `commands/mod.rs`, add `Cmd::Xxx` variant +
   sync dispatch arm in `main.rs`.
+- **Routing for sidecar events**: Python sidecar events are routed by `scope_token`
+  (env-stamped UUID) first, then PID, then ambient. Any new client emitting via
+  the daemon socket should pass `scope_token` from `SMELTR_SCOPE_TOKEN` if set,
+  or routing will fall back to PID match (which breaks under `uv`/`poetry`
+  launchers — see #31).
 
 ## Build
 
@@ -102,6 +107,12 @@ CBOR length-prefixed frames over a Unix socket. See
   record one dispatch per network. Emits `K_MLNet_<encoder_addr>` in the
   op breakdown. `setPipelineState:` is deliberately NOT swizzled (Apple's
   ML proxy machinery crashes if it is).
+- `SMELTR_SCOPE_TOKEN` — UUID stamped by `smeltr record` into the child env. The
+  Python sidecar reads it at `attach()` and tags every Emit so the daemon
+  routes the event to the correct scoped session even when the recorded
+  command is a launcher (`uv run`, `poetry run`, `python -m foo`, shell
+  wrapper) and the grandchild PID differs from the spawned child PID.
+  Internal plumbing — not for end-user manual override.
 - `SMELTR_SESSION_NAME` — user-facing session name (validated: cap 200, no NUL/control/`/`);
   surfaced by `list_sessions` and accepted as an alias by every CLI/MCP session arg via
   `smeltr_mcp::types::resolve_session`.
