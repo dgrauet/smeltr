@@ -113,13 +113,29 @@ fn fmt_delta(ns: i64, pct: Option<f64>) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
         let mut out = s.chars().take(max - 1).collect::<String>();
         out.push('…');
         out
     }
+}
+
+#[cfg(test)]
+#[test]
+fn truncate_counts_chars_not_bytes() {
+    // 50 ASCII chars (50 bytes) — fits, untouched.
+    let ascii = "a".repeat(50);
+    assert_eq!(truncate(&ascii, 50), ascii);
+    // 49 chars including a multibyte one (>49 bytes) — must still fit.
+    let multi = format!("{}é", "a".repeat(48));
+    assert_eq!(truncate(&multi, 50), multi);
+    // 51 chars — must truncate to 49 chars + ellipsis = 50.
+    let long = "a".repeat(51);
+    let out = truncate(&long, 50);
+    assert_eq!(out.chars().count(), 50);
+    assert!(out.ends_with('…'));
 }
 
 #[cfg(test)]
