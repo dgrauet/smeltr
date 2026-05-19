@@ -207,6 +207,7 @@ mod tests {
                     array_count: 1,
                     stream: "gpu".into(),
                     module_stack: vec![1],
+                    stack_frames: vec![],
                 },
             ),
             ev(

@@ -51,6 +51,7 @@ fn user_scope_appears_as_qualname_in_breakdown_tree() {
                 array_count: 1,
                 stream: "gpu".into(),
                 module_stack: vec![1],
+                stack_frames: vec![],
             },
         ),
         ev(

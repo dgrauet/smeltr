@@ -410,6 +410,7 @@ mod tests {
                 array_count: 2,
                 stream: "gpu".into(),
                 module_stack: Vec::new(),
+                stack_frames: vec![],
             },
         ));
         s.ingest(&ev(
@@ -419,6 +420,7 @@ mod tests {
                 array_count: 1,
                 stream: "gpu".into(),
                 module_stack: Vec::new(),
+                stack_frames: vec![],
             },
         ));
         assert_eq!(s.mlx_eval_depth, 2);
