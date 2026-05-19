@@ -284,6 +284,37 @@ response (`scope_deltas`, `op_deltas`, `scopes_only_in_a`,
 All times in seconds; deltas show the sign (`+` slower, `-` faster)
 and percentage (`(n/a)` when the baseline is zero).
 
+### Memory tracking
+
+Per-scope GPU memory usage helps debug
+`kIOGPUCommandBufferCallbackErrorImpactingInteractivity` watchdog
+OOMs by surfacing which scope hit peak memory.
+
+```bash
+smeltr memory ltx2-baseline --top 10
+```
+
+Two sections:
+
+- **SCOPE PEAK MEMORY** — `MTLDevice.currentAllocatedSize` sampled at
+  CB Committed and CB Completed for every kernel dispatch.
+  Aggregated per scope as peak / avg / end / sample count.
+- **HEAP PEAK** — for each scope, the maximum number of live
+  `MTLHeap` objects (and their total `size_bytes`) seen during the
+  scope window. Derived from `MetalHeapAlloc/Free` events.
+
+The MCP `get_memory_breakdown` tool returns the same two arrays.
+
+Memory comparison: `smeltr compare` and the MCP `compare_sessions`
+tool now include a `MEMORY DELTAS` section / `memory_deltas` field
+showing per-scope peak deltas — useful for confirming an
+optimization reduced peak memory (or that a regression bumped it).
+
+**Limitations:** v1 walks events single-threaded (no per-tid
+attribution). MLX is typically single-thread on the producer side so
+this matches real workloads. Multi-thread cases may misattribute
+samples to the wrong scope.
+
 ## Typical workflow
 
 ```
