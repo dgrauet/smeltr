@@ -8,6 +8,7 @@ pub async fn run(label: String) -> anyhow::Result<()> {
         .request(ClientToDaemon::Emit {
             source: Source::Mark,
             pid: Some(std::process::id()),
+            scope_token: None,
             payload: Payload::Mark { label },
         })
         .await?;

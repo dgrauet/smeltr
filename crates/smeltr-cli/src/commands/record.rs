@@ -154,7 +154,11 @@ pub async fn run(
         .chain(args.iter().cloned())
         .collect();
     let resp = client
-        .request(ClientToDaemon::AttachScopedProbes { pid, argv })
+        .request(ClientToDaemon::AttachScopedProbes {
+            pid,
+            argv,
+            scope_token: None,
+        })
         .await?;
     if !matches!(resp, DaemonToClient::Ack) {
         let _ = child.kill();

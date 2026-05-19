@@ -18,6 +18,8 @@ pub enum ClientToDaemon {
     Emit {
         source: smeltr_core::event::Source,
         pid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_token: Option<String>,
         payload: smeltr_core::event::Payload,
     },
     /// Request a list of session directory names (basename only).
@@ -33,6 +35,8 @@ pub enum ClientToDaemon {
         pid: u32,
         #[serde(default)]
         argv: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_token: Option<String>,
     },
     /// Detach scoped probes for the given PID and emit a final marker.
     DetachScopedProbes { pid: u32, exit_code: Option<i32> },
@@ -93,7 +97,7 @@ mod tests {
         };
         let decoded: ClientToDaemon = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
         match decoded {
-            ClientToDaemon::AttachScopedProbes { pid, argv } => {
+            ClientToDaemon::AttachScopedProbes { pid, argv, .. } => {
                 assert_eq!(pid, 4242);
                 assert!(argv.is_empty());
             }
@@ -106,6 +110,7 @@ mod tests {
         let msg = ClientToDaemon::AttachScopedProbes {
             pid: 4242,
             argv: vec!["python".into(), "script.py".into()],
+            scope_token: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();
@@ -160,5 +165,78 @@ mod tests {
         write_frame(&mut buf, &m).unwrap();
         let back: DaemonToClient = read_frame(&mut &buf[..]).unwrap().unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn emit_decodes_legacy_without_scope_token() {
+        // Old client sent Emit without scope_token. Payload uses `tag = "kind"`.
+        let legacy_cbor = {
+            use ciborium::value::Value;
+            let msg = Value::Map(vec![
+                (Value::Text("op".into()), Value::Text("Emit".into())),
+                (Value::Text("source".into()), Value::Text("Mark".into())),
+                (Value::Text("pid".into()), Value::Integer(4242_i64.into())),
+                (
+                    Value::Text("payload".into()),
+                    Value::Map(vec![
+                        (Value::Text("kind".into()), Value::Text("Mark".into())),
+                        (Value::Text("label".into()), Value::Text("x".into())),
+                    ]),
+                ),
+            ]);
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&msg, &mut buf).unwrap();
+            buf
+        };
+        let decoded: ClientToDaemon = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        match decoded {
+            ClientToDaemon::Emit { scope_token, .. } => assert!(scope_token.is_none()),
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_roundtrips_with_scope_token() {
+        let msg = ClientToDaemon::Emit {
+            source: smeltr_core::event::Source::Mark,
+            pid: Some(7),
+            scope_token: Some("tok-abc".into()),
+            payload: smeltr_core::event::Payload::Mark { label: "y".into() },
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: ClientToDaemon = read_frame(&mut &buf[..]).unwrap().unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn attach_scoped_probes_decodes_legacy_without_scope_token() {
+        let legacy_cbor = {
+            use ciborium::value::Value;
+            let msg = Value::Map(vec![
+                (
+                    Value::Text("op".into()),
+                    Value::Text("AttachScopedProbes".into()),
+                ),
+                (Value::Text("pid".into()), Value::Integer(9001_i64.into())),
+                (
+                    Value::Text("argv".into()),
+                    Value::Array(vec![
+                        Value::Text("python".into()),
+                        Value::Text("x.py".into()),
+                    ]),
+                ),
+            ]);
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&msg, &mut buf).unwrap();
+            buf
+        };
+        let decoded: ClientToDaemon = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        match decoded {
+            ClientToDaemon::AttachScopedProbes { scope_token, .. } => {
+                assert!(scope_token.is_none())
+            }
+            other => panic!("expected AttachScopedProbes, got {other:?}"),
+        }
     }
 }
