@@ -67,12 +67,13 @@ impl SessionRouter {
         pid: u32,
         argv: Vec<String>,
         scope_token: Option<String>,
+        name: Option<String>,
     ) -> std::io::Result<SessionId> {
         let new = Arc::new(ActiveSession::open_scoped(
             pid,
             argv,
             scope_token.clone(),
-            None, // name (Task 3 will replace)
+            name,
             self.flight_recorder.clone(),
             self.bus.clone(),
         )?);
@@ -86,8 +87,6 @@ impl SessionRouter {
             self.by_token.lock().unwrap().insert(t.clone(), new.clone());
         }
         if let Some(prev) = prev_pid {
-            // If we just superseded a previous scoped session with a different
-            // token, evict its token entry too.
             if let Some(prev_tok) = prev.scope_token() {
                 let mut g = self.by_token.lock().unwrap();
                 if g.get(prev_tok).map(|s| s.id()) == Some(prev.id()) {
@@ -183,7 +182,7 @@ mod tests {
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
         let scoped_id = r
-            .attach_scoped(42, vec!["py".into(), "x".into()], None)
+            .attach_scoped(42, vec!["py".into(), "x".into()], None, None)
             .unwrap();
         r.append(
             Source::Mark,
@@ -265,8 +264,8 @@ mod tests {
         let _h = temp_home();
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
-        let _id1 = r.attach_scoped(7, vec!["a".into()], None).unwrap();
-        let id2 = r.attach_scoped(7, vec!["b".into()], None).unwrap();
+        let _id1 = r.attach_scoped(7, vec!["a".into()], None, None).unwrap();
+        let id2 = r.attach_scoped(7, vec!["b".into()], None, None).unwrap();
         // Append goes to the SECOND scoped session.
         r.append(
             Source::Mark,
@@ -306,7 +305,7 @@ mod tests {
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
         let scoped_id = r
-            .attach_scoped(42, vec!["py".into()], Some("TOK".into()))
+            .attach_scoped(42, vec!["py".into()], Some("TOK".into()), None)
             .unwrap();
         r.append(
             Source::Mark,
@@ -345,7 +344,7 @@ mod tests {
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
         let scoped_id = r
-            .attach_scoped(42, vec!["uv".into()], Some("TOK".into()))
+            .attach_scoped(42, vec!["uv".into()], Some("TOK".into()), None)
             .unwrap();
         r.append(
             Source::Mark,
@@ -383,7 +382,7 @@ mod tests {
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
         let scoped_id = r
-            .attach_scoped(42, vec!["py".into()], Some("TOK".into()))
+            .attach_scoped(42, vec!["py".into()], Some("TOK".into()), None)
             .unwrap();
         // Emit without a token - must fall back to PID match.
         r.append(
@@ -443,7 +442,7 @@ mod tests {
         let _h = temp_home();
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
-        r.attach_scoped(42, vec!["py".into()], Some("TOK".into()))
+        r.attach_scoped(42, vec!["py".into()], Some("TOK".into()), None)
             .unwrap();
         r.detach_scoped(42, Some(0));
         // After detach, emits with the token must fall back to ambient.
@@ -474,5 +473,35 @@ mod tests {
             in_ambient,
             "post-detach Mark must land in ambient (both maps evicted)"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn attach_scoped_with_name_persists_in_metadata() {
+        let _h = temp_home();
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let r = SessionRouter::new(ambient.clone(), None, None);
+        let scoped_id = r
+            .attach_scoped(
+                42,
+                vec!["py".into()],
+                Some("TOK".into()),
+                Some("named-run".into()),
+            )
+            .unwrap();
+        r.detach_scoped(42, Some(0));
+        ambient.finalize(Some(0), "test").unwrap();
+
+        let dirs = list_sessions().unwrap();
+        let mut found = false;
+        for d in &dirs {
+            let meta = read_metadata(d).unwrap();
+            if meta.session_id == scoped_id {
+                assert_eq!(meta.name.as_deref(), Some("named-run"));
+                found = true;
+            }
+        }
+        assert!(found);
     }
 }

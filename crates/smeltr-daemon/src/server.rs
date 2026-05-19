@@ -215,7 +215,7 @@ async fn handle_msg(
             name: _,
         } => {
             probe_runtime.attach_scoped(pid).await;
-            if let Err(e) = router.attach_scoped(pid, argv, scope_token) {
+            if let Err(e) = router.attach_scoped(pid, argv, scope_token, None) {
                 tracing::warn!(error = %e, pid = pid, "failed to open scoped session");
             }
             DaemonToClient::Ack
