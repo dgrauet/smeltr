@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define SMELTR_RING_MAGIC   0x534D4C52u   /* "SMLR" */
-#define SMELTR_RING_VERSION 2u
+#define SMELTR_RING_VERSION 3u
 
 #define SMELTR_KIND_PAD            0u
 #define SMELTR_KIND_CB_COMMITTED   1u
@@ -22,6 +22,7 @@
 #define SMELTR_KIND_DROPPED        11u
 #define SMELTR_KIND_SKIPPED        12u
 #define SMELTR_KIND_CB_OPS         13u
+#define SMELTR_KIND_DEVICE_MEM_SAMPLE 14u
 
 /* Sentinel for the per-op symbol_len field in CB_OPS frames: no symbol present. */
 #define SMELTR_CB_OPS_SYMBOL_LEN_NONE 0xFFFFFFFFu

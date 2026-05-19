@@ -297,4 +297,18 @@ impl RingWriter {
         }
         self.write_frame(kind::CB_OPS, ts, &p)
     }
+    pub fn write_device_mem_sample(
+        &mut self,
+        ts: u64,
+        allocated_bytes: u64,
+        recommended_max_bytes: u64,
+        at_event: &str,
+    ) -> Result<(), RingError> {
+        let mut p = Vec::new();
+        push_u64(&mut p, allocated_bytes);
+        push_u64(&mut p, recommended_max_bytes);
+        push_u32(&mut p, at_event.len() as u32);
+        p.extend_from_slice(at_event.as_bytes());
+        self.write_frame(kind::DEVICE_MEM_SAMPLE, ts, &p)
+    }
 }

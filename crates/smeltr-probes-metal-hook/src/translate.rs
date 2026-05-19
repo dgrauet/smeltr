@@ -87,6 +87,15 @@ pub fn frame_to_payload(f: DecodedFrame) -> Payload {
                 })
                 .collect(),
         },
+        DecodedFrame::DeviceMemSample {
+            allocated_bytes,
+            recommended_max_bytes,
+            at_event,
+        } => Payload::MetalDeviceMemSample {
+            allocated_bytes,
+            recommended_max_bytes,
+            at_event,
+        },
         DecodedFrame::Dropped { count } => Payload::MetalHookDropped { count },
         DecodedFrame::Skipped { reason } => Payload::MetalHookSkipped { reason },
     }
