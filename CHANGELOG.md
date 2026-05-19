@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-19
+
+Closes #19 — Python-driven profiling enablement. All 7 gaps from the original issue shipped.
+
+### Added
+
+- **Python scopes** (#20) — `smeltr.scope("name")` context manager + decorator for semantic GPU-time attribution. Piggy-backs on existing `mlx.nn.Module` plumbing; zero Rust-side changes.
+- **Symbolic kernel names** (#21) — `OpSample.symbol` (e.g. `gemm_t_n_bf16_64_64_32`) captured at PSO creation via `MTLDevice newComputePipelineStateWithFunction:`; analyzer `op_kinds::resolve_kind` maps to canonical names (`Matmul`, `ScaledDotProductAttention`, …).
+- **Session naming** (#22) — `SMELTR_SESSION_NAME` env var + `smeltr record --name <NAME>` CLI flag; accepted as an alias by every CLI/MCP session arg (most-recent-wins on collision).
+- **Structured export** (#23) — `smeltr.export()` (Python), `smeltr export` (CLI), `export_session` (MCP) producing chrome-trace JSON (chrome://tracing / Perfetto / Speedscope) or raw JSON. 3 swimlanes: Python scopes, Metal CBs, Kernels.
+- **Semantic compare diff** (#24) — `compare_sessions` MCP tool + `smeltr compare` CLI surface scope deltas, op-kind deltas, scopes-only-in-A/B.
+- **Metal memory tracking** (#25) — `MTLDevice.currentAllocatedSize` sampled at every CB committed/completed; new `Payload::MetalDeviceMemSample`, analyzer `memory.rs`, `get_memory_breakdown` MCP tool, `smeltr memory` CLI, `memory_deltas` in `compare_sessions`. Useful for debugging watchdog OOMs.
+- **Python dispatch origins** (#26) — `SMELTR_STACK_CAPTURE=1` opt-in; captures top 3 non-smeltr Python frames at each `mx.eval`. New `MlxEvalEntered.stack_frames`, analyzer `dispatch_origins.rs`, `get_dispatch_origins` MCP tool, `smeltr origins` CLI, `origin_deltas` in `compare_sessions`. Reveals "this Matmul came from `attention.py:127`".
+
+### Documentation
+
+- `CLAUDE.md` (#27): patterns rediscovered across the 7 PRs (additive serde, ring wire format coordination, session resolver, MCP/CLI registration patterns, CI gotchas).
+- `docs/usage.md` (#28): per-feature subsections + MCP tool catalog + worked agent workflow.
+- MCP server `with_instructions` (#28): expanded from one sentence to a full tool taxonomy.
+
+### Internal
+
+- Ring `RING_VERSION` bumped 1 → 2 (#21 symbolic kernel names) → 3 (#25 device memory samples).
+- `compare_sessions` `Response` now has 4 additive vec fields (`scope_deltas`, `op_deltas`, `memory_deltas`, `origin_deltas`) — backward-compat via `#[serde(default, skip_serializing_if = "Vec::is_empty")]`.
+
 ## [0.2.0] - 2026-05-17
 
 ### Added
