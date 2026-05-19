@@ -157,8 +157,23 @@ impl ServerHandler for SmeltrMcpServer {
         )
         .with_server_info(Implementation::new("smeltr-mcp", env!("CARGO_PKG_VERSION")))
         .with_instructions(
-            "smeltr MCP server: query recorded sessions, crash reports, \
-             Metal command-buffer history, and analyzer findings.",
+            "smeltr MCP server: query Metal/MLX observability sessions on macOS Apple Silicon.\n\
+             \n\
+             Typical workflow: (1) `list_sessions` to find sessions; (2) `get_session_summary` \
+             for a quick overview; (3) drill in with `get_inference_breakdown` (per-scope GPU \
+             time tree), `get_op_summary` (flat ops by kind), `get_memory_breakdown` (per-scope \
+             peak/avg/end + heap), or `get_dispatch_origins` (per file:line attribution, requires \
+             SMELTR_STACK_CAPTURE=1 at record time); (4) `compare_sessions` for A/B regression \
+             analysis across scopes/ops/memory/origins; (5) `export_session` to dump chrome-trace \
+             JSON openable in chrome://tracing, Perfetto, or Speedscope.\n\
+             \n\
+             For raw access: `query_events` (filtered event stream), `get_metal_cb_history` \
+             (Metal command-buffer events), `get_crash_report` (crash dumps), `find_correlations` \
+             (deterministic analyzer findings).\n\
+             \n\
+             Session refs accept short id (8 hex), full UUID, or SessionMetadata.name. Sessions \
+             are recorded via `smeltr record -- <cmd>`; the optional Python sidecar adds \
+             `smeltr.scope(\"name\")` for semantic GPU-time attribution.",
         )
     }
 

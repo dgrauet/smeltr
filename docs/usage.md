@@ -385,6 +385,37 @@ From any Claude session, you can then ask things like:
 - "Find correlations around the queue depth peak in session X"
 - "Get the crash report for the last session"
 
+### Tool catalog (for agents)
+
+Every tool accepts a session ref as short id (8 hex), full UUID, or
+`SessionMetadata.name` (see [Naming sessions](#naming-sessions)).
+
+| Tool | Use when | Returns |
+|---|---|---|
+| `list_sessions` | Starting point: enumerate available sessions | short_id, full_id, name, started/ended, exit_code, event_count, root_cause_title |
+| `get_session_summary` | Quick overview of one session | counts, time range, root cause |
+| `query_events` | Raw event stream with filters | events filtered by source, kind, limit |
+| `find_correlations` | Deterministic analyzer findings | Correlated events around anomalies |
+| `get_crash_report` | Session had a crash | parsed crash dumps |
+| `get_metal_cb_history` | Inspect Metal command-buffer activity | CB committed/scheduled/completed events |
+| `get_inference_breakdown` | Per-scope GPU time tree | Hierarchical: scope → child scopes + ops |
+| `get_op_summary` | Flat cross-scope op stats | Aggregated by op `kind` (Matmul, SDPA, …) |
+| `get_memory_breakdown` | Per-scope memory peak/avg/end + heap | `scope_memory`, `heap_memory` arrays |
+| `get_dispatch_origins` | Per-(kind, file:line) attribution | requires `SMELTR_STACK_CAPTURE=1` at record time |
+| `compare_sessions` | A/B regression analysis | `scope_deltas`, `op_deltas`, `memory_deltas`, `origin_deltas`, scopes-only-in-A/B |
+| `export_session` | Dump for external viewer | writes chrome-trace JSON (or raw JSON) to `output_path` |
+
+### Typical agent workflow
+
+For "find the bottleneck in a 30-step CFG denoising loop":
+
+1. `list_sessions` → pick recent session by name or short_id.
+2. `get_inference_breakdown` → identify the top-level scope dominating GPU time (e.g. `denoise.guided_step`).
+3. `get_op_summary` → see which op kinds dominate (e.g. `Matmul` 4.31s, `ScaledDotProductAttention` 1.72s).
+4. `get_dispatch_origins` (if session was recorded with `SMELTR_STACK_CAPTURE=1`) → pin the dominant Matmul to a specific `attention.py:127`.
+5. After implementing an optimization, record a second session, then `compare_sessions` between baseline and optimized → confirm `scope_deltas` / `op_deltas` / `memory_deltas` shifted in the expected direction.
+6. Optionally `export_session --format chrome-trace` and open in chrome://tracing or Perfetto for visual inspection.
+
 ## Files & directories
 
 | Path | Purpose |
