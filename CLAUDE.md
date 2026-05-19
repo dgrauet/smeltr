@@ -23,9 +23,37 @@ Project: Metal/MLX observability tool for macOS Apple Silicon.
 - `#[serial_test::serial]` on env-mutating tests (`SMELTR_HOME` / `SMELTR_SOCKET`).
 - No `unwrap` / `expect` outside `main.rs` and tests.
 - Conventional commits : `<type>(<scope>): <description>` — types `feat`,
-  `fix`, `chore`, `docs`, `test`, `refactor`.
+  `fix`, `chore`, `docs`, `test`, `refactor`, `ci`, `style`, `perf`, `build`, `revert`.
+  (commitlint default config-conventional set; `ci+test:` style multi-type subjects fail.)
+- Python CI runs `ruff format --check` AND `ty check` (Astral type checker, NOT mypy).
+  `ty` does not honor `# type: ignore[...]` — use `cast(T, x)` or fix the type properly.
+  Locally before push: `cd python && .venv/bin/ruff format .`
 - New workspace members are added to root `Cargo.toml` ONLY when the
   directory exists.
+
+## Adding features
+
+- **Additive schema fields**: use `#[serde(default, skip_serializing_if = "Option::is_none")]`
+  (or `Vec::is_empty`) so pre-existing sessions decode cleanly. Required pattern; see
+  `OpSample.symbol`, `SessionMetadata.name`, `MlxEvalEntered.stack_frames`.
+- **Adding a `Payload` variant**: `cargo build --workspace --tests 2>&1 | grep "error\["` lists
+  every literal-construction site that needs the new field. Rust requires explicit fields on
+  literal construction even when `#[serde(default)]` is set on the type.
+- **Ring wire format change**: bump `RING_VERSION` in BOTH `crates/smeltr-metal-ring/src/wire.rs`
+  AND `crates/smeltr-metal-ring/include/smeltr_ring.h` — `header_matches` parity test enforces.
+  Update BOTH `metal-hook/src/ring.c` (C writer used by the dylib) AND
+  `crates/smeltr-metal-ring/src/writer.rs` (Rust writer used by the daemon) — independent
+  implementations of the same byte layout.
+- **Session ref resolution**: `smeltr_mcp::types::resolve_session(arg)` accepts short id (8 hex
+  suffix), full UUID, or `SessionMetadata.name` (most-recent-wins on collision). Use it in every
+  new tool that takes a session.
+- **New MCP tool**: file in `crates/smeltr-mcp/src/tools/<name>.rs` with `Params`/`Response`/`run`,
+  register `pub mod` in `tools.rs`, add dispatch arm in `server.rs::call_tool` AND a
+  `tool::<Params>(...)` entry in `list_tools()`.
+- **New CLI subcommand**: file in `crates/smeltr-cli/src/commands/<name>.rs` with
+  `pub fn run(...) -> anyhow::Result<()>` + `pub(crate) fn render(...) -> String` (testable
+  without a child process), register `pub mod` in `commands/mod.rs`, add `Cmd::Xxx` variant +
+  sync dispatch arm in `main.rs`.
 
 ## Build
 
@@ -74,3 +102,9 @@ CBOR length-prefixed frames over a Unix socket. See
   record one dispatch per network. Emits `K_MLNet_<encoder_addr>` in the
   op breakdown. `setPipelineState:` is deliberately NOT swizzled (Apple's
   ML proxy machinery crashes if it is).
+- `SMELTR_SESSION_NAME` — user-facing session name (validated: cap 200, no NUL/control/`/`);
+  surfaced by `list_sessions` and accepted as an alias by every CLI/MCP session arg via
+  `smeltr_mcp::types::resolve_session`.
+- `SMELTR_STACK_CAPTURE=1` — opt-in: capture top 3 Python frames at each `mx.eval`
+  (~1-5 µs/eval). Fills `MlxEvalEntered.stack_frames`; consumed by `smeltr origins` /
+  `get_dispatch_origins`.
