@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/dgrauet/smeltr/compare/v0.3.0...v0.3.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* **release-please:** switch to simple type to handle Cargo workspace inheritance ([#30](https://github.com/dgrauet/smeltr/issues/30)) ([5d2b32c](https://github.com/dgrauet/smeltr/commit/5d2b32cd29cdf6883e41639a9cfe1a045ff5ed5d))
+
 ## [Unreleased]
 
 ## [0.3.0] - 2026-05-19
@@ -147,4 +154,3 @@ Closes #19 — Python-driven profiling enablement. All 7 gaps from the original 
 [Unreleased]: https://github.com/dgrauet/smeltr/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/dgrauet/smeltr/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dgrauet/smeltr/releases/tag/v0.1.0
-
