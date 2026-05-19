@@ -1,5 +1,14 @@
 name: release-please
 
+# Why "simple" release-type (release-please-config.json):
+#   release-please-rust @v4 auto-scans workspace members and tries to bump
+#   each crate's [package].version. Our crates inherit via
+#   `version.workspace = true`, which is a TOML table, not a tagged scalar
+#   — the rust strategy errors with "value at path package.version is not
+#   tagged". Switching to "simple" + an explicit toml jsonpath at
+#   $.workspace.package.version on the root Cargo.toml bumps the
+#   single source of truth; crate Cargo.tomls are untouched.
+
 on:
   push:
     branches: [main]
