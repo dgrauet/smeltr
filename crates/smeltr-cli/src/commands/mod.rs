@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod export;
 pub mod mark;
 pub mod mcp;
+pub mod memory;
 pub mod record;
 pub mod sessions;
 pub mod tui;
