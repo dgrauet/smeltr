@@ -97,6 +97,7 @@ fn payload_kind(e: &Event) -> &'static str {
         Payload::MetalCbCompleted { .. } => "MetalCbCompleted",
         Payload::MetalCbWarning { .. } => "MetalCbWarning",
         Payload::MetalHeapAlloc { .. } => "MetalHeapAlloc",
+        Payload::MetalDeviceMemSample { .. } => "MetalDeviceMemSample",
         Payload::MetalHeapFree { .. } => "MetalHeapFree",
         Payload::MetalBufferAlloc { .. } => "MetalBufferAlloc",
         Payload::MetalBufferFree { .. } => "MetalBufferFree",

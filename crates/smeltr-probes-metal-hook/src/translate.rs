@@ -87,6 +87,15 @@ pub fn frame_to_payload(f: DecodedFrame) -> Payload {
                 })
                 .collect(),
         },
+        DecodedFrame::DeviceMemSample {
+            allocated_bytes,
+            recommended_max_bytes,
+            at_event,
+        } => Payload::MetalDeviceMemSample {
+            allocated_bytes,
+            recommended_max_bytes,
+            at_event,
+        },
         DecodedFrame::Dropped { count } => Payload::MetalHookDropped { count },
         DecodedFrame::Skipped { reason } => Payload::MetalHookSkipped { reason },
     }
@@ -213,6 +222,27 @@ mod tests {
         match p {
             Payload::MetalCbOps { cb_id: 1, ops } => assert!(ops.is_empty()),
             other => panic!("expected MetalCbOps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn device_mem_sample_translation_preserves_fields() {
+        let p = frame_to_payload(DecodedFrame::DeviceMemSample {
+            allocated_bytes: 1_073_741_824,
+            recommended_max_bytes: 2_147_483_648,
+            at_event: "cb_completed".into(),
+        });
+        match p {
+            Payload::MetalDeviceMemSample {
+                allocated_bytes,
+                recommended_max_bytes,
+                at_event,
+            } => {
+                assert_eq!(allocated_bytes, 1_073_741_824);
+                assert_eq!(recommended_max_bytes, 2_147_483_648);
+                assert_eq!(at_event, "cb_completed");
+            }
+            other => panic!("expected MetalDeviceMemSample, got {other:?}"),
         }
     }
 }

@@ -34,6 +34,15 @@ pub struct OpDelta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryDelta {
+    pub qualname: String,
+    pub a_peak_bytes: u64,
+    pub b_peak_bytes: u64,
+    pub delta_bytes: i64,
+    pub delta_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScopeAggregate {
     pub qualname: String,
     pub gpu_ns: u64,
@@ -110,6 +119,34 @@ pub fn diff_sessions(a_events: &[Event], b_events: &[Event]) -> SessionDiff {
         scopes_only_in_a,
         scopes_only_in_b,
     }
+}
+
+/// Diff per-scope peak GPU memory between two sessions. Returns entries
+/// present in BOTH sessions, sorted by `|delta_bytes|` desc.
+pub fn diff_memory(a_events: &[Event], b_events: &[Event]) -> Vec<MemoryDelta> {
+    use crate::memory::compute_memory_breakdown;
+    let a_map: std::collections::HashMap<String, u64> = compute_memory_breakdown(a_events)
+        .into_iter()
+        .map(|s| (s.qualname, s.peak_bytes))
+        .collect();
+    let b_map: std::collections::HashMap<String, u64> = compute_memory_breakdown(b_events)
+        .into_iter()
+        .map(|s| (s.qualname, s.peak_bytes))
+        .collect();
+    let mut out: Vec<MemoryDelta> = a_map
+        .iter()
+        .filter_map(|(qualname, a_peak)| {
+            b_map.get(qualname).map(|b_peak| MemoryDelta {
+                qualname: qualname.clone(),
+                a_peak_bytes: *a_peak,
+                b_peak_bytes: *b_peak,
+                delta_bytes: *b_peak as i64 - *a_peak as i64,
+                delta_pct: pct(*a_peak, *b_peak),
+            })
+        })
+        .collect();
+    out.sort_by_key(|d| std::cmp::Reverse(d.delta_bytes.unsigned_abs()));
+    out
 }
 
 fn pct(a: u64, b: u64) -> Option<f64> {
@@ -470,5 +507,49 @@ mod tests {
         let a = scoped_session("scope", 100, no_sym);
         let d = diff_sessions(&a, &a);
         assert!(d.op_deltas.iter().any(|o| o.kind == "K_unknown_kernel"));
+    }
+
+    #[test]
+    fn diff_memory_basic() {
+        let mk = |peak: u64| -> Vec<Event> {
+            vec![
+                ev(
+                    1,
+                    1,
+                    Source::PythonSidecar,
+                    Payload::ModuleEntered {
+                        module_call_id: 1,
+                        module_def_id: 0,
+                        qualname: "scope".into(),
+                        class_name: "Scope".into(),
+                        parent_call_id: None,
+                        depth: 0,
+                    },
+                ),
+                ev(
+                    2,
+                    2,
+                    Source::MetalHook,
+                    Payload::MetalDeviceMemSample {
+                        allocated_bytes: peak,
+                        recommended_max_bytes: 16_000_000_000,
+                        at_event: "cb_committed".into(),
+                    },
+                ),
+                ev(
+                    3,
+                    3,
+                    Source::PythonSidecar,
+                    Payload::ModuleReturned { module_call_id: 1 },
+                ),
+            ]
+        };
+        let a = mk(2_000_000_000);
+        let b = mk(1_000_000_000);
+        let d = diff_memory(&a, &b);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].qualname, "scope");
+        assert_eq!(d[0].delta_bytes, -1_000_000_000);
+        assert_eq!(d[0].delta_pct, Some(-50.0));
     }
 }

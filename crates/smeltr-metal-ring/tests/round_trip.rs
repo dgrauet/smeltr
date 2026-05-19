@@ -248,3 +248,28 @@ fn cb_ops_round_trip_with_and_without_symbol() {
         other => panic!("expected CbOps, got {other:?}"),
     }
 }
+
+#[test]
+fn device_mem_sample_round_trip() {
+    let dir = tempdir().unwrap();
+    let path = tmp_ring(dir.path());
+    {
+        let mut w = create_ring(&path, 64 * 1024).unwrap();
+        w.write_device_mem_sample(42, 8_589_934_592, 17_179_869_184, "cb_committed")
+            .unwrap();
+    }
+    let mut r = open_for_read(&path).unwrap();
+    let e = r.next().unwrap().unwrap();
+    match e.frame {
+        DecodedFrame::DeviceMemSample {
+            allocated_bytes,
+            recommended_max_bytes,
+            at_event,
+        } => {
+            assert_eq!(allocated_bytes, 8_589_934_592);
+            assert_eq!(recommended_max_bytes, 17_179_869_184);
+            assert_eq!(at_event, "cb_committed");
+        }
+        other => panic!("expected DeviceMemSample, got {other:?}"),
+    }
+}

@@ -263,3 +263,24 @@ void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
     write_frame(r, SMELTR_KIND_CB_OPS, ts, buf, off);
     free(buf);
 }
+
+void smeltr_write_device_mem_sample(smeltr_ring_t *r, uint64_t ts,
+    uint64_t allocated_bytes,
+    uint64_t recommended_max_bytes,
+    const char *at_event)
+{
+    const char *evt = at_event ? at_event : "";
+    size_t el = strlen(evt);
+    if (el > 64) el = 64; /* sanity cap */
+    size_t cap = 8 + 8 + 4 + el;
+    uint8_t *buf = (uint8_t *)malloc(cap);
+    if (!buf) return;
+    size_t off = 0;
+    BUF_PUSH_U64(buf, off, allocated_bytes);
+    BUF_PUSH_U64(buf, off, recommended_max_bytes);
+    BUF_PUSH_U32(buf, off, (uint32_t)el);
+    memcpy(buf + off, evt, el);
+    off += el;
+    write_frame(r, SMELTR_KIND_DEVICE_MEM_SAMPLE, ts, buf, off);
+    free(buf);
+}

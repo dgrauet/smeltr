@@ -127,6 +127,11 @@ pub enum Payload {
         size_bytes: u64,
         label: Option<String>,
     },
+    MetalDeviceMemSample {
+        allocated_bytes: u64,
+        recommended_max_bytes: u64,
+        at_event: String,
+    },
     MetalHeapFree {
         heap_id: u64,
     },
@@ -775,5 +780,17 @@ mod tests {
         assert_eq!(decoded.symbol, None);
         assert_eq!(decoded.gpu_ns, 99);
         assert_eq!(decoded.count, 3);
+    }
+
+    #[test]
+    fn cbor_round_trip_metal_device_mem_sample() {
+        round_trip(
+            Payload::MetalDeviceMemSample {
+                allocated_bytes: 8_589_934_592,
+                recommended_max_bytes: 17_179_869_184,
+                at_event: "cb_committed".into(),
+            },
+            Source::MetalHook,
+        );
     }
 }

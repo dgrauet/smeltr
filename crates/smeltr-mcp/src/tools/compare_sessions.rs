@@ -2,7 +2,9 @@
 
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
-use smeltr_analyzer::diff::{diff_sessions, OpDelta, ScopeAggregate, ScopeDelta};
+use smeltr_analyzer::diff::{
+    diff_memory, diff_sessions, MemoryDelta, OpDelta, ScopeAggregate, ScopeDelta,
+};
 use smeltr_core::event::{Event, Source};
 use std::collections::HashMap;
 
@@ -25,6 +27,8 @@ pub struct Response {
     pub scopes_only_in_a: Vec<ScopeAggregate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes_only_in_b: Vec<ScopeAggregate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_deltas: Vec<MemoryDelta>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +54,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let duration_diff_ns = b.duration_ns as i64 - a.duration_ns as i64;
     let root_cause_match = a.root_cause_title == b.root_cause_title;
     let diff = diff_sessions(&a_events, &b_events);
+    let memory_deltas = diff_memory(&a_events, &b_events);
     Ok(Response {
         a,
         b,
@@ -62,6 +67,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         op_deltas: diff.op_deltas,
         scopes_only_in_a: diff.scopes_only_in_a,
         scopes_only_in_b: diff.scopes_only_in_b,
+        memory_deltas,
     })
 }
 
@@ -357,5 +363,72 @@ mod tests {
         assert!(!resp.a.session_id.is_empty());
         assert!(!resp.b.session_id.is_empty());
         assert!(resp.delta.event_count_diff.abs() <= 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn compare_includes_memory_deltas() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+
+        let mk = |peak: u64| -> SessionId {
+            let id = SessionId::new();
+            let meta = SessionMetadata::now_starting(id);
+            let mut w = SessionWriter::create(meta).unwrap();
+            let evs = vec![
+                ev(
+                    1,
+                    1,
+                    Source::PythonSidecar,
+                    Payload::ModuleEntered {
+                        module_call_id: 1,
+                        module_def_id: 0,
+                        qualname: "denoise.pass:cond".into(),
+                        class_name: "Scope".into(),
+                        parent_call_id: None,
+                        depth: 0,
+                    },
+                ),
+                ev(
+                    2,
+                    2,
+                    Source::MetalHook,
+                    Payload::MetalDeviceMemSample {
+                        allocated_bytes: peak,
+                        recommended_max_bytes: 16_000_000_000,
+                        at_event: "cb_committed".into(),
+                    },
+                ),
+                ev(
+                    3,
+                    3,
+                    Source::PythonSidecar,
+                    Payload::ModuleReturned { module_call_id: 1 },
+                ),
+            ];
+            for e in &evs {
+                w.write_event(e).unwrap();
+            }
+            w.finalize(Some(0), "ok".into()).unwrap();
+            id
+        };
+
+        let a = mk(2_000_000_000);
+        let b = mk(1_000_000_000);
+        let resp = run(Params {
+            session_a: a.short(),
+            session_b: b.short(),
+        })
+        .unwrap();
+
+        let mem = resp
+            .memory_deltas
+            .iter()
+            .find(|m| m.qualname == "denoise.pass:cond")
+            .expect("memory delta present");
+        assert!(mem.delta_bytes < 0, "B uses less memory");
+        assert_eq!(mem.a_peak_bytes, 2_000_000_000);
+        assert_eq!(mem.b_peak_bytes, 1_000_000_000);
     }
 }

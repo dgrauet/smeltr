@@ -1,7 +1,9 @@
 //! `smeltr compare` subcommand: scope + op-kind deltas between two sessions.
 
 use anyhow::{anyhow, Context};
-use smeltr_analyzer::diff::{diff_sessions, OpDelta, ScopeAggregate, ScopeDelta, SessionDiff};
+use smeltr_analyzer::diff::{
+    diff_memory, diff_sessions, MemoryDelta, OpDelta, ScopeAggregate, ScopeDelta, SessionDiff,
+};
 use smeltr_core::reader::read_events;
 use smeltr_mcp::types::resolve_session;
 
@@ -13,20 +15,76 @@ pub fn run(session_a: &str, session_b: &str, top: usize) -> anyhow::Result<()> {
     let a_events = read_events(&dir_a).context("read A events")?;
     let b_events = read_events(&dir_b).context("read B events")?;
     let diff = diff_sessions(&a_events, &b_events);
-    print!("{}", render(&diff, top));
+    let memory_deltas = diff_memory(&a_events, &b_events);
+    print!("{}", render(&diff, &memory_deltas, top));
     Ok(())
 }
 
-pub(crate) fn render(diff: &SessionDiff, top: usize) -> String {
+pub(crate) fn render(diff: &SessionDiff, memory_deltas: &[MemoryDelta], top: usize) -> String {
     let mut out = String::new();
     render_scope_deltas(&mut out, &diff.scope_deltas, top);
     out.push('\n');
     render_op_deltas(&mut out, &diff.op_deltas, top);
     out.push('\n');
+    render_memory_deltas(&mut out, memory_deltas, top);
+    out.push('\n');
     render_only_section(&mut out, "SCOPES ONLY IN A", &diff.scopes_only_in_a, top);
     out.push('\n');
     render_only_section(&mut out, "SCOPES ONLY IN B", &diff.scopes_only_in_b, top);
     out
+}
+
+fn render_memory_deltas(out: &mut String, rows: &[MemoryDelta], top: usize) {
+    out.push_str(&format!(
+        "{:<48} {:>14} {:>14} {:>16}\n",
+        "MEMORY DELTAS", "A_PEAK", "B_PEAK", "DELTA"
+    ));
+    for r in rows.iter().take(top) {
+        out.push_str(&format!(
+            "{:<48} {:>14} {:>14} {:>16}\n",
+            truncate(&r.qualname, 48),
+            fmt_bytes(r.a_peak_bytes),
+            fmt_bytes(r.b_peak_bytes),
+            fmt_delta_bytes(r.delta_bytes, r.delta_pct),
+        ));
+    }
+    if rows.len() > top {
+        out.push_str(&format!("(showing top {top} of {})\n", rows.len()));
+    }
+    if rows.is_empty() {
+        out.push_str("(no memory deltas)\n");
+    }
+}
+
+fn fmt_bytes(b: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if b >= GB {
+        format!("{:.2} GB", b as f64 / GB as f64)
+    } else if b >= MB {
+        format!("{:.2} MB", b as f64 / MB as f64)
+    } else if b >= KB {
+        format!("{:.2} KB", b as f64 / KB as f64)
+    } else {
+        format!("{b} B")
+    }
+}
+
+fn fmt_delta_bytes(bytes: i64, pct: Option<f64>) -> String {
+    let sign = if bytes < 0 {
+        "-"
+    } else if bytes > 0 {
+        "+"
+    } else {
+        ""
+    };
+    let abs = bytes.unsigned_abs();
+    let formatted = fmt_bytes(abs);
+    match pct {
+        Some(p) => format!("{sign}{formatted} ({p:+.1}%)"),
+        None => format!("{sign}{formatted} (n/a)"),
+    }
 }
 
 fn render_scope_deltas(out: &mut String, rows: &[ScopeDelta], top: usize) {
@@ -154,7 +212,7 @@ mod tests {
 
     #[test]
     fn render_empty_diff_shows_section_titles() {
-        let s = render(&empty_diff(), 20);
+        let s = render(&empty_diff(), &[], 20);
         assert!(s.contains("SCOPE DELTAS"));
         assert!(s.contains("OP KIND DELTAS"));
         assert!(s.contains("SCOPES ONLY IN A"));
@@ -175,7 +233,7 @@ mod tests {
                 delta_pct: Some(0.1),
             })
             .collect();
-        let s = render(&diff, 5);
+        let s = render(&diff, &[], 5);
         assert!(s.contains("showing top 5 of 50"));
     }
 
@@ -189,10 +247,32 @@ mod tests {
             delta_ns: -1_000_000_000,
             delta_pct: Some(-50.0),
         }];
-        let s = render(&diff, 20);
+        let s = render(&diff, &[], 20);
         assert!(s.contains("2.000s"));
         assert!(s.contains("1.000s"));
         assert!(s.contains("-1.000s"));
         assert!(s.contains("-50.0%"));
+    }
+
+    #[test]
+    fn render_includes_memory_deltas() {
+        let memory = vec![MemoryDelta {
+            qualname: "scope".into(),
+            a_peak_bytes: 2_000_000_000,
+            b_peak_bytes: 1_000_000_000,
+            delta_bytes: -1_000_000_000,
+            delta_pct: Some(-50.0),
+        }];
+        let s = render(&empty_diff(), &memory, 20);
+        assert!(s.contains("MEMORY DELTAS"));
+        assert!(s.contains("1.86 GB"));
+        assert!(s.contains("953.67 MB"));
+        assert!(s.contains("-50.0%"));
+    }
+
+    #[test]
+    fn render_empty_memory_shows_placeholder() {
+        let s = render(&empty_diff(), &[], 20);
+        assert!(s.contains("no memory deltas"));
     }
 }

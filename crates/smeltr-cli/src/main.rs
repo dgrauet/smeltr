@@ -97,6 +97,14 @@ enum Cmd {
         #[arg(long, short = 'o')]
         output: Option<String>,
     },
+    /// Per-scope MTLDevice memory peak/avg/end and per-scope live-heap peak.
+    Memory {
+        /// Session reference: short id, full UUID, or name.
+        session: String,
+        /// Cap each section's row count.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+    },
     /// Run the MCP stdio server (used by LLM clients, e.g. Claude Desktop).
     Mcp,
     /// Spawn a child process under smeltr's scoped probes.
@@ -171,6 +179,7 @@ fn main() -> anyhow::Result<()> {
                 format,
                 output,
             } => commands::export::run(&session, &format, output.as_deref()),
+            Cmd::Memory { session, top } => commands::memory::run(&session, top),
             Cmd::Mcp => commands::mcp::run().await,
             Cmd::Record {
                 cmd,

@@ -61,6 +61,11 @@ pub fn dispatch_call(name: &str, args: serde_json::Value) -> Result<serde_json::
             let r = tools::op_summary::run(p)?;
             Ok(serde_json::to_value(r)?)
         }
+        "get_memory_breakdown" => {
+            let p: tools::memory_breakdown::Params = serde_json::from_value(args)?;
+            let r = tools::memory_breakdown::run(p)?;
+            Ok(serde_json::to_value(r)?)
+        }
         other => Err(ToolError::BadArgs(format!("unknown tool {other:?}"))),
     }
 }
@@ -193,6 +198,10 @@ impl ServerHandler for SmeltrMcpServer {
             tool::<crate::tools::op_summary::Params>(
                 "get_op_summary",
                 "Flat cross-module aggregation of GPU time per op kind (Matmul, Softmax, ...).",
+            ),
+            tool::<crate::tools::memory_breakdown::Params>(
+                "get_memory_breakdown",
+                "Per-scope MTLDevice memory peak/avg/end and per-scope live-heap peak (count + bytes).",
             ),
             tool::<crate::tools::export_session::Params>(
                 "export_session",

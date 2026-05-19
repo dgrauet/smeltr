@@ -58,6 +58,7 @@ static id<MTLCounterSet> g_timestamp_counter_set = nil;
 static _Atomic(uint64_t) g_ns_per_tick_bits = 0;
 static dispatch_source_t g_recal_timer = NULL;
 static id<MTLDevice> g_recal_device = nil;
+static id<MTLDevice> g_device = nil;
 static _Atomic(uint64_t) g_recal_rejected_total = 0;
 
 static inline double smeltr_load_ns_per_tick(void) {
@@ -207,6 +208,7 @@ static const uint64_t kSmeltrMLEncoderPsoMarker = 0xFF00000000000000ULL;
 
 /* Forward declaration — defined later, used in smeltr_swizzle_device_class. */
 static void smeltr_emit_metal_hook_skipped(const char *reason);
+static void smeltr_emit_device_mem_sample(const char *at_event);
 
 static BOOL smeltr_trace_enabled(void) {
     static BOOL cached = NO;
@@ -884,6 +886,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
             const char *label_c = label ? [label UTF8String] : NULL;
             smeltr_write_cb_committed(g_ring, commit_ts, cb_id, q_id,
                 new_depth, label_c);
+            smeltr_emit_device_mem_sample("cb_committed");
 
             // Register handlers. Capture ids by value into the blocks (they
             // become __block-stable copies).
@@ -914,6 +917,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                     captured_cb_id, captured_q_id, status,
                     err_present, err_code, domain, in_flight);
                 smeltr_emit_cb_ops_pso(done_cb, captured_cb_id, in_flight);
+                smeltr_emit_device_mem_sample("cb_completed");
                 id<MTLCommandQueue> q2 = [done_cb commandQueue];
                 if (q2) {
                     atomic_fetch_sub_explicit(&queue_depth_of(q2)->value, 1,
@@ -1341,9 +1345,20 @@ static void smeltr_install_heap_suballoc_swizzles(id<MTLHeap> heap) {
     });
 }
 
+static void smeltr_emit_device_mem_sample(const char *at_event) {
+    if (!g_device || !g_ring) return;
+    if (!atomic_load_explicit(&g_enabled, memory_order_relaxed)) return;
+    uint64_t allocated = (uint64_t)[g_device currentAllocatedSize];
+    uint64_t recommended = (uint64_t)[g_device recommendedMaxWorkingSetSize];
+    smeltr_write_device_mem_sample(g_ring, smeltr_mono_ns(),
+                                   allocated, recommended, at_event);
+}
+
 static void smeltr_swizzle_device_class(void) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     if (!d) { smeltr_log("no Metal device available"); return; }
+
+    g_device = d;  // cache for memory sampling
 
     smeltr_pso_map_init();
 

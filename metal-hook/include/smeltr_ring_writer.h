@@ -54,6 +54,15 @@ void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
     const uint32_t *counts,
     uint32_t op_count);
 
+/* MetalDeviceMemSample: sampled MTLDevice memory stats.
+   `at_event` is a non-NULL UTF-8 marker string identifying the
+   sampling site (e.g. "cb_committed", "cb_completed"). Empty if NULL.
+   Caller may pass strings up to 64 bytes; longer values are truncated. */
+void smeltr_write_device_mem_sample(smeltr_ring_t *r, uint64_t ts,
+    uint64_t allocated_bytes,
+    uint64_t recommended_max_bytes,
+    const char *at_event);
+
 #ifdef __cplusplus
 }
 #endif
