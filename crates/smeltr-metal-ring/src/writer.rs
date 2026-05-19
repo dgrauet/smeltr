@@ -312,3 +312,33 @@ impl RingWriter {
         self.write_frame(kind::DEVICE_MEM_SAMPLE, ts, &p)
     }
 }
+
+/// C ABI shim for `RingWriter::write_device_mem_sample`.
+///
+/// # Safety
+/// - `r` must either be NULL or a valid pointer to a `RingWriter`
+///   exclusively borrowed for the duration of the call.
+/// - `at_event`, if non-NULL, must point to a NUL-terminated UTF-8 string
+///   that remains valid for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn smeltr_write_device_mem_sample(
+    r: *mut RingWriter,
+    ts: u64,
+    allocated_bytes: u64,
+    recommended_max_bytes: u64,
+    at_event: *const std::os::raw::c_char,
+) {
+    if r.is_null() {
+        return;
+    }
+    let writer = &mut *r;
+    let evt = if at_event.is_null() {
+        ""
+    } else {
+        match std::ffi::CStr::from_ptr(at_event).to_str() {
+            Ok(s) => s,
+            Err(_) => return,
+        }
+    };
+    let _ = writer.write_device_mem_sample(ts, allocated_bytes, recommended_max_bytes, evt);
+}
