@@ -3,7 +3,7 @@
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::diff::{diff_sessions, OpDelta, ScopeAggregate, ScopeDelta};
-use smeltr_core::event::Source;
+use smeltr_core::event::{Event, Source};
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -44,13 +44,11 @@ pub struct DeltaStats {
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
-    let a = stats(&params.session_a)?;
-    let b = stats(&params.session_b)?;
+    let (a, a_events) = stats(&params.session_a)?;
+    let (b, b_events) = stats(&params.session_b)?;
     let event_count_diff = b.event_count as i64 - a.event_count as i64;
     let duration_diff_ns = b.duration_ns as i64 - a.duration_ns as i64;
     let root_cause_match = a.root_cause_title == b.root_cause_title;
-    let a_events = smeltr_core::reader::read_events(&resolve_session(&params.session_a)?)?;
-    let b_events = smeltr_core::reader::read_events(&resolve_session(&params.session_b)?)?;
     let diff = diff_sessions(&a_events, &b_events);
     Ok(Response {
         a,
@@ -67,9 +65,14 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     })
 }
 
-fn stats(arg: &str) -> Result<SessionStats, ToolError> {
+fn stats(arg: &str) -> Result<(SessionStats, Vec<Event>), ToolError> {
     let dir = resolve_session(arg)?;
     let events = smeltr_core::reader::read_events(&dir)?;
+    let stats = stats_from_events(&dir, &events);
+    Ok((stats, events))
+}
+
+fn stats_from_events(dir: &std::path::Path, events: &[Event]) -> SessionStats {
     let duration_ns = if events.len() < 2 {
         0
     } else {
@@ -80,12 +83,12 @@ fn stats(arg: &str) -> Result<SessionStats, ToolError> {
             .saturating_sub(events.first().unwrap().ts_mono_ns)
     };
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for ev in &events {
+    for ev in events {
         *counts.entry(source_str(&ev.source).into()).or_insert(0) += 1;
     }
-    let report = smeltr_analyzer::analyze(&events);
+    let report = smeltr_analyzer::analyze(events);
     let root_cause_title = report.root_cause().map(|f| f.title.clone());
-    Ok(SessionStats {
+    SessionStats {
         session_id: dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -95,7 +98,7 @@ fn stats(arg: &str) -> Result<SessionStats, ToolError> {
         duration_ns,
         source_counts: counts,
         root_cause_title,
-    })
+    }
 }
 
 fn source_str(s: &Source) -> &'static str {
