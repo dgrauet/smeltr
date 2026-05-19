@@ -72,6 +72,7 @@ impl SessionRouter {
             pid,
             argv,
             scope_token.clone(),
+            None, // name (Task 3 will replace)
             self.flight_recorder.clone(),
             self.bus.clone(),
         )?);
