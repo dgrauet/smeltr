@@ -107,6 +107,15 @@ enum Cmd {
     },
     /// Run the MCP stdio server (used by LLM clients, e.g. Claude Desktop).
     Mcp,
+    /// Per-(kind, file:line) GPU time attribution. Requires sessions
+    /// recorded with SMELTR_STACK_CAPTURE=1.
+    Origins {
+        /// Session reference: short id, full UUID, or name.
+        session: String,
+        /// Cap row count.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+    },
     /// Spawn a child process under smeltr's scoped probes.
     Record {
         /// Command to execute.
@@ -181,6 +190,7 @@ fn main() -> anyhow::Result<()> {
             } => commands::export::run(&session, &format, output.as_deref()),
             Cmd::Memory { session, top } => commands::memory::run(&session, top),
             Cmd::Mcp => commands::mcp::run().await,
+            Cmd::Origins { session, top } => commands::origins::run(&session, top),
             Cmd::Record {
                 cmd,
                 args,
