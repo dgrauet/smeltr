@@ -7,6 +7,7 @@ pub mod export;
 pub mod mark;
 pub mod mcp;
 pub mod memory;
+pub mod origins;
 pub mod record;
 pub mod sessions;
 pub mod tui;

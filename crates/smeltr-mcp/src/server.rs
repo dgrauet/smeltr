@@ -61,6 +61,11 @@ pub fn dispatch_call(name: &str, args: serde_json::Value) -> Result<serde_json::
             let r = tools::op_summary::run(p)?;
             Ok(serde_json::to_value(r)?)
         }
+        "get_dispatch_origins" => {
+            let p: tools::dispatch_origins::Params = serde_json::from_value(args)?;
+            let r = tools::dispatch_origins::run(p)?;
+            Ok(serde_json::to_value(r)?)
+        }
         "get_memory_breakdown" => {
             let p: tools::memory_breakdown::Params = serde_json::from_value(args)?;
             let r = tools::memory_breakdown::run(p)?;
@@ -198,6 +203,10 @@ impl ServerHandler for SmeltrMcpServer {
             tool::<crate::tools::op_summary::Params>(
                 "get_op_summary",
                 "Flat cross-module aggregation of GPU time per op kind (Matmul, Softmax, ...).",
+            ),
+            tool::<crate::tools::dispatch_origins::Params>(
+                "get_dispatch_origins",
+                "Per-(kind, file:line) GPU time attribution. Requires sessions recorded with SMELTR_STACK_CAPTURE=1.",
             ),
             tool::<crate::tools::memory_breakdown::Params>(
                 "get_memory_breakdown",

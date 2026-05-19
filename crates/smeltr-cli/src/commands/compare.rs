@@ -2,7 +2,8 @@
 
 use anyhow::{anyhow, Context};
 use smeltr_analyzer::diff::{
-    diff_memory, diff_sessions, MemoryDelta, OpDelta, ScopeAggregate, ScopeDelta, SessionDiff,
+    diff_memory, diff_origins, diff_sessions, MemoryDelta, OpDelta, OriginDelta, ScopeAggregate,
+    ScopeDelta, SessionDiff,
 };
 use smeltr_core::reader::read_events;
 use smeltr_mcp::types::resolve_session;
@@ -16,11 +17,17 @@ pub fn run(session_a: &str, session_b: &str, top: usize) -> anyhow::Result<()> {
     let b_events = read_events(&dir_b).context("read B events")?;
     let diff = diff_sessions(&a_events, &b_events);
     let memory_deltas = diff_memory(&a_events, &b_events);
-    print!("{}", render(&diff, &memory_deltas, top));
+    let origin_deltas = diff_origins(&a_events, &b_events);
+    print!("{}", render(&diff, &memory_deltas, &origin_deltas, top));
     Ok(())
 }
 
-pub(crate) fn render(diff: &SessionDiff, memory_deltas: &[MemoryDelta], top: usize) -> String {
+pub(crate) fn render(
+    diff: &SessionDiff,
+    memory_deltas: &[MemoryDelta],
+    origin_deltas: &[OriginDelta],
+    top: usize,
+) -> String {
     let mut out = String::new();
     render_scope_deltas(&mut out, &diff.scope_deltas, top);
     out.push('\n');
@@ -28,10 +35,35 @@ pub(crate) fn render(diff: &SessionDiff, memory_deltas: &[MemoryDelta], top: usi
     out.push('\n');
     render_memory_deltas(&mut out, memory_deltas, top);
     out.push('\n');
+    render_origin_deltas(&mut out, origin_deltas, top);
+    out.push('\n');
     render_only_section(&mut out, "SCOPES ONLY IN A", &diff.scopes_only_in_a, top);
     out.push('\n');
     render_only_section(&mut out, "SCOPES ONLY IN B", &diff.scopes_only_in_b, top);
     out
+}
+
+fn render_origin_deltas(out: &mut String, rows: &[OriginDelta], top: usize) {
+    out.push_str(&format!(
+        "{:<24} {:<40} {:>12} {:>12} {:>14}\n",
+        "ORIGIN DELTAS", "FILE:LINE", "A_GPU", "B_GPU", "DELTA"
+    ));
+    for r in rows.iter().take(top) {
+        out.push_str(&format!(
+            "{:<24} {:<40} {:>12} {:>12} {:>14}\n",
+            truncate(&r.kind, 24),
+            truncate(&r.file_line, 40),
+            fmt_secs(r.a_gpu_ns),
+            fmt_secs(r.b_gpu_ns),
+            fmt_delta(r.delta_ns, r.delta_pct),
+        ));
+    }
+    if rows.len() > top {
+        out.push_str(&format!("(showing top {top} of {})\n", rows.len()));
+    }
+    if rows.is_empty() {
+        out.push_str("(no origin deltas)\n");
+    }
 }
 
 fn render_memory_deltas(out: &mut String, rows: &[MemoryDelta], top: usize) {
@@ -212,7 +244,7 @@ mod tests {
 
     #[test]
     fn render_empty_diff_shows_section_titles() {
-        let s = render(&empty_diff(), &[], 20);
+        let s = render(&empty_diff(), &[], &[], 20);
         assert!(s.contains("SCOPE DELTAS"));
         assert!(s.contains("OP KIND DELTAS"));
         assert!(s.contains("SCOPES ONLY IN A"));
@@ -233,7 +265,7 @@ mod tests {
                 delta_pct: Some(0.1),
             })
             .collect();
-        let s = render(&diff, &[], 5);
+        let s = render(&diff, &[], &[], 5);
         assert!(s.contains("showing top 5 of 50"));
     }
 
@@ -247,7 +279,7 @@ mod tests {
             delta_ns: -1_000_000_000,
             delta_pct: Some(-50.0),
         }];
-        let s = render(&diff, &[], 20);
+        let s = render(&diff, &[], &[], 20);
         assert!(s.contains("2.000s"));
         assert!(s.contains("1.000s"));
         assert!(s.contains("-1.000s"));
@@ -263,7 +295,7 @@ mod tests {
             delta_bytes: -1_000_000_000,
             delta_pct: Some(-50.0),
         }];
-        let s = render(&empty_diff(), &memory, 20);
+        let s = render(&empty_diff(), &memory, &[], 20);
         assert!(s.contains("MEMORY DELTAS"));
         assert!(s.contains("1.86 GB"));
         assert!(s.contains("953.67 MB"));
@@ -272,7 +304,25 @@ mod tests {
 
     #[test]
     fn render_empty_memory_shows_placeholder() {
-        let s = render(&empty_diff(), &[], 20);
+        let s = render(&empty_diff(), &[], &[], 20);
         assert!(s.contains("no memory deltas"));
+    }
+
+    #[test]
+    fn render_includes_origin_deltas() {
+        let origins = vec![OriginDelta {
+            kind: "Matmul".into(),
+            file_line: "attention.py:127".into(),
+            a_gpu_ns: 4_310_000_000,
+            b_gpu_ns: 3_920_000_000,
+            delta_ns: -390_000_000,
+            delta_pct: Some(-9.0),
+        }];
+        let s = render(&empty_diff(), &[], &origins, 20);
+        assert!(s.contains("ORIGIN DELTAS"));
+        assert!(s.contains("attention.py:127"));
+        assert!(s.contains("4.310s"));
+        assert!(s.contains("3.920s"));
+        assert!(s.contains("-9.0%"));
     }
 }

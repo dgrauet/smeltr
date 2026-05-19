@@ -149,6 +149,47 @@ pub fn diff_memory(a_events: &[Event], b_events: &[Event]) -> Vec<MemoryDelta> {
     out
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OriginDelta {
+    pub kind: String,
+    pub file_line: String,
+    pub a_gpu_ns: u64,
+    pub b_gpu_ns: u64,
+    pub delta_ns: i64,
+    pub delta_pct: Option<f64>,
+}
+
+/// Diff per-(kind, file:line) GPU time between two sessions. Returns
+/// entries present in BOTH sessions, sorted by `|delta_ns|` desc.
+pub fn diff_origins(a_events: &[Event], b_events: &[Event]) -> Vec<OriginDelta> {
+    use crate::dispatch_origins::compute_dispatch_origins;
+    let a_map: std::collections::HashMap<(String, String), u64> =
+        compute_dispatch_origins(a_events)
+            .into_iter()
+            .map(|o| ((o.kind, o.file_line), o.gpu_ns))
+            .collect();
+    let b_map: std::collections::HashMap<(String, String), u64> =
+        compute_dispatch_origins(b_events)
+            .into_iter()
+            .map(|o| ((o.kind, o.file_line), o.gpu_ns))
+            .collect();
+    let mut out: Vec<OriginDelta> = a_map
+        .iter()
+        .filter_map(|(key, a_gpu)| {
+            b_map.get(key).map(|b_gpu| OriginDelta {
+                kind: key.0.clone(),
+                file_line: key.1.clone(),
+                a_gpu_ns: *a_gpu,
+                b_gpu_ns: *b_gpu,
+                delta_ns: *b_gpu as i64 - *a_gpu as i64,
+                delta_pct: pct(*a_gpu, *b_gpu),
+            })
+        })
+        .collect();
+    out.sort_by_key(|d| std::cmp::Reverse(d.delta_ns.unsigned_abs()));
+    out
+}
+
 fn pct(a: u64, b: u64) -> Option<f64> {
     if a == 0 {
         None
@@ -250,6 +291,7 @@ mod tests {
                     array_count: 1,
                     stream: "gpu".into(),
                     module_stack: vec![1],
+                    stack_frames: vec![],
                 },
             ),
             ev(
@@ -550,6 +592,63 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].qualname, "scope");
         assert_eq!(d[0].delta_bytes, -1_000_000_000);
+        assert_eq!(d[0].delta_pct, Some(-50.0));
+    }
+
+    #[test]
+    fn diff_origins_basic() {
+        use smeltr_core::event::StackFrame;
+        let mk = |gpu: u64| -> Vec<Event> {
+            vec![
+                ev(
+                    1,
+                    10,
+                    Source::PythonSidecar,
+                    Payload::MlxEvalEntered {
+                        call_id: 1,
+                        array_count: 1,
+                        stream: "gpu".into(),
+                        module_stack: vec![],
+                        stack_frames: vec![StackFrame {
+                            filename: "/work/attention.py".into(),
+                            lineno: 127,
+                            funcname: "f".into(),
+                        }],
+                    },
+                ),
+                ev(
+                    2,
+                    15,
+                    Source::MetalHook,
+                    Payload::MetalCbOps {
+                        cb_id: 9,
+                        ops: vec![OpSample {
+                            name: "K_x".into(),
+                            symbol: Some("gemm_bf16".into()),
+                            gpu_ns: gpu,
+                            count: 1,
+                        }],
+                    },
+                ),
+                ev(
+                    3,
+                    20,
+                    Source::PythonSidecar,
+                    Payload::MlxEvalReturned {
+                        call_id: 1,
+                        duration_ns: 10,
+                        was_async: false,
+                    },
+                ),
+            ]
+        };
+        let a = mk(2_000_000_000);
+        let b = mk(1_000_000_000);
+        let d = diff_origins(&a, &b);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, "Matmul");
+        assert_eq!(d[0].file_line, "attention.py:127");
+        assert_eq!(d[0].delta_ns, -1_000_000_000);
         assert_eq!(d[0].delta_pct, Some(-50.0));
     }
 }

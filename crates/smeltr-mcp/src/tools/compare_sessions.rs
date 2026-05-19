@@ -3,7 +3,8 @@
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::diff::{
-    diff_memory, diff_sessions, MemoryDelta, OpDelta, ScopeAggregate, ScopeDelta,
+    diff_memory, diff_origins, diff_sessions, MemoryDelta, OpDelta, OriginDelta, ScopeAggregate,
+    ScopeDelta,
 };
 use smeltr_core::event::{Event, Source};
 use std::collections::HashMap;
@@ -29,6 +30,8 @@ pub struct Response {
     pub scopes_only_in_b: Vec<ScopeAggregate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_deltas: Vec<MemoryDelta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin_deltas: Vec<OriginDelta>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,6 +58,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let root_cause_match = a.root_cause_title == b.root_cause_title;
     let diff = diff_sessions(&a_events, &b_events);
     let memory_deltas = diff_memory(&a_events, &b_events);
+    let origin_deltas = diff_origins(&a_events, &b_events);
     Ok(Response {
         a,
         b,
@@ -68,6 +72,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         scopes_only_in_a: diff.scopes_only_in_a,
         scopes_only_in_b: diff.scopes_only_in_b,
         memory_deltas,
+        origin_deltas,
     })
 }
 
@@ -207,6 +212,7 @@ mod tests {
                     array_count: 1,
                     stream: "gpu".into(),
                     module_stack: vec![1],
+                    stack_frames: vec![],
                 },
             ),
             ev(
@@ -430,5 +436,83 @@ mod tests {
         assert!(mem.delta_bytes < 0, "B uses less memory");
         assert_eq!(mem.a_peak_bytes, 2_000_000_000);
         assert_eq!(mem.b_peak_bytes, 1_000_000_000);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn compare_includes_origin_deltas() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+
+        let mk = |gpu: u64| -> SessionId {
+            let id = SessionId::new();
+            let meta = SessionMetadata::now_starting(id);
+            let mut w = SessionWriter::create(meta).unwrap();
+            let evs = vec![
+                ev(
+                    1,
+                    10,
+                    Source::PythonSidecar,
+                    Payload::MlxEvalEntered {
+                        call_id: 1,
+                        array_count: 1,
+                        stream: "gpu".into(),
+                        module_stack: vec![],
+                        stack_frames: vec![smeltr_core::event::StackFrame {
+                            filename: "/work/attention.py".into(),
+                            lineno: 127,
+                            funcname: "f".into(),
+                        }],
+                    },
+                ),
+                ev(
+                    2,
+                    15,
+                    Source::MetalHook,
+                    Payload::MetalCbOps {
+                        cb_id: 9,
+                        ops: vec![OpSample {
+                            name: "K_x".into(),
+                            symbol: Some("gemm_bf16".into()),
+                            gpu_ns: gpu,
+                            count: 1,
+                        }],
+                    },
+                ),
+                ev(
+                    3,
+                    20,
+                    Source::PythonSidecar,
+                    Payload::MlxEvalReturned {
+                        call_id: 1,
+                        duration_ns: 10,
+                        was_async: false,
+                    },
+                ),
+            ];
+            for e in &evs {
+                w.write_event(e).unwrap();
+            }
+            w.finalize(Some(0), "ok".into()).unwrap();
+            id
+        };
+
+        let a = mk(2_000_000_000);
+        let b = mk(1_000_000_000);
+        let resp = run(Params {
+            session_a: a.short(),
+            session_b: b.short(),
+        })
+        .unwrap();
+
+        let origin = resp
+            .origin_deltas
+            .iter()
+            .find(|o| o.kind == "Matmul" && o.file_line == "attention.py:127")
+            .expect("origin delta present");
+        assert!(origin.delta_ns < 0);
+        assert_eq!(origin.a_gpu_ns, 2_000_000_000);
+        assert_eq!(origin.b_gpu_ns, 1_000_000_000);
     }
 }

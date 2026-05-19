@@ -85,6 +85,7 @@ mod tests {
                     array_count: 3,
                     stream: "gpu".into(),
                     module_stack: Vec::new(),
+                    stack_frames: vec![],
                 },
             ),
             ev(

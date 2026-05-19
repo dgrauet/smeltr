@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import weakref
 from typing import Any
@@ -11,6 +13,48 @@ from smeltr._api import _detect_mlx_version, _emit, _require_attached  # type: i
 # array_id -> (size_bytes, dtype, shape, stream)
 _tracked: dict[int, tuple[int, str, list[int], str]] = {}
 _tracked_lock = threading.Lock()
+
+
+_STACK_CAPTURE_DEPTH = 3  # top N non-smeltr frames
+
+# Directory prefix of the smeltr sidecar package; frames inside this prefix
+# are skipped during stack capture so callers see their own code, not the
+# sidecar's wrappers.
+_SMELTR_PKG_DIR = os.path.realpath(os.path.dirname(os.path.abspath(__file__))) + os.sep
+
+
+def _stack_capture_enabled() -> bool:
+    return os.environ.get("SMELTR_STACK_CAPTURE") == "1"
+
+
+def _capture_stack(depth: int = _STACK_CAPTURE_DEPTH) -> list[dict]:
+    """Walk sys._getframe up `depth` non-smeltr frames.
+
+    Returns a list of {filename, lineno, funcname} dicts, top-most first.
+    Returns [] if SMELTR_STACK_CAPTURE != "1" or the stack walk fails.
+
+    Skips frames whose filename is inside the smeltr sidecar package dir.
+    """
+    if not _stack_capture_enabled():
+        return []
+    out: list[dict] = []
+    try:
+        # Start at caller's frame; skip _capture_stack itself.
+        frame = sys._getframe(1)
+    except ValueError:
+        return out
+    while frame is not None and len(out) < depth:
+        filename = frame.f_code.co_filename
+        if not os.path.realpath(filename).startswith(_SMELTR_PKG_DIR):
+            out.append(
+                {
+                    "filename": filename,
+                    "lineno": frame.f_lineno,
+                    "funcname": frame.f_code.co_name,
+                }
+            )
+        frame = frame.f_back
+    return out
 
 
 def _array_id(obj: Any) -> int:
@@ -270,6 +314,7 @@ def decorate_eval() -> None:
                     "array_count": len(args),
                     "stream": "gpu",
                     "module_stack": list(_smeltr_current_stack()),
+                    "stack_frames": _capture_stack(),
                 }
             )
         except Exception:

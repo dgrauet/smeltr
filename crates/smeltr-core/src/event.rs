@@ -34,6 +34,13 @@ pub enum ProbeHealthState {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct StackFrame {
+    pub filename: String,
+    pub lineno: u32,
+    pub funcname: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpSample {
     pub name: String,
@@ -165,6 +172,8 @@ pub enum Payload {
         stream: String,
         #[serde(default)]
         module_stack: Vec<u64>,
+        #[serde(default)]
+        stack_frames: Vec<StackFrame>,
     },
     MlxEvalReturned {
         call_id: u64,
@@ -511,6 +520,7 @@ mod tests {
                 array_count: 3,
                 stream: "gpu".into(),
                 module_stack: vec![1, 2, 3],
+                stack_frames: vec![],
             },
             Source::PythonSidecar,
         );
@@ -523,6 +533,7 @@ mod tests {
             array_count: 1,
             stream: "gpu".into(),
             module_stack: Vec::new(),
+            stack_frames: Vec::new(),
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&legacy, &mut buf).unwrap();
@@ -792,5 +803,66 @@ mod tests {
             },
             Source::MetalHook,
         );
+    }
+
+    #[test]
+    fn cbor_round_trip_mlx_eval_entered_with_stack_frames() {
+        round_trip(
+            Payload::MlxEvalEntered {
+                call_id: 1,
+                array_count: 3,
+                stream: "gpu".into(),
+                module_stack: vec![1, 2],
+                stack_frames: vec![
+                    StackFrame {
+                        filename: "attention.py".into(),
+                        lineno: 127,
+                        funcname: "forward".into(),
+                    },
+                    StackFrame {
+                        filename: "model.py".into(),
+                        lineno: 42,
+                        funcname: "__call__".into(),
+                    },
+                ],
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_decodes_legacy_mlx_eval_entered_without_stack_frames() {
+        // Hand-craft a legacy CBOR map missing stack_frames.
+        let legacy = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("MlxEvalEntered".into()),
+            ),
+            (
+                ciborium::Value::Text("call_id".into()),
+                ciborium::Value::Integer(1u64.into()),
+            ),
+            (
+                ciborium::Value::Text("array_count".into()),
+                ciborium::Value::Integer(3u64.into()),
+            ),
+            (
+                ciborium::Value::Text("stream".into()),
+                ciborium::Value::Text("gpu".into()),
+            ),
+            (
+                ciborium::Value::Text("module_stack".into()),
+                ciborium::Value::Array(vec![]),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut buf).unwrap();
+        let decoded: Payload = ciborium::from_reader(&buf[..]).unwrap();
+        match decoded {
+            Payload::MlxEvalEntered { stack_frames, .. } => {
+                assert!(stack_frames.is_empty());
+            }
+            other => panic!("expected MlxEvalEntered, got {other:?}"),
+        }
     }
 }
