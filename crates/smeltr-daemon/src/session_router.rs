@@ -59,6 +59,7 @@ impl SessionRouter {
         let new = Arc::new(ActiveSession::open_scoped(
             pid,
             argv,
+            None,
             self.flight_recorder.clone(),
             self.bus.clone(),
         )?);

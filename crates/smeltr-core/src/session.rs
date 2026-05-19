@@ -63,6 +63,8 @@ pub struct SessionMetadata {
     pub kind: SessionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_token: Option<String>,
 }
 
 const SESSION_NAME_MAX_LEN: usize = 200;
@@ -116,6 +118,7 @@ impl SessionMetadata {
             argv: std::env::args().collect(),
             kind: SessionKind::Ambient,
             name,
+            scope_token: None,
         }
     }
 }

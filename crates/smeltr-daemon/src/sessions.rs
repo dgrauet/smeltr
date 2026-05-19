@@ -14,6 +14,7 @@ pub struct ActiveSession {
     inner: Mutex<Option<Inner>>,
     flight_recorder: Option<Arc<FlightRecorder>>,
     bus: Option<Bus>,
+    scope_token: Option<String>,
 }
 
 struct Inner {
@@ -54,6 +55,7 @@ impl ActiveSession {
             })),
             flight_recorder,
             bus,
+            scope_token: None,
         };
         s.append_internal(
             Source::System,
@@ -68,12 +70,14 @@ impl ActiveSession {
     pub fn open_scoped(
         pid: u32,
         argv: Vec<String>,
+        scope_token: Option<String>,
         flight_recorder: Option<Arc<FlightRecorder>>,
         bus: Option<Bus>,
     ) -> std::io::Result<Self> {
         let id = SessionId::new();
         let mut meta = SessionMetadata::now_starting(id);
         meta.kind = smeltr_core::session::SessionKind::Scoped { pid, argv };
+        meta.scope_token = scope_token.clone();
         let writer = SessionWriter::create(meta)?;
         let clock = MonoClock::new();
         let wall_epoch_ns = now_unix_ns();
@@ -87,6 +91,7 @@ impl ActiveSession {
             })),
             flight_recorder,
             bus,
+            scope_token,
         };
         s.append_internal(
             Source::System,
@@ -105,6 +110,10 @@ impl ActiveSession {
             .as_ref()
             .expect("session not finalized")
             .session_id
+    }
+
+    pub fn scope_token(&self) -> Option<&str> {
+        self.scope_token.as_deref()
     }
 
     pub fn append(
@@ -207,8 +216,14 @@ mod tests {
     #[serial]
     fn open_scoped_writes_scoped_metadata() {
         let _home = temp_home();
-        let s = ActiveSession::open_scoped(1234, vec!["python".into(), "x.py".into()], None, None)
-            .unwrap();
+        let s = ActiveSession::open_scoped(
+            1234,
+            vec!["python".into(), "x.py".into()],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         s.finalize(Some(0), "test").unwrap();
         let dirs = list_sessions().unwrap();
         let meta = read_metadata(&dirs[0]).unwrap();
@@ -268,6 +283,35 @@ mod tests {
         assert_eq!(meta.exit_code, Some(7));
         assert!(meta.ended_rfc3339.is_some());
         drop(s_clone);
+    }
+
+    #[test]
+    #[serial]
+    fn open_scoped_persists_scope_token() {
+        let _h = temp_home();
+        let s = ActiveSession::open_scoped(
+            4242,
+            vec!["python".into()],
+            Some("tok-XYZ".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.scope_token(), Some("tok-XYZ"));
+        s.finalize(Some(0), "test").unwrap();
+
+        // Re-read metadata from disk and check scope_token survived.
+        let dirs = smeltr_core::reader::list_sessions().unwrap();
+        let meta = smeltr_core::reader::read_metadata(&dirs[0]).unwrap();
+        assert_eq!(meta.scope_token.as_deref(), Some("tok-XYZ"));
+    }
+
+    #[test]
+    #[serial]
+    fn open_scoped_without_token_is_none() {
+        let _h = temp_home();
+        let s = ActiveSession::open_scoped(7, vec!["x".into()], None, None, None).unwrap();
+        assert!(s.scope_token().is_none());
     }
 
     #[test]
