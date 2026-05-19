@@ -11,8 +11,40 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      pr_branch: ${{ steps.rp.outputs.pr && fromJSON(steps.rp.outputs.pr).headBranchName }}
+      release_created: ${{ steps.rp.outputs.release_created }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - id: rp
+        uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  refresh-cargo-lock:
+    # When release-please opens/updates a release PR, the workspace version
+    # bump in Cargo.toml leaves Cargo.lock stale. Refresh it on the PR
+    # branch so subsequent CI sees a consistent lockfile.
+    # The PR branch name comes from the release-please action's structured
+    # output, NOT untrusted user input — safe to interpolate.
+    needs: release-please
+    if: needs.release-please.outputs.pr_branch != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.pr_branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Refresh Cargo.lock with new workspace version
+        run: |
+          cargo update --workspace --quiet
+          if ! git diff --quiet Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: refresh Cargo.lock for release"
+            git push
+          fi
