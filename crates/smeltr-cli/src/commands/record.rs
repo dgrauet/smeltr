@@ -86,6 +86,15 @@ fn apply_session_name_env(builder: &mut std::process::Command, name: Option<&str
     }
 }
 
+/// Resolve the effective session name: --name flag takes precedence
+/// over SMELTR_SESSION_NAME env. Returns None when neither is set.
+fn resolve_session_name(flag: Option<&str>) -> Option<String> {
+    if let Some(n) = flag {
+        return Some(n.to_string());
+    }
+    std::env::var("SMELTR_SESSION_NAME").ok()
+}
+
 /// Generate a UUID v4 scope token, stamp it into the child env, and return
 /// it so the caller can also pass it in `AttachScopedProbes`.
 fn stamp_scope_token(builder: &mut std::process::Command) -> String {
@@ -154,6 +163,7 @@ pub async fn run(
 
     apply_session_name_env(&mut builder, name);
     let scope_token = stamp_scope_token(&mut builder);
+    let resolved_name = resolve_session_name(name);
 
     let mut child = builder.spawn()?;
     let pid = child.id();
@@ -167,6 +177,7 @@ pub async fn run(
             pid,
             argv,
             scope_token: Some(scope_token.clone()),
+            name: resolved_name.clone(),
         })
         .await?;
     if !matches!(resp, DaemonToClient::Ack) {
@@ -292,6 +303,32 @@ mod tests {
             v.map(|s| s.to_string_lossy().into_owned()),
             Some("override".to_string())
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_session_name_uses_flag_when_present() {
+        std::env::set_var("SMELTR_SESSION_NAME", "env-val");
+        assert_eq!(
+            resolve_session_name(Some("flag-val")),
+            Some("flag-val".to_string())
+        );
+        std::env::remove_var("SMELTR_SESSION_NAME");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_session_name_falls_back_to_env_when_flag_none() {
+        std::env::set_var("SMELTR_SESSION_NAME", "env-val");
+        assert_eq!(resolve_session_name(None), Some("env-val".to_string()));
+        std::env::remove_var("SMELTR_SESSION_NAME");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_session_name_returns_none_when_neither_set() {
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        assert_eq!(resolve_session_name(None), None);
     }
 
     #[test]

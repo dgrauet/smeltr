@@ -71,6 +71,7 @@ impl ActiveSession {
         pid: u32,
         argv: Vec<String>,
         scope_token: Option<String>,
+        name: Option<String>,
         flight_recorder: Option<Arc<FlightRecorder>>,
         bus: Option<Bus>,
     ) -> std::io::Result<Self> {
@@ -78,6 +79,9 @@ impl ActiveSession {
         let mut meta = SessionMetadata::now_starting(id);
         meta.kind = smeltr_core::session::SessionKind::Scoped { pid, argv };
         meta.scope_token = scope_token.clone();
+        if let Some(n) = name {
+            meta.name = Some(n);
+        }
         let writer = SessionWriter::create(meta)?;
         let clock = MonoClock::new();
         let wall_epoch_ns = now_unix_ns();
@@ -222,6 +226,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         s.finalize(Some(0), "test").unwrap();
@@ -295,6 +300,7 @@ mod tests {
             Some("tok-XYZ".into()),
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(s.scope_token(), Some("tok-XYZ"));
@@ -310,8 +316,44 @@ mod tests {
     #[serial]
     fn open_scoped_without_token_is_none() {
         let _h = temp_home();
-        let s = ActiveSession::open_scoped(7, vec!["x".into()], None, None, None).unwrap();
+        let s = ActiveSession::open_scoped(7, vec!["x".into()], None, None, None, None).unwrap();
         assert!(s.scope_token().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn open_scoped_persists_name() {
+        let _h = temp_home();
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let s = ActiveSession::open_scoped(
+            4242,
+            vec!["python".into()],
+            Some("tok-T".into()),
+            Some("my-run".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        s.finalize(Some(0), "test").unwrap();
+
+        let dirs = smeltr_core::reader::list_sessions().unwrap();
+        let meta = smeltr_core::reader::read_metadata(&dirs[0]).unwrap();
+        assert_eq!(meta.name.as_deref(), Some("my-run"));
+    }
+
+    #[test]
+    #[serial]
+    fn open_scoped_without_name_falls_back_to_env() {
+        let _h = temp_home();
+        std::env::set_var("SMELTR_SESSION_NAME", "from-env");
+        let s = ActiveSession::open_scoped(4242, vec!["python".into()], None, None, None, None)
+            .unwrap();
+        s.finalize(Some(0), "test").unwrap();
+        std::env::remove_var("SMELTR_SESSION_NAME");
+
+        let dirs = smeltr_core::reader::list_sessions().unwrap();
+        let meta = smeltr_core::reader::read_metadata(&dirs[0]).unwrap();
+        assert_eq!(meta.name.as_deref(), Some("from-env"));
     }
 
     #[test]

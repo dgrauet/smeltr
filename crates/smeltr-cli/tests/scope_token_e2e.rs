@@ -28,7 +28,12 @@ fn grandchild_emit_with_token_lands_in_scoped_session() {
 
     // Parent process: smeltr record spawns child PID 1000 (the launcher).
     let scoped_id = router
-        .attach_scoped(1000, vec!["sh".into(), "-c".into()], Some("UUID-X".into()))
+        .attach_scoped(
+            1000,
+            vec!["sh".into(), "-c".into()],
+            Some("UUID-X".into()),
+            None,
+        )
         .unwrap();
 
     // Grandchild (e.g. python via uv) has a different PID but inherits the
