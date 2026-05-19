@@ -13,6 +13,8 @@ pub use breakdown::{
 
 pub mod diff;
 
+pub mod dispatch_origins;
+
 pub mod export;
 
 pub mod memory;
