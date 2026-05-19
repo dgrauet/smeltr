@@ -315,6 +315,35 @@ attribution). MLX is typically single-thread on the producer side so
 this matches real workloads. Multi-thread cases may misattribute
 samples to the wrong scope.
 
+### Dispatch origins
+
+Map kernel dispatches back to the Python source file:line that
+triggered them. Useful for confirming "this Matmul came from
+`attention.py:127`" — combined with op kinds and scopes, you get
+full top-down attribution from a user code line to GPU time.
+
+```bash
+SMELTR_STACK_CAPTURE=1 smeltr record -- ./pipeline.py
+smeltr origins ltx2-baseline --top 10
+```
+
+The `SMELTR_STACK_CAPTURE=1` env var is **opt-in** because the stack
+walk adds ~1–5 µs per `mx.eval`. Without it the session works as
+normal and `smeltr origins` shows an empty table with a hint.
+
+Output: per-(kind, file:line), sum GPU time + dispatch count.
+
+- **CLI:** `smeltr origins <session-ref> [--top N]`.
+- **MCP:** `get_dispatch_origins(session)` returns the same list.
+- **Compare:** `smeltr compare` and the MCP `compare_sessions` tool
+  include an `ORIGIN DELTAS` section / `origin_deltas` field showing
+  per-(kind, file:line) GPU time deltas between two sessions.
+
+The top non-smeltr Python frame is used for attribution; deeper
+frames are still recorded in the event log but not aggregated.
+File names are reduced to basename (`attention.py:127`) so moves
+keep grouping intact; renaming functions loses correlation.
+
 ## Typical workflow
 
 ```
