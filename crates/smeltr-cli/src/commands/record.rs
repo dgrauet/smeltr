@@ -167,6 +167,7 @@ pub async fn run(
             pid,
             argv,
             scope_token: Some(scope_token.clone()),
+            name: None,
         })
         .await?;
     if !matches!(resp, DaemonToClient::Ack) {

@@ -212,6 +212,7 @@ async fn handle_msg(
             pid,
             argv,
             scope_token,
+            name: _,
         } => {
             probe_runtime.attach_scoped(pid).await;
             if let Err(e) = router.attach_scoped(pid, argv, scope_token) {

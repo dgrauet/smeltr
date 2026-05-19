@@ -37,6 +37,8 @@ pub enum ClientToDaemon {
         argv: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Detach scoped probes for the given PID and emit a final marker.
     DetachScopedProbes { pid: u32, exit_code: Option<i32> },
@@ -111,6 +113,7 @@ mod tests {
             pid: 4242,
             argv: vec!["python".into(), "script.py".into()],
             scope_token: None,
+            name: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();
@@ -206,6 +209,62 @@ mod tests {
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back: ClientToDaemon = read_frame(&mut &buf[..]).unwrap().unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn attach_scoped_probes_decodes_legacy_without_name() {
+        use ciborium::value::Value;
+        // Simulate a message that has scope_token but no name field (legacy client).
+        let legacy_cbor = {
+            let msg = Value::Map(vec![
+                (
+                    Value::Text("op".into()),
+                    Value::Text("AttachScopedProbes".into()),
+                ),
+                (Value::Text("pid".into()), Value::Integer(9001_i64.into())),
+                (
+                    Value::Text("argv".into()),
+                    Value::Array(vec![
+                        Value::Text("python".into()),
+                        Value::Text("x.py".into()),
+                    ]),
+                ),
+                (
+                    Value::Text("scope_token".into()),
+                    Value::Text("tok-T".into()),
+                ),
+            ]);
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&msg, &mut buf).unwrap();
+            buf
+        };
+        let decoded: ClientToDaemon = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
+        match decoded {
+            ClientToDaemon::AttachScopedProbes {
+                name, scope_token, ..
+            } => {
+                assert!(name.is_none());
+                assert_eq!(scope_token.as_deref(), Some("tok-T"));
+            }
+            other => panic!("expected AttachScopedProbes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_scoped_probes_roundtrips_with_name() {
+        use smeltr_core::codec::write_frame;
+        let msg = ClientToDaemon::AttachScopedProbes {
+            pid: 1234,
+            argv: vec!["uv".into(), "run".into()],
+            scope_token: Some("tok-T".into()),
+            name: Some("ltx2-run".into()),
+        };
+        let mut buf = Vec::new();
+        let mut writer = std::io::Cursor::new(&mut buf);
+        write_frame(&mut writer, &msg).unwrap();
+        let mut reader = std::io::Cursor::new(&buf);
+        let back: ClientToDaemon = read_frame(&mut reader).unwrap().unwrap();
         assert_eq!(msg, back);
     }
 
