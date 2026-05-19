@@ -64,12 +64,13 @@ class _Client:
         payload: dict[str, Any],
         *,
         pid: int | None = None,
+        scope_token: str | None = None,
         source: str = SOURCE_PYTHON_SIDECAR,
     ) -> None:
         if self._sock is None:
             raise ClientError("client is not connected")
         with self._lock:
-            self._write_frame(emit_msg(source, pid, payload))
+            self._write_frame(emit_msg(source, pid, payload, scope_token=scope_token))
             resp = self._read_frame()
         if not isinstance(resp, dict) or resp.get("kind") != "Ack":
             if isinstance(resp, dict) and resp.get("kind") == "Error":

@@ -15,6 +15,7 @@ from smeltr._proto import SOURCE_PYTHON_SIDECAR
 
 _client: _Client | None = None
 _client_lock = threading.Lock()
+_scope_token: str | None = None
 
 
 def _detect_mlx_version() -> str | None:
@@ -44,7 +45,10 @@ def _detect_mlx_version() -> str | None:
 def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0, poll_hz: float = 1.0) -> None:
     """Connect to smeltrd. poll_hz is wired up in a later task; accept it now
     so callers don't need to change later."""
-    global _client
+    global _client, _scope_token
+    import os
+
+    _scope_token = os.environ.get("SMELTR_SCOPE_TOKEN")
     with _client_lock:
         if _client is not None:
             _client.close()
@@ -84,11 +88,12 @@ def detach() -> None:
     from smeltr._mlx import stop_polling
 
     stop_polling()
-    global _client
+    global _client, _scope_token
     with _client_lock:
         if _client is not None:
             _client.close()
             _client = None
+        _scope_token = None
 
 
 def _require_attached() -> _Client:
@@ -103,7 +108,12 @@ def _emit(payload: dict, *, pid: int | None = None) -> None:
         import os
 
         pid = os.getpid()
-    c.emit(payload, pid=pid, source=SOURCE_PYTHON_SIDECAR)
+    c.emit(
+        payload,
+        pid=pid,
+        scope_token=_scope_token,
+        source=SOURCE_PYTHON_SIDECAR,
+    )
 
 
 def mark(label: str, **fields: object) -> None:

@@ -80,6 +80,7 @@ fn subscribe_receives_emitted_events() {
             &ClientToDaemon::Emit {
                 source: Source::Mark,
                 pid: None,
+                scope_token: None,
                 payload: Payload::Mark {
                     label: format!("e-{i}"),
                 },

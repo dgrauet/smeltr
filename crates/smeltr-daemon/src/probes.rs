@@ -18,7 +18,7 @@ pub struct DaemonSink {
 
 impl EventSink for DaemonSink {
     fn emit(&self, source: Source, pid: Option<u32>, payload: Payload) {
-        if let Err(e) = self.router.append(source, pid, payload) {
+        if let Err(e) = self.router.append(source, pid, None, payload) {
             tracing::warn!(error = %e, "session append failed");
         }
     }

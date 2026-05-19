@@ -63,6 +63,8 @@ pub struct SessionMetadata {
     pub kind: SessionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_token: Option<String>,
 }
 
 const SESSION_NAME_MAX_LEN: usize = 200;
@@ -116,6 +118,7 @@ impl SessionMetadata {
             argv: std::env::args().collect(),
             kind: SessionKind::Ambient,
             name,
+            scope_token: None,
         }
     }
 }
@@ -348,5 +351,32 @@ argv = []
 "#;
         let m: SessionMetadata = toml::from_str(legacy).unwrap();
         assert_eq!(m.name, None);
+    }
+
+    #[test]
+    fn scope_token_roundtrips_through_toml() {
+        let mut m = SessionMetadata::now_starting(SessionId::new());
+        m.scope_token = Some("11111111-2222-3333-4444-555555555555".into());
+        let s = toml::to_string(&m).unwrap();
+        let back: SessionMetadata = toml::from_str(&s).unwrap();
+        assert_eq!(
+            back.scope_token.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555"),
+        );
+    }
+
+    #[test]
+    fn scope_token_absent_decodes_as_none_from_legacy_toml() {
+        let legacy = r#"
+session_id = "00000000-0000-0000-0000-000000000000"
+started_rfc3339 = "2026-05-19T12:00:00Z"
+host = "h"
+argv = []
+
+[kind]
+type = "Ambient"
+"#;
+        let m: SessionMetadata = toml::from_str(legacy).unwrap();
+        assert!(m.scope_token.is_none());
     }
 }
