@@ -72,6 +72,17 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         ops_flat: bool,
     },
+    /// Compare two recorded sessions: scope-level + op-kind GPU deltas
+    /// plus scopes present in only one of the sessions.
+    Compare {
+        /// First session (baseline). Accepts short id, full UUID, or name.
+        session_a: String,
+        /// Second session (changed). Accepts short id, full UUID, or name.
+        session_b: String,
+        /// Cap each section's row count.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+    },
     /// Export a recorded session to chrome-trace JSON (openable in
     /// chrome://tracing / Perfetto / Speedscope) or raw JSON.
     Export {
@@ -150,6 +161,11 @@ fn main() -> anyhow::Result<()> {
                 no_ops,
                 ops_flat,
             ),
+            Cmd::Compare {
+                session_a,
+                session_b,
+                top,
+            } => commands::compare::run(&session_a, &session_b, top),
             Cmd::Export {
                 session,
                 format,

@@ -1,5 +1,6 @@
 pub mod analyze;
 pub mod breakdown;
+pub mod compare;
 pub mod daemon;
 pub mod doctor;
 pub mod export;
