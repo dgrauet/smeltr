@@ -86,6 +86,14 @@ fn apply_session_name_env(builder: &mut std::process::Command, name: Option<&str
     }
 }
 
+/// Generate a UUID v4 scope token, stamp it into the child env, and return
+/// it so the caller can also pass it in `AttachScopedProbes`.
+fn stamp_scope_token(builder: &mut std::process::Command) -> String {
+    let tok = uuid::Uuid::new_v4().to_string();
+    builder.env("SMELTR_SCOPE_TOKEN", &tok);
+    tok
+}
+
 pub async fn run(
     cmd: &str,
     args: &[String],
@@ -145,6 +153,7 @@ pub async fn run(
     builder.env("SMELTR_AUTOLOAD", "1");
 
     apply_session_name_env(&mut builder, name);
+    let scope_token = stamp_scope_token(&mut builder);
 
     let mut child = builder.spawn()?;
     let pid = child.id();
@@ -157,7 +166,7 @@ pub async fn run(
         .request(ClientToDaemon::AttachScopedProbes {
             pid,
             argv,
-            scope_token: None,
+            scope_token: Some(scope_token.clone()),
         })
         .await?;
     if !matches!(resp, DaemonToClient::Ack) {
@@ -283,5 +292,21 @@ mod tests {
             v.map(|s| s.to_string_lossy().into_owned()),
             Some("override".to_string())
         );
+    }
+
+    #[test]
+    fn stamp_scope_token_sets_env() {
+        let mut cmd = std::process::Command::new("/bin/true");
+        let tok = stamp_scope_token(&mut cmd);
+        // UUID v4 is 36 chars with 4 hyphens.
+        assert_eq!(tok.len(), 36);
+        assert_eq!(tok.matches('-').count(), 4);
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter(|(k, _)| *k == std::ffi::OsStr::new("SMELTR_SCOPE_TOKEN"))
+            .collect();
+        assert_eq!(envs.len(), 1);
+        let (_, v) = envs[0];
+        assert_eq!(v.map(|s| s.to_string_lossy().into_owned()), Some(tok),);
     }
 }
