@@ -255,6 +255,35 @@ Sessions without a `symbol` (recorded before symbolic kernel name
 capture landed) export with only the fingerprint name on the Kernels
 lane — still useful, just less readable.
 
+### Diffing sessions
+
+Compare two recorded sessions to surface scope-level and op-kind
+deltas — useful for spotting which scope an optimization (or
+regression) hit:
+
+```bash
+smeltr compare ltx2-baseline ltx2-batched-cfg --top 10
+```
+
+Output sections (each capped at `--top N`, default 20):
+
+- **SCOPE DELTAS** — `qualname` present in both sessions, sorted by
+  `|delta_gpu_ns|` descending. Both parents and leaves of the scope
+  tree appear independently.
+- **OP KIND DELTAS** — ops aggregated cross-session by canonical
+  `kind` (Matmul, ScaledDotProductAttention, …), falling back to
+  `symbol` and then raw name when no `kind` resolves.
+- **SCOPES ONLY IN A / ONLY IN B** — scopes whose qualname appears in
+  one session but not the other (e.g. an "E2 skip" pass dropped
+  between iterations).
+
+The MCP `compare_sessions` tool returns the same four arrays in its
+response (`scope_deltas`, `op_deltas`, `scopes_only_in_a`,
+`scopes_only_in_b`) on top of the legacy `a`/`b`/`delta` stats.
+
+All times in seconds; deltas show the sign (`+` slower, `-` faster)
+and percentage (`(n/a)` when the baseline is zero).
+
 ## Typical workflow
 
 ```
