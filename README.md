@@ -41,14 +41,20 @@ ln -sf "$PWD/target/release/smeltrd" ~/.local/bin/smeltrd
 # Install the persistent daemon (LaunchAgent, auto-restart)
 smeltr daemon install
 
-# Capture a run
-smeltr record python my_inference.py
+# Capture a run (optionally name it for later lookup)
+smeltr record --name "baseline" -- python my_inference.py
 
 # Watch live
 smeltr tui
 
 # Or query from Claude via MCP — see docs/usage.md
 ```
+
+For semantic GPU-time attribution from MLX code, the optional Python sidecar
+adds `smeltr.scope("name", **fields)` and `smeltr.mark("label", **fields)`.
+See [`docs/usage.md`](docs/usage.md) and the
+[migration guide](docs/migration-from-bespoke-profilers.md) for moving off
+bespoke profilers.
 
 The `libmetal_hook.dylib` is built and **embedded into the `smeltr` binary** at compile time (via `crates/smeltr-cli/build.rs` invoking `make -C metal-hook all`). End users never need to set `SMELTR_DYLIB` or manage the dylib path.
 
@@ -82,14 +88,23 @@ stays on). Use when counter sampling overhead is undesirable.
 
 | Command | Purpose |
 |---|---|
-| `smeltr record <cmd>` | Capture a run |
+| `smeltr record [--name N] -- <cmd>` | Capture a run (optionally named) |
+| `smeltr mark <label> [--field k=v]` | Append a marker event to the active session |
 | `smeltr tui` | Live event feed / timeline |
-| `smeltr sessions list` | List sessions on disk |
+| `smeltr sessions ls` | List sessions on disk (annotates ambient/scoped) |
 | `smeltr sessions show <id>` | Per-event-kind summary |
 | `smeltr analyze [<id>]` | Run analyzer rules → findings |
-| `smeltr breakdown [--last] [<id>]` | Per-module GPU time breakdown |
+| `smeltr breakdown [<id>] [--field k=v]` | Per-module GPU time breakdown (filterable by scope field) |
+| `smeltr memory [<id>]` | Per-scope MTLDevice memory peak/avg/end + heap |
+| `smeltr origins [<id>]` | Per-(kind, file:line) GPU attribution (needs `SMELTR_STACK_CAPTURE=1`) |
+| `smeltr compare <id-a> <id-b>` | A/B regression: scope + op-kind GPU deltas |
+| `smeltr export <id> --format chrome-trace\|json` | Dump to Perfetto / Speedscope / raw JSON |
+| `smeltr doctor` | Audit probe availability and permissions |
 | `smeltr mcp` | Stdio MCP server (Claude integration) |
 | `smeltr daemon install` | Install persistent LaunchAgent |
+
+Session refs accept the short id (last 8 hex), the full UUID, or the
+`--name` you passed to `record` (most-recent-wins on name collision).
 
 ### Session kinds
 
@@ -119,15 +134,16 @@ Flags:
 - `--last` - prefer the most-recent post-mortem session (otherwise newest).
 - `--top N` - limit the table to N rows (default 20).
 - `--depth N` - cut the tree at depth N (default 6).
+- `--field key=value` - keep only subtrees whose `ModuleEntered.fields`
+  match (recursively). Repeatable; values are type-inferred (bool/int/float/string).
 - `--flamegraph <out.svg>` - write a folded-stack flamegraph SVG.
 - `--chrome-trace <out.json>` - write a Chrome Trace Event Format file
   (open in Perfetto or Speedscope).
 
-Phase-1 limitation: when a model's entire forward pass batches into a single
-top-level `mx.eval()` call, the active module stack is empty at the evaluation
-point and GPU time is attributed to `<unscoped>`. Module names still appear in
-the tree via `ModuleEntered` events with `gpu_ns_self = 0`. Phase 2 (op-level
-attribution via Metal debug groups) lifts this limitation — see below.
+For semantic module-level attribution, wrap the forward pass with the
+Python sidecar's `smeltr.scope("name", **fields)` context manager. Without
+sidecar scopes, the op-level decomposition below still ranks top kernels
+by PSO signature.
 
 ### Op-level decomposition (Phase 2.5)
 
@@ -183,7 +199,7 @@ Conventional Commits are enforced via `commitlint.config.js` + pre-commit hooks.
 
 ## Repo layout
 
-- `crates/` — Rust workspace (12+ crates): core, daemon, CLI, analyzer, replay, TUI, MCP server, probes.
+- `crates/` — Rust workspace (18 crates): core, daemon, CLI, analyzer, replay, TUI, MCP server, probes.
 - `metal-hook/` — ObjC++ dylib injected via `DYLD_INSERT_LIBRARIES`.
 - `python/` — opt-in Python sidecar (`smeltr` package, pip-installable).
 - `docs/` — usage guide, ADRs, dogfood findings.
