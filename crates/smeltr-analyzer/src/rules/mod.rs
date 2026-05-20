@@ -1,3 +1,4 @@
+pub mod duplicate_model_load;
 pub mod metal_error;
 pub mod mlx_timing;
 pub mod queue_depth;

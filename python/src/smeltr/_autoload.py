@@ -23,9 +23,11 @@ def _activate() -> None:
     try:
         from smeltr._api import attach
         from smeltr._mlx import decorate_eval
+        from smeltr._modelload import decorate_model_loads
 
         attach()
         decorate_eval()
+        decorate_model_loads()
     except Exception as exc:
         # Observability must never break user code.
         _log.warning("smeltr autoload failed: %s", exc)
