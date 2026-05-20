@@ -161,7 +161,10 @@ mod tests {
             source: Source::Mark,
             pid: None,
             seq: 1,
-            payload: Payload::Mark { label: "hi".into() },
+            payload: Payload::Mark {
+                label: "hi".into(),
+                fields: Default::default(),
+            },
         };
         let m = DaemonToClient::EventNotification { event: ev.clone() };
         let mut buf = Vec::new();
@@ -204,7 +207,10 @@ mod tests {
             source: smeltr_core::event::Source::Mark,
             pid: Some(7),
             scope_token: Some("tok-abc".into()),
-            payload: smeltr_core::event::Payload::Mark { label: "y".into() },
+            payload: smeltr_core::event::Payload::Mark {
+                label: "y".into(),
+                fields: Default::default(),
+            },
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();

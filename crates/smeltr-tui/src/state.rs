@@ -147,7 +147,7 @@ impl UiState {
             Payload::MlxEvalReturned { .. } => {
                 self.mlx_eval_depth = self.mlx_eval_depth.saturating_sub(1);
             }
-            Payload::Mark { label } => {
+            Payload::Mark { label, .. } => {
                 self.mlx_recent_marks
                     .push_back((ev.ts_mono_ns, label.clone()));
                 while self.mlx_recent_marks.len() > RECENT_MARKS {
@@ -361,8 +361,20 @@ mod tests {
     #[test]
     fn ingest_counts_events() {
         let mut s = UiState::default();
-        s.ingest(&ev(0, Payload::Mark { label: "a".into() }));
-        s.ingest(&ev(1_000_000_000, Payload::Mark { label: "b".into() }));
+        s.ingest(&ev(
+            0,
+            Payload::Mark {
+                label: "a".into(),
+                fields: Default::default(),
+            },
+        ));
+        s.ingest(&ev(
+            1_000_000_000,
+            Payload::Mark {
+                label: "b".into(),
+                fields: Default::default(),
+            },
+        ));
         assert_eq!(s.events_total, 2);
         assert_eq!(s.mlx_recent_marks.len(), 2);
     }
@@ -439,7 +451,13 @@ mod tests {
     fn timeline_drops_old_buckets() {
         let mut s = UiState::default();
         for i in 0..120 {
-            s.ingest(&ev(i * 1_000_000_000, Payload::Mark { label: "x".into() }));
+            s.ingest(&ev(
+                i * 1_000_000_000,
+                Payload::Mark {
+                    label: "x".into(),
+                    fields: Default::default(),
+                },
+            ));
         }
         assert!(s.timeline_buckets.len() <= 61);
         assert!(s.timeline_buckets.back().unwrap().0 == 119);

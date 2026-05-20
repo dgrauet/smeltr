@@ -26,6 +26,7 @@ async fn replay_drains_session_into_state() {
             seq: i,
             payload: Payload::Mark {
                 label: format!("r-{i}"),
+                fields: Default::default(),
             },
         })
         .unwrap();

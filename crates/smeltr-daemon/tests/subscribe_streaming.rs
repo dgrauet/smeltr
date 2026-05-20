@@ -83,6 +83,7 @@ fn subscribe_receives_emitted_events() {
                 scope_token: None,
                 payload: Payload::Mark {
                     label: format!("e-{i}"),
+                    fields: Default::default(),
                 },
             },
         )
@@ -96,7 +97,7 @@ fn subscribe_receives_emitted_events() {
     while marks_seen < 3 && std::time::Instant::now() < deadline {
         let msg: Option<DaemonToClient> = read_frame(&mut sub_stream).unwrap_or(None);
         if let Some(DaemonToClient::EventNotification { event }) = msg {
-            if let Payload::Mark { ref label } = event.payload {
+            if let Payload::Mark { ref label, .. } = event.payload {
                 if label.starts_with("e-") {
                     marks_seen += 1;
                 }

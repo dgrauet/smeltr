@@ -162,6 +162,7 @@ mod tests {
             None,
             Payload::Mark {
                 label: "ambient".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -171,7 +172,7 @@ mod tests {
         let evs = read_events(&dirs[0]).unwrap();
         assert!(evs.iter().any(|e| matches!(
             &e.payload,
-            Payload::Mark { label } if label == "ambient"
+            Payload::Mark { label, .. } if label == "ambient"
         )));
     }
 
@@ -190,6 +191,7 @@ mod tests {
             None,
             Payload::Mark {
                 label: "scoped".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -206,7 +208,7 @@ mod tests {
             let has_mark = evs.iter().any(|e| {
                 matches!(
                     &e.payload,
-                    Payload::Mark { label } if label == "scoped"
+                    Payload::Mark { label, .. } if label == "scoped"
                 )
             });
             match meta.kind {
@@ -244,6 +246,7 @@ mod tests {
             None,
             Payload::Mark {
                 label: "fallback".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -254,7 +257,7 @@ mod tests {
         let evs = read_events(&dirs[0]).unwrap();
         assert!(evs.iter().any(|e| matches!(
             &e.payload,
-            Payload::Mark { label } if label == "fallback"
+            Payload::Mark { label, .. } if label == "fallback"
         )));
     }
 
@@ -273,6 +276,7 @@ mod tests {
             None,
             Payload::Mark {
                 label: "after-supersede".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -289,7 +293,7 @@ mod tests {
             let has = evs.iter().any(|e| {
                 matches!(
                     &e.payload,
-                    Payload::Mark { label } if label == "after-supersede"
+                    Payload::Mark { label, .. } if label == "after-supersede"
                 )
             });
             if has {
@@ -311,7 +315,10 @@ mod tests {
             Source::Mark,
             Some(42),
             Some("TOK"),
-            Payload::Mark { label: "t1".into() },
+            Payload::Mark {
+                label: "t1".into(),
+                fields: Default::default(),
+            },
         )
         .unwrap();
         r.detach_scoped(42, Some(0));
@@ -324,7 +331,7 @@ mod tests {
             let evs = read_events(d).unwrap();
             let has = evs
                 .iter()
-                .any(|e| matches!(&e.payload, Payload::Mark { label } if label == "t1"));
+                .any(|e| matches!(&e.payload, Payload::Mark { label, .. } if label == "t1"));
             if meta.session_id == scoped_id {
                 found_in_scoped = has;
             } else {
@@ -352,6 +359,7 @@ mod tests {
             Some("TOK"),
             Payload::Mark {
                 label: "from-grandchild".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -364,7 +372,7 @@ mod tests {
             let meta = read_metadata(d).unwrap();
             let evs = read_events(d).unwrap();
             let has = evs.iter().any(
-                |e| matches!(&e.payload, Payload::Mark { label } if label == "from-grandchild"),
+                |e| matches!(&e.payload, Payload::Mark { label, .. } if label == "from-grandchild"),
             );
             if meta.session_id == scoped_id {
                 found_in_scoped = has;
@@ -391,6 +399,7 @@ mod tests {
             None,
             Payload::Mark {
                 label: "pid-fallback".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -404,7 +413,7 @@ mod tests {
             let evs = read_events(d).unwrap();
             if meta.session_id == scoped_id {
                 found = evs.iter().any(
-                    |e| matches!(&e.payload, Payload::Mark { label } if label == "pid-fallback"),
+                    |e| matches!(&e.payload, Payload::Mark { label, .. } if label == "pid-fallback"),
                 );
             }
         }
@@ -423,6 +432,7 @@ mod tests {
             Some("BOGUS"),
             Payload::Mark {
                 label: "stray".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -433,7 +443,7 @@ mod tests {
         let evs = read_events(&dirs[0]).unwrap();
         assert!(evs
             .iter()
-            .any(|e| matches!(&e.payload, Payload::Mark { label } if label == "stray")));
+            .any(|e| matches!(&e.payload, Payload::Mark { label, .. } if label == "stray")));
     }
 
     #[test]
@@ -452,6 +462,7 @@ mod tests {
             Some("TOK"),
             Payload::Mark {
                 label: "post-detach".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -462,9 +473,9 @@ mod tests {
         for d in &dirs {
             let meta = read_metadata(d).unwrap();
             let evs = read_events(d).unwrap();
-            let has = evs
-                .iter()
-                .any(|e| matches!(&e.payload, Payload::Mark { label } if label == "post-detach"));
+            let has = evs.iter().any(
+                |e| matches!(&e.payload, Payload::Mark { label, .. } if label == "post-detach"),
+            );
             if matches!(meta.kind, SessionKind::Ambient) && has {
                 in_ambient = true;
             }

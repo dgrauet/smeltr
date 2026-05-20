@@ -161,15 +161,35 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
             Payload::MetalCbOps { cb_id, ops } => {
                 pending_ops.entry(*cb_id).or_default().extend(ops.clone());
             }
-            Payload::Mark { label } => {
-                trace_events.push(json!({
+            Payload::Mark { label, fields } => {
+                let mut ev = serde_json::json!({
                     "ph": "i",
                     "name": label,
                     "pid": 1,
                     "tid": 0,
                     "ts": ts_us,
                     "s": "g",
-                }));
+                });
+                if !fields.is_empty() {
+                    let args: serde_json::Map<String, serde_json::Value> = fields
+                        .iter()
+                        .map(|(k, v)| {
+                            let jv = match v {
+                                smeltr_core::event::FieldValue::Bool(b) => {
+                                    serde_json::Value::Bool(*b)
+                                }
+                                smeltr_core::event::FieldValue::Int(i) => serde_json::json!(i),
+                                smeltr_core::event::FieldValue::Float(f) => serde_json::json!(f),
+                                smeltr_core::event::FieldValue::String(s) => {
+                                    serde_json::Value::String(s.clone())
+                                }
+                            };
+                            (k.clone(), jv)
+                        })
+                        .collect();
+                    ev["args"] = serde_json::Value::Object(args);
+                }
+                trace_events.push(ev);
             }
             Payload::SessionStarted { .. } => {
                 trace_events.push(json!({
@@ -431,6 +451,7 @@ mod tests {
             Source::Mark,
             Payload::Mark {
                 label: "step-1".into(),
+                fields: Default::default(),
             },
         )];
         let s = to_chrome_trace(&evs, &meta);
@@ -456,6 +477,7 @@ mod tests {
             Source::Mark,
             Payload::Mark {
                 label: "hello".into(),
+                fields: Default::default(),
             },
         )];
         let s = to_json_raw(&evs, &meta);

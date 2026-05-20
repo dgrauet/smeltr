@@ -181,7 +181,10 @@ mod tests {
 
     #[test]
     fn ordinary_mark_does_not_fire() {
-        let ev = wrap(Payload::Mark { label: "x".into() });
+        let ev = wrap(Payload::Mark {
+            label: "x".into(),
+            fields: Default::default(),
+        });
         assert!(classify(&ev).is_none());
     }
 
@@ -204,6 +207,7 @@ mod tests {
                 seq: i,
                 payload: Payload::Mark {
                     label: format!("e-{i}"),
+                    fields: Default::default(),
                 },
             });
         }

@@ -124,6 +124,7 @@ mod tests {
             seq: 4,
             payload: Payload::Mark {
                 label: "not-metal".into(),
+                fields: Default::default(),
             },
         })
         .unwrap();

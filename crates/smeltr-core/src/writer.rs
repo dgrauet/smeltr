@@ -114,6 +114,7 @@ mod tests {
                 seq: i,
                 payload: Payload::Mark {
                     label: format!("mk-{i}"),
+                    fields: Default::default(),
                 },
             })
             .unwrap();
@@ -141,7 +142,10 @@ mod tests {
             source: Source::Mark,
             pid: None,
             seq: 1,
-            payload: Payload::Mark { label: "hi".into() },
+            payload: Payload::Mark {
+                label: "hi".into(),
+                fields: Default::default(),
+            },
         })
         .unwrap();
         let dir = w.dir().to_path_buf();
@@ -188,6 +192,7 @@ mod tests {
                 seq: i,
                 payload: Payload::Mark {
                     label: format!("compressible-{i}"),
+                    fields: Default::default(),
                 },
             })
             .unwrap();
