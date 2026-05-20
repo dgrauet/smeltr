@@ -14,6 +14,10 @@ use std::collections::{BTreeMap, HashMap};
 /// (t_enter_us, qualname, class_name, depth, fields)
 type OpenModule = (f64, String, String, u16, BTreeMap<String, FieldValue>);
 
+/// Collected ModelLoad event fields for post-loop emission.
+/// (path, size_bytes, t_start_ns, t_end_ns, sha8, framework)
+type ModelLoadEntry = (String, u64, u64, u64, Option<String>, Option<String>);
+
 /// Pretty-printed JSON dump of all events plus session metadata.
 pub fn to_json_raw(events: &[Event], meta: &SessionMetadata) -> String {
     let v = json!({
@@ -38,8 +42,13 @@ pub fn to_json_raw(events: &[Event], meta: &SessionMetadata) -> String {
 pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
     let mut trace_events: Vec<Value> = Vec::new();
 
-    // Process-naming metadata events for the three lanes.
-    for (pid, name) in &[(1, "Python"), (2, "Metal CBs"), (3, "Kernels")] {
+    // Process-naming metadata events for the four lanes.
+    for (pid, name) in &[
+        (1, "Python"),
+        (2, "Metal CBs"),
+        (3, "Kernels"),
+        (4, "Model Loads"),
+    ] {
         trace_events.push(json!({
             "ph": "M",
             "name": "process_name",
@@ -48,6 +57,10 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
             "args": { "name": name },
         }));
     }
+
+    // Collect ModelLoad events for swim-lane and counter emission after
+    // the main event loop (counters need global sort by t_end_ns).
+    let mut model_loads: Vec<ModelLoadEntry> = Vec::new();
 
     // Pair-tracking maps:
     // module_call_id -> (t_enter_us, qualname, class_name, depth, fields)
@@ -211,7 +224,82 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                     "s": "g",
                 }));
             }
+            Payload::ModelLoad {
+                path,
+                size_bytes,
+                t_start_ns,
+                t_end_ns,
+                sha8,
+                framework,
+            } => {
+                model_loads.push((
+                    path.clone(),
+                    *size_bytes,
+                    *t_start_ns,
+                    *t_end_ns,
+                    sha8.clone(),
+                    framework.clone(),
+                ));
+            }
             _ => {}
+        }
+    }
+
+    // Emit ModelLoad swim-lane events (ph:"X") on pid=4.
+    for (path, size_bytes, t_start_ns, t_end_ns, sha8, framework) in &model_loads {
+        let basename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str());
+        let ts_us = *t_start_ns as f64 / 1000.0;
+        let dur_us = (*t_end_ns - *t_start_ns) as f64 / 1000.0;
+        let mut args = serde_json::Map::new();
+        args.insert("path".into(), serde_json::Value::String(path.clone()));
+        args.insert("size_bytes".into(), json!(size_bytes));
+        if let Some(s) = sha8 {
+            args.insert("sha8".into(), serde_json::Value::String(s.clone()));
+        }
+        if let Some(f) = framework {
+            args.insert("framework".into(), serde_json::Value::String(f.clone()));
+        }
+        trace_events.push(json!({
+            "ph": "X",
+            "name": basename,
+            "cat": "model-load",
+            "pid": 4,
+            "tid": 0,
+            "ts": ts_us,
+            "dur": dur_us,
+            "args": args,
+        }));
+    }
+
+    // Emit per-model counter tracks (ph:"C") — cumulative bytes, sorted by t_end_ns.
+    // Key: sha8 if present, else canonical path. Counter name: "model:<basename>".
+    {
+        let mut sorted = model_loads.clone();
+        sorted.sort_by_key(|(_, _, _, t_end, _, _)| *t_end);
+        // cumulative bytes per (key -> basename, cumulative_bytes)
+        let mut cumulative: HashMap<String, (String, u64)> = HashMap::new();
+        for (path, size_bytes, _t_start, t_end_ns, sha8, _framework) in &sorted {
+            let key = sha8.clone().unwrap_or_else(|| path.clone());
+            let basename = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path.as_str())
+                .to_string();
+            let ts_us = *t_end_ns as f64 / 1000.0;
+            let entry = cumulative.entry(key).or_insert((basename.clone(), 0));
+            entry.1 += size_bytes;
+            let counter_name = format!("model:{}", entry.0);
+            let cum_bytes = entry.1;
+            trace_events.push(json!({
+                "ph": "C",
+                "name": counter_name,
+                "pid": 0,
+                "ts": ts_us,
+                "args": { "bytes": cum_bytes },
+            }));
         }
     }
 
@@ -247,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn chrome_trace_includes_three_process_metadata_events() {
+    fn chrome_trace_includes_four_process_metadata_events() {
         let meta = SessionMetadata::now_starting(SessionId::new());
         let s = to_chrome_trace(&[], &meta);
         let v = parse_trace(&s);
@@ -258,7 +346,7 @@ mod tests {
             .filter(|e| e["ph"] == "M")
             .map(|e| e["args"]["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names, vec!["Python", "Metal CBs", "Kernels"]);
+        assert_eq!(names, vec!["Python", "Metal CBs", "Kernels", "Model Loads"]);
     }
 
     #[test]
@@ -589,6 +677,204 @@ mod tests {
         assert_eq!(args.get("module_call_id").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(args.get("step").and_then(|v| v.as_i64()), Some(5));
         assert_eq!(args.get("sigma").and_then(|v| v.as_f64()), Some(0.5));
+    }
+
+    #[test]
+    fn chrome_trace_model_load_becomes_complete_event_on_lane_4() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![ev(
+            1,
+            5_000_000, // ts_mono_ns (used for ts_us in the event loop, not for t_start_ns)
+            Source::PythonSidecar,
+            Payload::ModelLoad {
+                path: "/models/llama/weights.safetensors".into(),
+                size_bytes: 1_048_576,
+                t_start_ns: 1_000_000,
+                t_end_ns: 3_000_000,
+                sha8: Some("ab12cd34".into()),
+                framework: Some("safetensors".into()),
+            },
+        )];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let x: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "X" && e["pid"] == 4)
+            .collect();
+        assert_eq!(x.len(), 1, "expected one ph:X on pid:4, got {x:?}");
+        assert_eq!(x[0]["name"], "weights.safetensors");
+        assert_eq!(x[0]["cat"], "model-load");
+        assert_eq!(x[0]["tid"], 0);
+        // ts = t_start_ns / 1000.0 = 1_000_000 / 1000.0 = 1000.0 µs
+        assert_eq!(x[0]["ts"], 1000.0);
+        // dur = (t_end_ns - t_start_ns) / 1000.0 = (3_000_000 - 1_000_000) / 1000.0 = 2000.0 µs
+        assert_eq!(x[0]["dur"], 2000.0);
+        assert_eq!(x[0]["args"]["path"], "/models/llama/weights.safetensors");
+        assert_eq!(x[0]["args"]["size_bytes"], 1_048_576_u64);
+        assert_eq!(x[0]["args"]["sha8"], "ab12cd34");
+        assert_eq!(x[0]["args"]["framework"], "safetensors");
+    }
+
+    #[test]
+    fn chrome_trace_model_load_emits_counter_with_cumulative_bytes() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![
+            ev(
+                1,
+                5_000_000,
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/llama/weights.safetensors".into(),
+                    size_bytes: 1_048_576, // 1 MB
+                    t_start_ns: 1_000_000,
+                    t_end_ns: 2_000_000,
+                    sha8: Some("ab12cd34".into()),
+                    framework: None,
+                },
+            ),
+            ev(
+                2,
+                6_000_000,
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/llama/weights.safetensors".into(),
+                    size_bytes: 2_097_152, // 2 MB
+                    t_start_ns: 3_000_000,
+                    t_end_ns: 4_000_000,
+                    sha8: Some("ab12cd34".into()),
+                    framework: None,
+                },
+            ),
+        ];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let counters: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "C")
+            .collect();
+        assert_eq!(
+            counters.len(),
+            2,
+            "expected 2 counter events, got {counters:?}"
+        );
+        // Sorted by t_end_ns: first at ts=t_end_ns/1000=2000.0 µs, bytes=1MB;
+        // second at ts=4000.0 µs, bytes=3MB cumulative.
+        assert_eq!(counters[0]["ts"], 2000.0);
+        assert_eq!(counters[0]["args"]["bytes"], 1_048_576_u64);
+        assert_eq!(counters[1]["ts"], 4000.0);
+        assert_eq!(counters[1]["args"]["bytes"], 3_145_728_u64);
+        // Both use same counter name
+        assert_eq!(counters[0]["name"], counters[1]["name"]);
+    }
+
+    #[test]
+    fn chrome_trace_model_load_distinct_models_have_distinct_counter_names() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![
+            ev(
+                1,
+                1_000_000,
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/llama/weights.safetensors".into(),
+                    size_bytes: 1_000,
+                    t_start_ns: 1_000_000,
+                    t_end_ns: 2_000_000,
+                    sha8: Some("aaaa1111".into()),
+                    framework: None,
+                },
+            ),
+            ev(
+                2,
+                3_000_000,
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/mistral/model.safetensors".into(),
+                    size_bytes: 2_000,
+                    t_start_ns: 3_000_000,
+                    t_end_ns: 4_000_000,
+                    sha8: Some("bbbb2222".into()),
+                    framework: None,
+                },
+            ),
+        ];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let counters: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "C")
+            .collect();
+        assert_eq!(counters.len(), 2);
+        let names: std::collections::HashSet<String> = counters
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "distinct models must have distinct counter names"
+        );
+        assert!(names.iter().any(|n| n.contains("weights.safetensors")));
+        assert!(names.iter().any(|n| n.contains("model.safetensors")));
+    }
+
+    #[test]
+    fn chrome_trace_model_load_omits_none_args() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![ev(
+            1,
+            5_000_000,
+            Source::PythonSidecar,
+            Payload::ModelLoad {
+                path: "/models/anon/weights.bin".into(),
+                size_bytes: 512,
+                t_start_ns: 1_000_000,
+                t_end_ns: 2_000_000,
+                sha8: None,
+                framework: None,
+            },
+        )];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let x: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "X" && e["pid"] == 4)
+            .collect();
+        assert_eq!(x.len(), 1);
+        let args = x[0]["args"].as_object().unwrap();
+        assert!(
+            !args.contains_key("sha8"),
+            "sha8 None must be omitted from args"
+        );
+        assert!(
+            !args.contains_key("framework"),
+            "framework None must be omitted from args"
+        );
+        assert_eq!(args["path"], "/models/anon/weights.bin");
+        assert_eq!(args["size_bytes"], 512_u64);
+    }
+
+    #[test]
+    fn chrome_trace_model_load_includes_lane_4_process_metadata() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let s = to_chrome_trace(&[], &meta);
+        let v = parse_trace(&s);
+        let pid4_meta: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "M" && e["pid"] == 4)
+            .collect();
+        assert_eq!(pid4_meta.len(), 1);
+        assert_eq!(pid4_meta[0]["args"]["name"], "Model Loads");
     }
 
     #[test]
