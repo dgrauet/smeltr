@@ -118,6 +118,7 @@ fn payload_kind(e: &Event) -> &'static str {
         Payload::ModuleEntered { .. } => "ModuleEntered",
         Payload::ModuleReturned { .. } => "ModuleReturned",
         Payload::MetalCbOps { .. } => "MetalCbOps",
+        Payload::ModelLoad { .. } => "ModelLoad",
     }
 }
 

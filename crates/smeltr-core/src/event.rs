@@ -243,6 +243,22 @@ pub enum Payload {
     ModuleReturned {
         module_call_id: u64,
     },
+    ModelLoad {
+        /// Canonical (absolute, symlinks resolved) path to the loaded file.
+        path: String,
+        /// File size on disk in bytes.
+        size_bytes: u64,
+        /// Monotonic ns at the start of the load call.
+        t_start_ns: u64,
+        /// Monotonic ns at the end of the load call (close/return).
+        t_end_ns: u64,
+        /// First 8 hex chars of sha256(canonical_path) — stable color key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha8: Option<String>,
+        /// "safetensors" | "mlx" | "torch" — for debugging.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        framework: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -924,6 +940,98 @@ mod tests {
                 },
                 Source::PythonSidecar,
             );
+        }
+    }
+
+    #[test]
+    fn cbor_round_trip_model_load_full() {
+        round_trip(
+            Payload::ModelLoad {
+                path: "/models/gemma-2b/model.safetensors".into(),
+                size_bytes: 2_147_483_648,
+                t_start_ns: 1_000_000_000,
+                t_end_ns: 1_500_000_000,
+                sha8: Some("deadbeef".into()),
+                framework: Some("safetensors".into()),
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_model_load_minimal() {
+        round_trip(
+            Payload::ModelLoad {
+                path: "/models/model.safetensors".into(),
+                size_bytes: 1_073_741_824,
+                t_start_ns: 2_000_000_000,
+                t_end_ns: 2_800_000_000,
+                sha8: None,
+                framework: None,
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_model_load_optional_fields_not_serialized_when_none() {
+        let p = Payload::ModelLoad {
+            path: "/tmp/x.safetensors".into(),
+            size_bytes: 100,
+            t_start_ns: 1,
+            t_end_ns: 2,
+            sha8: None,
+            framework: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&p, &mut buf).unwrap();
+        let v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let map = v.as_map().expect("must serialize as CBOR map");
+        for key in ["sha8", "framework"] {
+            assert!(
+                !map.iter()
+                    .any(|(k, _)| k.as_text().map(|t| t == key).unwrap_or(false)),
+                "{key}=None must not emit a key"
+            );
+        }
+    }
+
+    #[test]
+    fn cbor_decodes_legacy_model_load_without_sha8_and_framework() {
+        // Hand-craft a CBOR map without the optional sha8 / framework fields.
+        let legacy = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("ModelLoad".into()),
+            ),
+            (
+                ciborium::Value::Text("path".into()),
+                ciborium::Value::Text("/models/old.safetensors".into()),
+            ),
+            (
+                ciborium::Value::Text("size_bytes".into()),
+                ciborium::Value::Integer(500u64.into()),
+            ),
+            (
+                ciborium::Value::Text("t_start_ns".into()),
+                ciborium::Value::Integer(10u64.into()),
+            ),
+            (
+                ciborium::Value::Text("t_end_ns".into()),
+                ciborium::Value::Integer(20u64.into()),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut buf).unwrap();
+        let decoded: Payload = ciborium::from_reader(&buf[..]).unwrap();
+        match decoded {
+            Payload::ModelLoad {
+                sha8, framework, ..
+            } => {
+                assert_eq!(sha8, None);
+                assert_eq!(framework, None);
+            }
+            other => panic!("expected ModelLoad, got {other:?}"),
         }
     }
 
