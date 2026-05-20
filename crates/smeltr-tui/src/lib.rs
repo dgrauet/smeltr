@@ -3,6 +3,7 @@
 pub mod app;
 pub mod breakdown;
 pub mod live;
+pub mod models;
 pub mod render;
 pub mod replay;
 pub mod state;

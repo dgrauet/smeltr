@@ -36,10 +36,23 @@ pub struct RenderCtx {
     pub paused: bool,
     pub mode_label: &'static str,
     pub show_hot_kernels: bool,
+    pub show_models: bool,
 }
 
 pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx) {
     let area = frame.area();
+
+    // Models view takes the entire central area (below the timeline header).
+    if ctx.show_models {
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(area);
+        render_timeline(frame, outer[0], state, ctx);
+        crate::models::render(frame, outer[1], state);
+        return;
+    }
+
     // When the optional "Hot kernels" panel is hidden, layout is identical
     // to the original 3-section grid. When visible, an extra 8-row strip is
     // inserted between the mid grid and the notices panel.

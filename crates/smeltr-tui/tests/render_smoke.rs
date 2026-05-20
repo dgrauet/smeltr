@@ -69,6 +69,7 @@ fn render_after_synthetic_events_shows_all_panels() {
                 paused: false,
                 mode_label: "live",
                 show_hot_kernels: false,
+                show_models: false,
             },
         )
     })
@@ -118,6 +119,7 @@ fn hot_kernels_panel_renders_when_toggled_on() {
                 paused: false,
                 mode_label: "live",
                 show_hot_kernels: true,
+                show_models: false,
             },
         )
     })
