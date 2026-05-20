@@ -201,6 +201,7 @@ mod tests {
                     class_name: "Scope".into(),
                     parent_call_id: None,
                     depth: 0,
+                    fields: Default::default(),
                 },
             ),
             ev(
@@ -394,6 +395,7 @@ mod tests {
                         class_name: "Scope".into(),
                         parent_call_id: None,
                         depth: 0,
+                        fields: Default::default(),
                     },
                 ),
                 ev(

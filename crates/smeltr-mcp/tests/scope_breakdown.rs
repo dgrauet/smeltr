@@ -40,6 +40,7 @@ fn user_scope_appears_as_qualname_in_breakdown_tree() {
                 class_name: "Scope".into(),
                 parent_call_id: None,
                 depth: 0,
+                fields: Default::default(),
             },
         ),
         ev(
