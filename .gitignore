@@ -30,3 +30,5 @@ coverage.xml
 
 # Local-only Claude Code artifacts (scheduled tasks, etc.)
 .claude/
+.smoke-test-export.json
+.smoke-test-trace.json
