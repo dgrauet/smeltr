@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/dgrauet/smeltr/compare/v0.4.1...v0.5.0) (2026-05-20)
+
+
+### Features
+
+* **mcp,cli:** field-filter for get_inference_breakdown and smeltr breakdown ([#50](https://github.com/dgrauet/smeltr/issues/50)) ([34a6b42](https://github.com/dgrauet/smeltr/commit/34a6b42cd1fa8b0608f51a8347d9f78a84630e79))
+* structured fields on smeltr.mark (replace JSON-in-label) ([#52](https://github.com/dgrauet/smeltr/issues/52)) ([a38921a](https://github.com/dgrauet/smeltr/commit/a38921a4e8019fbd863f0cd1919a8ea70b3d891b))
+* **tui:** surface scope fields + symbol/kind in breakdown view ([#53](https://github.com/dgrauet/smeltr/issues/53)) ([51924bc](https://github.com/dgrauet/smeltr/commit/51924bc45f9fc21c0c54f15ee8bf2ab2cc3dadd8))
+
 ## [0.4.1](https://github.com/dgrauet/smeltr/compare/v0.4.0...v0.4.1) (2026-05-20)
 
 
