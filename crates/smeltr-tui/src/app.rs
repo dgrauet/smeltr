@@ -22,6 +22,7 @@ pub struct App {
     pub mode_label: &'static str,
     pub quit_requested: bool,
     pub show_hot_kernels: bool,
+    pub show_models: bool,
 }
 
 impl App {
@@ -33,6 +34,7 @@ impl App {
             mode_label,
             quit_requested: false,
             show_hot_kernels: false,
+            show_models: false,
         }
     }
 
@@ -85,6 +87,7 @@ impl App {
                     paused: self.paused,
                     mode_label: self.mode_label,
                     show_hot_kernels: self.show_hot_kernels,
+                    show_models: self.show_models,
                 };
                 term.draw(|f| render(f, &self.state, ctx))?;
                 last_draw = Instant::now();
@@ -105,6 +108,9 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Char('K') => {
                 self.show_hot_kernels = !self.show_hot_kernels;
+            }
+            KeyCode::Char('M') => {
+                self.show_models = !self.show_models;
             }
             _ => {}
         }
@@ -157,6 +163,19 @@ mod tests {
         assert!(app.show_hot_kernels);
         app.handle_key(KeyCode::Char('K'));
         assert!(!app.show_hot_kernels);
+    }
+
+    #[test]
+    fn handle_key_uppercase_m_toggles_models_view() {
+        let mut app = App::new("test");
+        assert!(!app.show_models);
+        app.handle_key(KeyCode::Char('M'));
+        assert!(app.show_models);
+        app.handle_key(KeyCode::Char('M'));
+        assert!(!app.show_models);
+        // Lowercase 'm' does NOT toggle.
+        app.handle_key(KeyCode::Char('m'));
+        assert!(!app.show_models);
     }
 
     #[test]
