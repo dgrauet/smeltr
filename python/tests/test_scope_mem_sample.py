@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import smeltr
-from smeltr import _modules, _mlx
+from smeltr import _mlx, _modules
 
 
 def _emits():
