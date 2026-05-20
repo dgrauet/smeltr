@@ -52,6 +52,10 @@ smeltr tui
 
 For semantic GPU-time attribution from MLX code, the optional Python sidecar
 adds `smeltr.scope("name", **fields)` and `smeltr.mark("label", **fields)`.
+It also auto-tracks every `safetensors.safe_open` / `mlx.core.load` call as
+a `ModelLoad` event — surfaces "model loaded twice" bugs in the TUI (key `M`),
+in `smeltr analyze` (rule `duplicate-model-load`), in chrome-trace
+(swim lane + per-model counter), and via MCP (`get_model_loads`).
 See [`docs/usage.md`](docs/usage.md) and the
 [migration guide](docs/migration-from-bespoke-profilers.md) for moving off
 bespoke profilers.

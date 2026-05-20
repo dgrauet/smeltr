@@ -236,6 +236,38 @@ inner = sum(1 for l in r.stdout.splitlines() if 'inner.pass' in l)
 print('PASS' if inner == 1 else f'FAIL: {inner} inner.pass rows (expected 1)')
 "
 
+# v0.6.0 PR1 — ModelLoad events emitted (sidecar wrapped mx.load).
+assert_py "v0.6.0 model_load events present" "
+import json
+with open('$JSON') as f:
+    d = json.load(f)
+events = d if isinstance(d, list) else d.get('events', d)
+loads = [e for e in events if e.get('payload', {}).get('kind') == 'ModelLoad']
+paths = [e['payload'].get('path', '') for e in loads]
+ok = sum(1 for p in paths if p.endswith('smoke-model.safetensors')) >= 2
+print('PASS' if ok else f'FAIL: {len(loads)} ModelLoad events, paths={paths}')
+"
+
+# v0.6.0 PR1 — duplicate-model-load analyzer rule fires.
+assert_py "v0.6.0 duplicate-model-load finding" "
+import subprocess
+r = subprocess.run(['$SMELTR', 'analyze', '$SHORT_ID'], capture_output=True, text=True)
+out = r.stdout.lower()
+print('PASS' if 'duplicate load of' in out or 'loaded 2 times' in out else 'FAIL: ' + r.stdout[:200])
+"
+
+# v0.6.0 PR3 — chrome-trace exposes Model Loads swim lane + counter track.
+assert_py "v0.6.0 chrome-trace model lane + counter" "
+import json
+with open('$TRACE') as f:
+    d = json.load(f)
+events = d if isinstance(d, list) else d.get('traceEvents', d)
+lane = [e for e in events if e.get('pid') == 4 and e.get('ph') == 'X' and e.get('cat') == 'model-load']
+counters = [e for e in events if e.get('ph') == 'C' and str(e.get('name','')).startswith('model:')]
+ok = len(lane) >= 2 and len(counters) >= 2
+print('PASS' if ok else f'FAIL: {len(lane)} lane events, {len(counters)} counters')
+"
+
 # --- summary -------------------------------------------------------------
 
 echo

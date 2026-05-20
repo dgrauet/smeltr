@@ -1,9 +1,10 @@
 """Canonical smoke-test workload for smeltr.
 
 Covers the surfaces exercised by GitHub issues #19, #31, #38, #40, #43,
-#46, #47. Runs as a one-shot Python program — no CLI args. The companion
-script `scripts/smoke-test.sh` invokes this under `smeltr record` and
-inspects the resulting session.
+#46, #47 plus the PR1/PR2/PR3 safetensors-load tracker. Runs as a
+one-shot Python program — no CLI args. The companion script
+`scripts/smoke-test.sh` invokes this under `smeltr record` and inspects
+the resulting session.
 
 Workload shape:
 - 3 named scopes with structured `**fields` (testing #43, #46).
@@ -15,11 +16,15 @@ Workload shape:
   sample on enter/exit must still register).
 - Final `mark()` with structured fields (testing the v0.4.2 mark
   refactor).
+- Deliberate duplicate safetensors load — same canonical path loaded
+  twice via `mx.load` to exercise the v0.6.0 ModelLoad event,
+  duplicate-model-load analyzer rule, and chrome-trace counter track.
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
 
 os.environ.setdefault("SMELTR_STACK_CAPTURE", "1")
 
@@ -47,6 +52,13 @@ def main() -> None:
     # Pass-through scope with no mx.eval — tests #47 synchronous samples.
     with smeltr.scope("typed", layer=3, fp_dtype="bfloat16", causal=True):
         pass
+
+    # PR1/2/3: write a tiny safetensors file and load it twice from the
+    # same path — should produce 2 ModelLoad events + 1 duplicate finding.
+    model_path = os.path.join(tempfile.gettempdir(), "smoke-model.safetensors")
+    mx.save_safetensors(model_path, {"w": mx.random.uniform(shape=(64, 64))})
+    _ = mx.load(model_path)
+    _ = mx.load(model_path)
 
     # Structured mark (v0.4.2): label + fields.
     smeltr.mark("smoke-checkpoint", phase="final", ok=True)
