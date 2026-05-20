@@ -27,6 +27,7 @@ fn breakdown_command_renders_table() {
                 class_name: "Linear".into(),
                 parent_call_id: None,
                 depth: 0,
+                fields: Default::default(),
             },
         },
         Event {

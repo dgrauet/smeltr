@@ -41,6 +41,15 @@ pub struct StackFrame {
     pub funcname: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum FieldValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpSample {
     pub name: String,
@@ -226,13 +235,13 @@ pub enum Payload {
         class_name: String,
         parent_call_id: Option<u64>,
         depth: u16,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        fields: std::collections::BTreeMap<String, FieldValue>,
     },
     ModuleReturned {
         module_call_id: u64,
     },
 }
-
-impl Eq for Payload {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
@@ -244,8 +253,6 @@ pub struct Event {
     pub seq: u64,
     pub payload: Payload,
 }
-
-impl Eq for Event {}
 
 #[cfg(test)]
 mod tests {
@@ -666,6 +673,7 @@ mod tests {
                 class_name: "Linear".into(),
                 parent_call_id: Some(3),
                 depth: 4,
+                fields: Default::default(),
             },
             Source::PythonSidecar,
         );
@@ -828,6 +836,62 @@ mod tests {
             },
             Source::PythonSidecar,
         );
+    }
+
+    #[test]
+    fn cbor_round_trip_module_entered_with_fields() {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("step".to_string(), FieldValue::Int(5));
+        fields.insert("sigma".to_string(), FieldValue::Float(0.5));
+        fields.insert("tag".to_string(), FieldValue::String("a".into()));
+        fields.insert("ok".to_string(), FieldValue::Bool(true));
+        round_trip(
+            Payload::ModuleEntered {
+                module_call_id: 1,
+                module_def_id: 100,
+                qualname: "denoise.step".into(),
+                class_name: "Scope".into(),
+                parent_call_id: None,
+                depth: 0,
+                fields,
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_decodes_legacy_module_entered_without_fields() {
+        let legacy = Payload::ModuleEntered {
+            module_call_id: 1,
+            module_def_id: 100,
+            qualname: "old".into(),
+            class_name: "Module".into(),
+            parent_call_id: None,
+            depth: 0,
+            fields: std::collections::BTreeMap::new(),
+        };
+        round_trip(legacy, Source::PythonSidecar);
+    }
+
+    #[test]
+    fn cbor_round_trip_field_value_variants() {
+        use FieldValue::*;
+        for v in [Bool(false), Int(-42), Float(1.5), String("x".into())] {
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("v".to_string(), v);
+            round_trip(
+                Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 0,
+                    qualname: "x".into(),
+                    class_name: "x".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields,
+                },
+                Source::PythonSidecar,
+            );
+        }
     }
 
     #[test]

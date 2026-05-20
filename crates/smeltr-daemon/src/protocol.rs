@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use smeltr_core::event::Event;
 use smeltr_core::session::SessionId;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op")]
 pub enum ClientToDaemon {
     /// Open a new connection. Client identifies itself for logs.

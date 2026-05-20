@@ -178,6 +178,26 @@ rejected for `async def` functions and generator functions, because the
 scope would enter and exit before the coroutine or generator body runs.
 Use the `with` form inside the body instead.
 
+**Structured metadata via `**fields`:** attach typed key/value pairs to a
+scope without encoding them in the name:
+
+```python
+with smeltr.scope("denoise.step", step=step_idx, sigma=float(sigma)):
+    cond_x0 = model(**cond_kwargs)
+    mx.core.eval(cond_x0)
+
+@smeltr.scope("forward", layer=3)
+def forward(self, x): ...
+```
+
+Field values accepted natively: `bool`, `int`, `float`, `str`. Other
+types are stringified via `str()` so the call never raises. Fields land
+in the `ModuleEntered` event payload's `fields` map (CBOR-typed, decoded
+on the Rust side as `FieldValue::{Bool,Int,Float,String}`). The
+breakdown analyzers currently aggregate by `qualname` only and ignore
+`fields` — future MCP tools can surface them for filtering/grouping
+(e.g. "show only `denoise.step` scopes with `sigma > 0.3`").
+
 ### Symbolic kernel names
 
 The Metal hook captures each Compute Pipeline State Object's underlying
@@ -305,6 +325,13 @@ Two sections:
 
 The MCP `get_memory_breakdown` tool returns the same two arrays.
 
+**Async-grace window:** because MLX schedules GPU work asynchronously
+(`mx.eval` returns before the CB completes), the analyzer holds each
+scope "open for samples" for an additional 500 ms past `ModuleReturned`
+so the late-arriving `MetalDeviceMemSample` events still attribute to
+the right scope. Without this, short scopes around lazy-materialized
+work would report `sample_count = 0`.
+
 Memory comparison: `smeltr compare` and the MCP `compare_sessions`
 tool now include a `MEMORY DELTAS` section / `memory_deltas` field
 showing per-scope peak deltas — useful for confirming an
@@ -343,6 +370,13 @@ The top non-smeltr Python frame is used for attribution; deeper
 frames are still recorded in the event log but not aggregated.
 File names are reduced to basename (`attention.py:127`) so moves
 keep grouping intact; renaming functions loses correlation.
+
+**Async-grace window:** the analyzer applies a 500 ms grace to
+`MlxEvalReturned.t_out` when `was_async=true`, so command buffers that
+complete after the synchronous return still attribute to the originating
+eval call. Without this, real workloads (where `mx.eval` typically
+returns in ~5 ms while CBs complete tens to hundreds of ms later) would
+return an empty origins list.
 
 ## Typical workflow
 

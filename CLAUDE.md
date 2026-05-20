@@ -59,6 +59,18 @@ Project: Metal/MLX observability tool for macOS Apple Silicon.
   the daemon socket should pass `scope_token` from `SMELTR_SCOPE_TOKEN` if set,
   or routing will fall back to PID match (which breaks under `uv`/`poetry`
   launchers — see #31).
+- **Structured payload fields with floats**: when a `Payload` variant gains an
+  `f64` (e.g. via `FieldValue::Float`), `impl Eq for Payload {}` (and any
+  transitive `Eq` impl on `Event`/`ClientToDaemon`) must be removed. `PartialEq`
+  is enough for tests; verify nothing uses Payload as a HashMap/HashSet key
+  (`git grep "HashMap<.*Payload"` etc.).
+- **Async-grace in window-based analyzers**: when correlating `MlxEvalEntered/
+  MlxEvalReturned` or `ModuleEntered/ModuleReturned` windows with `MetalCbOps`
+  or `MetalDeviceMemSample` events, extend the `t_out` (or keep the scope alive
+  in a `draining` list) by `ASYNC_GRACE_NS = 500_000_000` ns. MLX returns from
+  `mx.eval` before the GPU CBs complete (~5 ms eval, ~30-300 ms CB) — without
+  the grace, attribution silently drops most events. See `breakdown.rs`,
+  `dispatch_origins.rs`, `memory.rs` for the canonical pattern.
 
 ## Build
 
