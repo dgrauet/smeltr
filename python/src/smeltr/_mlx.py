@@ -215,6 +215,32 @@ def _get_mx_metal() -> Any | None:
     return None
 
 
+def read_device_memory_bytes() -> tuple[int, int] | None:
+    """Synchronously read (allocated, recommended_max) from mx.metal.
+
+    Returns None if mx.metal is unavailable. Never raises — observability
+    must not break user code.
+
+    `recommended_max` falls back to 0 if the MLX build doesn't expose
+    `get_memory_limit()`. The analyzer only uses `allocated_bytes` for
+    peak/avg, so 0 is harmless.
+    """
+    metal = _get_mlx_memory_api()
+    if metal is None:
+        return None
+    try:
+        allocated = int(metal.get_active_memory())
+    except Exception:
+        return None
+    max_b = 0
+    try:
+        if hasattr(metal, "get_memory_limit"):
+            max_b = int(metal.get_memory_limit())
+    except Exception:
+        pass
+    return allocated, max_b
+
+
 def start_polling(poll_hz: float) -> None:
     """Start the background memory poller. Safe to call multiple times."""
     global _poll_thread

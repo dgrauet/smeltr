@@ -193,10 +193,14 @@ def forward(self, x): ...
 Field values accepted natively: `bool`, `int`, `float`, `str`. Other
 types are stringified via `str()` so the call never raises. Fields land
 in the `ModuleEntered` event payload's `fields` map (CBOR-typed, decoded
-on the Rust side as `FieldValue::{Bool,Int,Float,String}`). The
-breakdown analyzers currently aggregate by `qualname` only and ignore
-`fields` — future MCP tools can surface them for filtering/grouping
-(e.g. "show only `denoise.step` scopes with `sigma > 0.3`").
+on the Rust side as `FieldValue::{Bool,Int,Float,String}`).
+
+Fields surface in: `query_events` payload (`fields` map), `export_session
+--format json`, `export_session --format chrome-trace` (merged into the
+chrome-trace `args` object), and `get_inference_breakdown` (per-scope
+`fields` map). Sibling scopes with the same `qualname` but distinct
+field values appear as separate nodes in the breakdown tree, so the
+analyzer naturally distinguishes them.
 
 ### Symbolic kernel names
 
@@ -331,6 +335,16 @@ scope "open for samples" for an additional 500 ms past `ModuleReturned`
 so the late-arriving `MetalDeviceMemSample` events still attribute to
 the right scope. Without this, short scopes around lazy-materialized
 work would report `sample_count = 0`.
+
+**Per-scope synchronous samples:** every `smeltr.scope("name")` enter
+and exit triggers a direct `MTLDevice.currentAllocatedSize` read,
+emitted as a `MetalDeviceMemSample` event with `at_event="scope_enter"`
+or `"scope_exit"`. This guarantees `sample_count >= 2` for every user
+scope even when the scope is too short to hit the async sampler.
+Auto-wrapped `mlx.nn.Module.__call__` calls do NOT trigger these reads
+(would balloon overhead at module granularity — thousands of MTL reads
+per inference step). Disable with `SMELTR_SCOPE_MEM_SAMPLE=0` if the
+extra reads are unwanted.
 
 Memory comparison: `smeltr compare` and the MCP `compare_sessions`
 tool now include a `MEMORY DELTAS` section / `memory_deltas` field

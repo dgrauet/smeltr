@@ -40,9 +40,11 @@ fn fixture_with_op() -> ModuleBreakdown {
                 kind: None,
             }],
             diagnostics: None,
+            fields: Default::default(),
         }],
         ops: vec![],
         diagnostics: None,
+        fields: Default::default(),
     }
 }
 
@@ -68,9 +70,11 @@ fn breakdown_renders_qualnames() {
                 children: vec![],
                 ops: vec![],
                 diagnostics: None,
+                fields: Default::default(),
             }],
             ops: vec![],
             diagnostics: Some(Diagnostics::default()),
+            fields: Default::default(),
         }),
         ..Default::default()
     };

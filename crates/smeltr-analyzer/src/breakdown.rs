@@ -18,7 +18,7 @@ pub struct OpAttribution {
     pub kind: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModuleBreakdown {
     pub qualname: String,
     pub class_name: String,
@@ -32,6 +32,8 @@ pub struct ModuleBreakdown {
     pub ops: Vec<OpAttribution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<Diagnostics>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fields: std::collections::BTreeMap<String, smeltr_core::event::FieldValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -64,6 +66,7 @@ struct CallNode {
     eval_count: u64,
     cb_count: u64,
     ops_buf: HashMap<String, OpAgg>,
+    fields: std::collections::BTreeMap<String, smeltr_core::event::FieldValue>,
 }
 
 struct EvalInterval {
@@ -89,12 +92,14 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 qualname,
                 class_name,
                 parent_call_id,
+                fields,
                 ..
             } => {
                 let node = CallNode {
                     qualname: qualname.clone(),
                     class_name: class_name.clone(),
                     parent: *parent_call_id,
+                    fields: fields.clone(),
                     ..Default::default()
                 };
                 if let Some(p) = parent_call_id {
@@ -309,6 +314,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             children,
             ops,
             diagnostics: None,
+            fields: n.fields.clone(),
         }
     }
 
@@ -349,6 +355,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             children: vec![],
             ops: unscoped_ops_vec,
             diagnostics: None,
+            fields: Default::default(),
         });
     }
     root_children.sort_by_key(|b| std::cmp::Reverse(b.gpu_ns_subtree));
@@ -369,6 +376,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             malformed_returns,
             ops_cbs_without_samples,
         }),
+        fields: Default::default(),
     })
 }
 
@@ -1331,12 +1339,15 @@ mod tests {
                     children: vec![],
                     ops: vec![],
                     diagnostics: None,
+                    fields: Default::default(),
                 }],
                 ops: vec![],
                 diagnostics: None,
+                fields: Default::default(),
             }],
             ops: vec![],
             diagnostics: Some(Diagnostics::default()),
+            fields: Default::default(),
         }
     }
 
@@ -1360,9 +1371,11 @@ mod tests {
                 children: vec![],
                 ops,
                 diagnostics: None,
+                fields: Default::default(),
             }],
             ops: vec![],
             diagnostics: Some(Diagnostics::default()),
+            fields: Default::default(),
         }
     }
 
@@ -1484,6 +1497,7 @@ mod tests {
                         kind: None,
                     }],
                     diagnostics: None,
+                    fields: Default::default(),
                 },
                 ModuleBreakdown {
                     qualname: "B".into(),
@@ -1511,14 +1525,130 @@ mod tests {
                         },
                     ],
                     diagnostics: None,
+                    fields: Default::default(),
                 },
             ],
             ops: vec![],
             diagnostics: Some(Diagnostics::default()),
+            fields: Default::default(),
         };
         let s = render_ops_flat(&root, 10);
         assert!(s.contains("Matmul"));
         assert!(s.contains("1.500")); // 1500 ns formatted as us → "1.500"
         assert!(s.contains("Softmax"));
+    }
+
+    #[test]
+    fn compute_propagates_fields_into_module_breakdown() {
+        use smeltr_core::event::{Event, FieldValue, Payload, Source};
+        use std::collections::BTreeMap;
+        use uuid::Uuid;
+
+        let mut fields = BTreeMap::new();
+        fields.insert("layer".into(), FieldValue::Int(3));
+        fields.insert("kind".into(), FieldValue::String("matmul".into()));
+
+        let events = vec![
+            Event {
+                ts_mono_ns: 1_000_000,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 1,
+                payload: Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 0,
+                    qualname: "forward".into(),
+                    class_name: "Scope".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields,
+                },
+            },
+            Event {
+                ts_mono_ns: 2_000_000,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 2,
+                payload: Payload::ModuleReturned { module_call_id: 1 },
+            },
+        ];
+        let root = compute(events).unwrap();
+        let forward = root
+            .children
+            .iter()
+            .find(|c| c.qualname == "forward")
+            .expect("forward child");
+        assert_eq!(forward.fields.get("layer"), Some(&FieldValue::Int(3)));
+        assert_eq!(
+            forward.fields.get("kind"),
+            Some(&FieldValue::String("matmul".into()))
+        );
+    }
+
+    #[test]
+    fn compute_distinguishes_siblings_by_fields() {
+        use smeltr_core::event::{Event, FieldValue, Payload, Source};
+        use std::collections::BTreeMap;
+        use uuid::Uuid;
+
+        let make_pass = |seq: u64, ts: u64, cid: u64, idx: i64| Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::PythonSidecar,
+            pid: None,
+            seq,
+            payload: Payload::ModuleEntered {
+                module_call_id: cid,
+                module_def_id: 0,
+                qualname: "inner.pass".into(),
+                class_name: "Scope".into(),
+                parent_call_id: None,
+                depth: 0,
+                fields: {
+                    let mut m = BTreeMap::new();
+                    m.insert("pass_idx".into(), FieldValue::Int(idx));
+                    m
+                },
+            },
+        };
+        let ret = |seq: u64, ts: u64, cid: u64| Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::PythonSidecar,
+            pid: None,
+            seq,
+            payload: Payload::ModuleReturned {
+                module_call_id: cid,
+            },
+        };
+
+        let events = vec![
+            make_pass(1, 100, 1, 0),
+            ret(2, 200, 1),
+            make_pass(3, 300, 2, 1),
+            ret(4, 400, 2),
+            make_pass(5, 500, 3, 2),
+            ret(6, 600, 3),
+        ];
+        let root = compute(events).unwrap();
+        let passes: Vec<&ModuleBreakdown> = root
+            .children
+            .iter()
+            .filter(|c| c.qualname == "inner.pass")
+            .collect();
+        assert_eq!(passes.len(), 3, "three sibling inner.pass nodes");
+        let idxs: Vec<&FieldValue> = passes
+            .iter()
+            .map(|p| p.fields.get("pass_idx").expect("pass_idx present"))
+            .collect();
+        assert!(idxs.contains(&&FieldValue::Int(0)));
+        assert!(idxs.contains(&&FieldValue::Int(1)));
+        assert!(idxs.contains(&&FieldValue::Int(2)));
     }
 }

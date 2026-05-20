@@ -14,22 +14,49 @@ from __future__ import annotations
 import contextlib
 import functools
 import inspect
+import os
 from collections.abc import Callable, Generator
 from typing import Any, TypeVar, cast
 
-from smeltr import _modules
+from smeltr import _mlx, _modules
 
 _SCOPE_CLASS_NAME = "Scope"
 
 F = TypeVar("F", bound=Callable[..., Any])
 
 
+def _scope_mem_sample_enabled() -> bool:
+    return os.environ.get("SMELTR_SCOPE_MEM_SAMPLE", "1") != "0"
+
+
+def _emit_scope_mem_sample(at_event: str) -> None:
+    if not _scope_mem_sample_enabled():
+        return
+    read = _mlx.read_device_memory_bytes()
+    if read is None:
+        return
+    allocated, recommended_max = read
+    try:
+        _modules._emit(
+            {
+                "kind": "MetalDeviceMemSample",
+                "allocated_bytes": allocated,
+                "recommended_max_bytes": recommended_max,
+                "at_event": at_event,
+            }
+        )
+    except Exception:
+        pass
+
+
 @contextlib.contextmanager
 def _scope_cm(name: str, fields: dict[str, Any] | None = None) -> Generator[None, None, None]:
     cid = _modules._push(name, _SCOPE_CLASS_NAME, id_of=id(name), fields=fields)
+    _emit_scope_mem_sample("scope_enter")
     try:
         yield
     finally:
+        _emit_scope_mem_sample("scope_exit")
         _modules._pop(cid)
 
 

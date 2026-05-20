@@ -6,9 +6,13 @@
 //!   Perfetto, Speedscope).
 
 use serde_json::{json, Value};
-use smeltr_core::event::{Event, Payload};
+use smeltr_core::event::{Event, FieldValue, Payload};
 use smeltr_core::session::SessionMetadata;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+/// Stored entry for an in-flight `ModuleEntered` event.
+/// (t_enter_us, qualname, class_name, depth, fields)
+type OpenModule = (f64, String, String, u16, BTreeMap<String, FieldValue>);
 
 /// Pretty-printed JSON dump of all events plus session metadata.
 pub fn to_json_raw(events: &[Event], meta: &SessionMetadata) -> String {
@@ -46,8 +50,8 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
     }
 
     // Pair-tracking maps:
-    // module_call_id -> (t_enter_us, qualname, class_name, depth)
-    let mut open_modules: HashMap<u64, (f64, String, String, u16)> = HashMap::new();
+    // module_call_id -> (t_enter_us, qualname, class_name, depth, fields)
+    let mut open_modules: HashMap<u64, OpenModule> = HashMap::new();
     // cb_id -> (t_commit_us, queue_id, label)
     let mut open_cbs: HashMap<u64, (f64, u64, Option<String>)> = HashMap::new();
     // cb_id -> Vec<OpSample> queued for emission once the CB completes
@@ -62,18 +66,34 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                 qualname,
                 class_name,
                 depth,
+                fields,
                 ..
             } => {
                 open_modules.insert(
                     *module_call_id,
-                    (ts_us, qualname.clone(), class_name.clone(), *depth),
+                    (
+                        ts_us,
+                        qualname.clone(),
+                        class_name.clone(),
+                        *depth,
+                        fields.clone(),
+                    ),
                 );
             }
             Payload::ModuleReturned { module_call_id } => {
-                if let Some((t_enter, qualname, class_name, depth)) =
+                if let Some((t_enter, qualname, class_name, depth, fields)) =
                     open_modules.remove(module_call_id)
                 {
                     let dur = ts_us - t_enter;
+                    let mut args = serde_json::Map::new();
+                    args.insert("class_name".into(), serde_json::Value::String(class_name));
+                    args.insert("module_call_id".into(), json!(module_call_id));
+                    for (k, v) in fields {
+                        args.insert(
+                            k,
+                            serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
                     trace_events.push(json!({
                         "ph": "X",
                         "name": qualname,
@@ -81,10 +101,7 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                         "tid": depth,
                         "ts": t_enter,
                         "dur": dur,
-                        "args": {
-                            "class_name": class_name,
-                            "module_call_id": module_call_id,
-                        },
+                        "args": args,
                     }));
                 }
             }
@@ -492,5 +509,112 @@ mod tests {
         let v = parse_trace(&s);
         assert_eq!(v["metadata"]["name"], "ltx2-baseline");
         assert_eq!(v["displayTimeUnit"], "ms");
+    }
+
+    #[test]
+    fn chrome_trace_module_entered_with_fields_merges_into_args() {
+        use smeltr_core::event::{Event, FieldValue, Payload, Source};
+        use std::collections::BTreeMap;
+        use uuid::Uuid;
+
+        let mut fields = BTreeMap::new();
+        fields.insert("step".into(), FieldValue::Int(5));
+        fields.insert("sigma".into(), FieldValue::Float(0.5));
+
+        let events = vec![
+            Event {
+                ts_mono_ns: 1_000_000,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 1,
+                payload: Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 0,
+                    qualname: "denoise.step".into(),
+                    class_name: "Scope".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields,
+                },
+            },
+            Event {
+                ts_mono_ns: 2_000_000,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 2,
+                payload: Payload::ModuleReturned { module_call_id: 1 },
+            },
+        ];
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let s = to_chrome_trace(&events, &meta);
+        let v = parse_trace(&s);
+        let entries = v["traceEvents"]
+            .as_array()
+            .expect("traceEvents is an array");
+        let evt = entries
+            .iter()
+            .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("denoise.step"))
+            .expect("denoise.step event present");
+        let args = evt.get("args").expect("args present").as_object().unwrap();
+        assert_eq!(
+            args.get("class_name").and_then(|v| v.as_str()),
+            Some("Scope")
+        );
+        assert_eq!(args.get("module_call_id").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(args.get("step").and_then(|v| v.as_i64()), Some(5));
+        assert_eq!(args.get("sigma").and_then(|v| v.as_f64()), Some(0.5));
+    }
+
+    #[test]
+    fn chrome_trace_module_entered_empty_fields_omits_keys() {
+        use smeltr_core::event::{Event, Payload, Source};
+        use uuid::Uuid;
+
+        let events = vec![
+            Event {
+                ts_mono_ns: 1_000_000,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 1,
+                payload: Payload::ModuleEntered {
+                    module_call_id: 7,
+                    module_def_id: 0,
+                    qualname: "plain".into(),
+                    class_name: "Scope".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields: Default::default(),
+                },
+            },
+            Event {
+                ts_mono_ns: 2_000_000,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 2,
+                payload: Payload::ModuleReturned { module_call_id: 7 },
+            },
+        ];
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let s = to_chrome_trace(&events, &meta);
+        let v = parse_trace(&s);
+        let entries = v["traceEvents"].as_array().unwrap();
+        let evt = entries
+            .iter()
+            .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("plain"))
+            .unwrap();
+        let args = evt.get("args").unwrap().as_object().unwrap();
+        assert_eq!(
+            args.len(),
+            2,
+            "only class_name + module_call_id, got {args:?}"
+        );
     }
 }
