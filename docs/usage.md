@@ -356,6 +356,44 @@ attribution). MLX is typically single-thread on the producer side so
 this matches real workloads. Multi-thread cases may misattribute
 samples to the wrong scope.
 
+### Model load tracking
+
+Surface every `safetensors.safe_open` / `safetensors.torch.load_file` /
+`mlx.core.load` call as a first-class `ModelLoad` event — with the
+canonical file path, size in bytes, start/end monotonic timestamps, and
+a stable 8-char path hash (`sha8`) used as a color key in the TUI and
+chrome-trace.
+
+Motivation: catches "Gemma loaded twice" type bugs that look like GPU
+memory pressure or thermal-watchdog issues but are actually a model
+being mapped into VRAM more than once.
+
+The sidecar auto-wraps these calls when `smeltr record` is the parent
+process (or after `smeltr.attach()` in always-on mode). No code change
+required in the target program.
+
+**Three ways to see it:**
+
+- **TUI** — press `M` to toggle the *Models* view. Top pane: one
+  colored bar per load with size; bottom pane: cumulative GPU memory
+  joined from `MetalDeviceMemSample` events.
+- **Analyzer rule** — `smeltr analyze <session>` emits a
+  `[Warning] Model <basename> loaded N times` finding when the exact
+  same canonical path is loaded more than once in a session.
+- **Chrome-trace export** — `smeltr export <session> --format chrome-trace`
+  adds a dedicated *Model Loads* swim lane (`pid=4`) plus one counter
+  track per model (`name="model:<basename>"`). Opens natively as a
+  stacked-area chart in Perfetto / chrome://tracing.
+- **MCP** — `get_model_loads(session)` returns each load with
+  `duplicate_of: usize | null` populated for repeats, plus a
+  `duplicate_count` rollup.
+
+**What it misses:** loads that bypass safetensors/MLX (a bare `mmap`
+from C++, a raw `numpy.load`, a torch `.bin`). For LTX / MLX
+workloads this isn't a concern — every weight load goes through one
+of the three wrapped entrypoints. For exotic stacks, you'd need an
+additional mmap hook (not implemented).
+
 ### Dispatch origins
 
 Map kernel dispatches back to the Python source file:line that
@@ -459,6 +497,7 @@ Every tool accepts a session ref as short id (8 hex), full UUID, or
 | `get_dispatch_origins` | Per-(kind, file:line) attribution | requires `SMELTR_STACK_CAPTURE=1` at record time |
 | `compare_sessions` | A/B regression analysis | `scope_deltas`, `op_deltas`, `memory_deltas`, `origin_deltas`, scopes-only-in-A/B |
 | `export_session` | Dump for external viewer | writes chrome-trace JSON (or raw JSON) to `output_path` |
+| `get_model_loads` | Inspect safetensors / `mlx.load` calls + flag duplicates | `loads[].{path,size_bytes,duration_ns,sha8,duplicate_of}`, `duplicate_count` |
 
 ### Typical agent workflow
 
