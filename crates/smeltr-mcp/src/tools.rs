@@ -9,6 +9,7 @@ pub mod inference_breakdown;
 pub mod list_sessions;
 pub mod memory_breakdown;
 pub mod metal_cb_history;
+pub mod model_loads;
 pub mod op_summary;
 pub mod query_events;
 pub mod session_summary;

@@ -71,6 +71,11 @@ pub fn dispatch_call(name: &str, args: serde_json::Value) -> Result<serde_json::
             let r = tools::memory_breakdown::run(p)?;
             Ok(serde_json::to_value(r)?)
         }
+        "get_model_loads" => {
+            let p: tools::model_loads::Params = serde_json::from_value(args)?;
+            let r = tools::model_loads::run(p)?;
+            Ok(serde_json::to_value(r)?)
+        }
         other => Err(ToolError::BadArgs(format!("unknown tool {other:?}"))),
     }
 }
@@ -230,6 +235,10 @@ impl ServerHandler for SmeltrMcpServer {
             tool::<crate::tools::export_session::Params>(
                 "export_session",
                 "Export a recorded session to chrome-trace JSON (openable in chrome://tracing / Perfetto / Speedscope) or raw JSON. Writes to disk and returns the file path.",
+            ),
+            tool::<crate::tools::model_loads::Params>(
+                "get_model_loads",
+                "List all model loads in a session with duplicate detection. Returns each load with duration_ns and a duplicate_of index when the same path was loaded more than once.",
             ),
         ];
         Ok(ListToolsResult::with_all_items(tools))
