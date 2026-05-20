@@ -5,6 +5,18 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 const HOT_KERNELS_WINDOW_NS: u64 = 30 * 1_000_000_000;
 const HOT_KERNELS_CAP: usize = 4096;
+const MODEL_LOADS_CAP: usize = 256;
+const GPU_MEM_SAMPLES_CAP: usize = 1024;
+
+#[derive(Debug, Clone)]
+pub struct ModelLoadSample {
+    pub path: String,
+    pub size_bytes: u64,
+    pub t_start_ns: u64,
+    pub t_end_ns: u64,
+    pub sha8: Option<String>,
+    pub framework: Option<String>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct UiState {
@@ -19,6 +31,8 @@ pub struct UiState {
     pub proc_top: Vec<ProcEntry>,
     pub log_feed: VecDeque<LogEntry>,
     pub hot_kernels: VecDeque<HotKernelSample>,
+    pub model_loads: Vec<ModelLoadSample>,
+    pub gpu_mem_samples: Vec<(u64, u64)>,
     pub session_short: Option<String>,
     pub last_ts_wall_ns: u64,
     pub last_ts_mono_ns: u64,
@@ -265,6 +279,34 @@ impl UiState {
             }
             Payload::MlxPanicTriggered { condition } => {
                 self.push_log(ev.ts_mono_ns, "mlx-panic".into(), condition.clone());
+            }
+            Payload::MetalDeviceMemSample {
+                allocated_bytes, ..
+            } => {
+                self.gpu_mem_samples.push((ev.ts_mono_ns, *allocated_bytes));
+                if self.gpu_mem_samples.len() > GPU_MEM_SAMPLES_CAP {
+                    self.gpu_mem_samples.remove(0);
+                }
+            }
+            Payload::ModelLoad {
+                path,
+                size_bytes,
+                t_start_ns,
+                t_end_ns,
+                sha8,
+                framework,
+            } => {
+                self.model_loads.push(ModelLoadSample {
+                    path: path.clone(),
+                    size_bytes: *size_bytes,
+                    t_start_ns: *t_start_ns,
+                    t_end_ns: *t_end_ns,
+                    sha8: sha8.clone(),
+                    framework: framework.clone(),
+                });
+                if self.model_loads.len() > MODEL_LOADS_CAP {
+                    self.model_loads.remove(0);
+                }
             }
             Payload::MetalCbOps { ops, .. } => {
                 for op in ops {
@@ -539,6 +581,58 @@ mod tests {
         let top = s.top_hot_kernels(5);
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].0, "new");
+    }
+
+    #[test]
+    fn ingest_model_load_appends_sample() {
+        let mut s = UiState::default();
+        assert_eq!(s.model_loads.len(), 0);
+        s.ingest(&ev(
+            1_000_000_000,
+            Payload::ModelLoad {
+                path: "/models/gemma-2b/model.safetensors".into(),
+                size_bytes: 2_147_483_648,
+                t_start_ns: 1_000_000_000,
+                t_end_ns: 1_500_000_000,
+                sha8: Some("deadbeef".into()),
+                framework: Some("safetensors".into()),
+            },
+        ));
+        assert_eq!(s.model_loads.len(), 1);
+        assert_eq!(s.model_loads[0].path, "/models/gemma-2b/model.safetensors");
+        assert_eq!(s.model_loads[0].size_bytes, 2_147_483_648);
+        assert_eq!(s.model_loads[0].sha8.as_deref(), Some("deadbeef"));
+        assert_eq!(s.model_loads[0].framework.as_deref(), Some("safetensors"));
+        // A second load appends.
+        s.ingest(&ev(
+            2_000_000_000,
+            Payload::ModelLoad {
+                path: "/models/other/model.safetensors".into(),
+                size_bytes: 1_073_741_824,
+                t_start_ns: 2_000_000_000,
+                t_end_ns: 2_100_000_000,
+                sha8: None,
+                framework: None,
+            },
+        ));
+        assert_eq!(s.model_loads.len(), 2);
+    }
+
+    #[test]
+    fn ingest_gpu_mem_sample_appends() {
+        let mut s = UiState::default();
+        assert_eq!(s.gpu_mem_samples.len(), 0);
+        s.ingest(&ev(
+            100,
+            Payload::MetalDeviceMemSample {
+                allocated_bytes: 8_000_000_000,
+                recommended_max_bytes: 17_000_000_000,
+                at_event: "scope_enter".into(),
+            },
+        ));
+        assert_eq!(s.gpu_mem_samples.len(), 1);
+        assert_eq!(s.gpu_mem_samples[0].0, 100);
+        assert_eq!(s.gpu_mem_samples[0].1, 8_000_000_000);
     }
 
     #[test]
