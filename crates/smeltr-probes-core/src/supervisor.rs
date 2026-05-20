@@ -167,6 +167,7 @@ mod tests {
                 None,
                 Payload::Mark {
                     label: "alive".into(),
+                    fields: Default::default(),
                 },
             );
             Ok(())
@@ -188,6 +189,6 @@ mod tests {
         let events = sink.events.lock().unwrap();
         assert!(events
             .iter()
-            .any(|(_, _, p)| matches!(p, Payload::Mark { label } if label == "alive")));
+            .any(|(_, _, p)| matches!(p, Payload::Mark { label, .. } if label == "alive")));
     }
 }

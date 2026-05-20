@@ -84,6 +84,7 @@ mod tests {
             seq: ts,
             payload: Payload::Mark {
                 label: label.into(),
+                fields: Default::default(),
             },
         }
     }
@@ -124,7 +125,7 @@ mod tests {
         }
         play_task.await.unwrap();
         assert_eq!(got.len(), 3);
-        assert!(matches!(got[0].payload, Payload::Mark { ref label } if label == "a"));
+        assert!(matches!(got[0].payload, Payload::Mark { ref label, .. } if label == "a"));
     }
 
     #[tokio::test(start_paused = true)]

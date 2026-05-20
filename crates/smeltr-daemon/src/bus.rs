@@ -48,7 +48,10 @@ mod tests {
             source: Source::Mark,
             pid: None,
             seq,
-            payload: Payload::Mark { label: "x".into() },
+            payload: Payload::Mark {
+                label: "x".into(),
+                fields: Default::default(),
+            },
         }
     }
 

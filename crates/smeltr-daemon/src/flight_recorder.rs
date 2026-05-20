@@ -68,6 +68,7 @@ mod tests {
             seq: ts,
             payload: Payload::Mark {
                 label: format!("e-{ts}"),
+                fields: Default::default(),
             },
         }
     }

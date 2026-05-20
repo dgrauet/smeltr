@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import platform
 import sys
 import threading
@@ -117,10 +116,21 @@ def _emit(payload: dict, *, pid: int | None = None) -> None:
 
 
 def mark(label: str, **fields: object) -> None:
-    """Drop a labelled event on the timeline."""
+    """Drop a labelled event on the timeline.
+
+    Optional `**fields` are propagated as structured metadata in the
+    `Mark` event payload (same `FieldValue` enum used by `scope`).
+    Non-primitive types are stringified via `str()` so the call never
+    raises. Old behavior (JSON-encoding into the label string) is
+    removed — consumers querying `Mark.label` for legacy JSON suffixes
+    will need to read `Mark.fields` instead.
+    """
+    payload: dict[str, object] = {"kind": "Mark", "label": label}
     if fields:
-        label = f"{label} {json.dumps(fields, default=str, sort_keys=True)}"
-    _emit({"kind": "Mark", "label": label})
+        from smeltr._modules import _coerce_fields
+
+        payload["fields"] = _coerce_fields(fields)
+    _emit(payload)
 
 
 def now() -> int:

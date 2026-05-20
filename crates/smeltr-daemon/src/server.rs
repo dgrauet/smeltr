@@ -330,6 +330,7 @@ mod tests {
                 scope_token: None,
                 payload: Payload::Mark {
                     label: "from-test".into(),
+                    fields: Default::default(),
                 },
             },
         )

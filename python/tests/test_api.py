@@ -1,4 +1,3 @@
-import json
 import sys
 
 import pytest
@@ -31,7 +30,7 @@ def test_mark_emits_payload(fake_daemon):
     assert marks[0]["payload"]["label"] == "phase: video encode"
 
 
-def test_mark_with_fields_encodes_them(fake_daemon):
+def test_mark_with_fields_emits_structured_fields(fake_daemon):
     smeltr.attach(poll_hz=0)
     try:
         smeltr.mark("checkpoint", step=3, tag="warmup")
@@ -39,10 +38,9 @@ def test_mark_with_fields_encodes_them(fake_daemon):
         smeltr.detach()
     marks = [m for m in fake_daemon.received if m["payload"]["kind"] == "Mark"]
     assert len(marks) == 1
-    label = marks[0]["payload"]["label"]
-    assert label.startswith("checkpoint ")
-    extra = json.loads(label.split(" ", 1)[1])
-    assert extra == {"step": 3, "tag": "warmup"}
+    payload = marks[0]["payload"]
+    assert payload["label"] == "checkpoint"
+    assert payload["fields"] == {"step": 3, "tag": "warmup"}
 
 
 def test_session_context_emits_open_and_close(fake_daemon):

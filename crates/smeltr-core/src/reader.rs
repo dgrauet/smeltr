@@ -124,6 +124,7 @@ mod tests {
                 seq: i,
                 payload: Payload::Mark {
                     label: format!("m-{i}"),
+                    fields: Default::default(),
                 },
             })
             .unwrap();
@@ -179,6 +180,7 @@ mod tests {
                 seq: 1,
                 payload: Payload::Mark {
                     label: "legacy".into(),
+                    fields: Default::default(),
                 },
             },
         )
@@ -187,7 +189,7 @@ mod tests {
 
         let events = read_events(&dir).unwrap();
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0].payload, Payload::Mark { ref label } if label == "legacy"));
+        assert!(matches!(events[0].payload, Payload::Mark { ref label, .. } if label == "legacy"));
     }
 
     #[test]

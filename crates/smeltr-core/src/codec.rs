@@ -85,6 +85,7 @@ mod tests {
             seq,
             payload: Payload::Mark {
                 label: label.into(),
+                fields: Default::default(),
             },
         }
     }

@@ -45,6 +45,7 @@ fn grandchild_emit_with_token_lands_in_scoped_session() {
             Some("UUID-X"),
             Payload::Mark {
                 label: "from-grandchild-with-token".into(),
+                fields: Default::default(),
             },
         )
         .unwrap();
@@ -61,7 +62,7 @@ fn grandchild_emit_with_token_lands_in_scoped_session() {
         let has = evs.iter().any(|e| {
             matches!(
                 &e.payload,
-                Payload::Mark { label } if label == "from-grandchild-with-token"
+                Payload::Mark { label, .. } if label == "from-grandchild-with-token"
             )
         });
         if meta.session_id == scoped_id && has {

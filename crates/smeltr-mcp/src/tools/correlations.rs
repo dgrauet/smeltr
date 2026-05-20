@@ -90,6 +90,7 @@ mod tests {
             seq: 43,
             payload: Payload::Mark {
                 label: "within".into(),
+                fields: Default::default(),
             },
         })
         .unwrap();
@@ -103,6 +104,7 @@ mod tests {
             seq: 44,
             payload: Payload::Mark {
                 label: "outside".into(),
+                fields: Default::default(),
             },
         })
         .unwrap();

@@ -149,6 +149,7 @@ mod tests {
             seq: 1,
             payload: Payload::Mark {
                 label: label.into(),
+                fields: Default::default(),
             },
         })
         .unwrap();

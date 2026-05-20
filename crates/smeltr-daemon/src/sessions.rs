@@ -256,8 +256,15 @@ mod tests {
     fn session_lifecycle_appends_start_and_end() {
         let _home = temp_home();
         let s = ActiveSession::open_new().unwrap();
-        s.append(Source::Mark, None, Payload::Mark { label: "hi".into() })
-            .unwrap();
+        s.append(
+            Source::Mark,
+            None,
+            Payload::Mark {
+                label: "hi".into(),
+                fields: Default::default(),
+            },
+        )
+        .unwrap();
         s.finalize(Some(0), "test").unwrap();
 
         let dirs = list_sessions().unwrap();
@@ -364,8 +371,15 @@ mod tests {
             std::time::Duration::from_secs(60),
         ));
         let s = ActiveSession::open_new_with_recorder(Some(fr.clone())).unwrap();
-        s.append(Source::Mark, None, Payload::Mark { label: "x".into() })
-            .unwrap();
+        s.append(
+            Source::Mark,
+            None,
+            Payload::Mark {
+                label: "x".into(),
+                fields: Default::default(),
+            },
+        )
+        .unwrap();
         // SessionStarted (emitted by constructor) + Mark = 2 events in the ring.
         assert_eq!(fr.len(), 2);
         s.finalize(Some(0), "test").unwrap();

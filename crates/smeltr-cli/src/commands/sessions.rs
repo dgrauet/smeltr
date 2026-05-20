@@ -131,7 +131,7 @@ fn print_session(
     println!();
     for ev in events {
         let kind = match &ev.payload {
-            smeltr_core::event::Payload::Mark { label } => format!("mark    {label}"),
+            smeltr_core::event::Payload::Mark { label, .. } => format!("mark    {label}"),
             smeltr_core::event::Payload::SessionStarted { .. } => "session-started".into(),
             smeltr_core::event::Payload::SessionEnded { reason, .. } => {
                 format!("session-ended ({reason})")

@@ -9,7 +9,10 @@ pub async fn run(label: String) -> anyhow::Result<()> {
             source: Source::Mark,
             pid: Some(std::process::id()),
             scope_token: None,
-            payload: Payload::Mark { label },
+            payload: Payload::Mark {
+                label,
+                fields: Default::default(),
+            },
         })
         .await?;
     match resp {

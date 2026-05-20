@@ -37,6 +37,7 @@ fn render_after_synthetic_events_shows_all_panels() {
         1_000_000_000,
         Payload::Mark {
             label: "phase: encode".into(),
+            fields: Default::default(),
         },
     ));
     state.ingest(&ev(

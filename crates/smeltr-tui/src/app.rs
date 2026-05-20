@@ -169,7 +169,10 @@ mod tests {
             source: Source::Mark,
             pid: None,
             seq: 1,
-            payload: Payload::Mark { label: "x".into() },
+            payload: Payload::Mark {
+                label: "x".into(),
+                fields: Default::default(),
+            },
         });
         assert_eq!(app.state.events_total, 1);
         app.handle_key(KeyCode::Char('r'));

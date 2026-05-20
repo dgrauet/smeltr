@@ -64,6 +64,8 @@ pub struct OpSample {
 pub enum Payload {
     Mark {
         label: String,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        fields: std::collections::BTreeMap<String, FieldValue>,
     },
     SessionStarted {
         wall_unix_ns: u64,
@@ -276,7 +278,38 @@ mod tests {
 
     #[test]
     fn cbor_round_trip_mark() {
-        round_trip(Payload::Mark { label: "x".into() }, Source::Mark);
+        round_trip(
+            Payload::Mark {
+                label: "x".into(),
+                fields: Default::default(),
+            },
+            Source::Mark,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_mark_with_fields() {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("step".into(), FieldValue::Int(5));
+        fields.insert("ok".into(), FieldValue::Bool(true));
+        round_trip(
+            Payload::Mark {
+                label: "checkpoint".into(),
+                fields,
+            },
+            Source::Mark,
+        );
+    }
+
+    #[test]
+    fn cbor_decodes_legacy_mark_without_fields() {
+        round_trip(
+            Payload::Mark {
+                label: "plain".into(),
+                fields: std::collections::BTreeMap::new(),
+            },
+            Source::Mark,
+        );
     }
 
     #[test]

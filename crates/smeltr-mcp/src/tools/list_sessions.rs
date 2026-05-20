@@ -170,6 +170,7 @@ mod tests {
                 seq: i,
                 payload: Payload::Mark {
                     label: format!("m{i}"),
+                    fields: Default::default(),
                 },
             })
             .unwrap();
@@ -208,6 +209,7 @@ mod tests {
                 seq: i,
                 payload: Payload::Mark {
                     label: format!("m{i}"),
+                    fields: Default::default(),
                 },
             })
             .unwrap();
@@ -238,6 +240,7 @@ mod tests {
                 seq: i,
                 payload: Payload::Mark {
                     label: format!("m{i}"),
+                    fields: Default::default(),
                 },
             })
             .unwrap();
