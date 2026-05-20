@@ -71,6 +71,11 @@ enum Cmd {
         /// Print a flat cross-module ops table instead of the module tree.
         #[arg(long, default_value_t = false)]
         ops_flat: bool,
+        /// Filter by field equality. Repeatable. Format: key=value.
+        /// Keeps only nodes (and their ancestors) whose fields contain
+        /// all specified key/value pairs.
+        #[arg(long = "field", value_name = "KEY=VALUE")]
+        field_filter: Vec<String>,
     },
     /// Compare two recorded sessions: scope-level + op-kind GPU deltas
     /// plus scopes present in only one of the sessions.
@@ -166,6 +171,7 @@ fn main() -> anyhow::Result<()> {
                 top_ops,
                 no_ops,
                 ops_flat,
+                field_filter,
             } => commands::breakdown::run(
                 id,
                 last,
@@ -177,6 +183,7 @@ fn main() -> anyhow::Result<()> {
                 top_ops,
                 no_ops,
                 ops_flat,
+                field_filter,
             ),
             Cmd::Compare {
                 session_a,
