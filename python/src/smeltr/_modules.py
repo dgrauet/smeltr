@@ -58,7 +58,13 @@ def _current_stack() -> list[int]:
     return [frame["module_call_id"] for frame in _stack()]
 
 
-def _push(qualname: str, class_name: str, *, id_of: int) -> int:
+def _push(
+    qualname: str,
+    class_name: str,
+    *,
+    id_of: int,
+    fields: dict[str, Any] | None = None,
+) -> int:
     stack = _stack()
     parent = stack[-1]["module_call_id"] if stack else None
     cid = _next_call_id()
@@ -70,18 +76,33 @@ def _push(qualname: str, class_name: str, *, id_of: int) -> int:
         "depth": len(stack),
     }
     stack.append(frame)
-    _emit(
-        {
-            "kind": "ModuleEntered",
-            "module_call_id": cid,
-            "module_def_id": frame["module_def_id"],
-            "qualname": qualname,
-            "class_name": class_name,
-            "parent_call_id": parent,
-            "depth": frame["depth"],
-        }
-    )
+    payload: dict[str, Any] = {
+        "kind": "ModuleEntered",
+        "module_call_id": cid,
+        "module_def_id": frame["module_def_id"],
+        "qualname": qualname,
+        "class_name": class_name,
+        "parent_call_id": parent,
+        "depth": frame["depth"],
+    }
+    if fields:
+        payload["fields"] = _coerce_fields(fields)
+    _emit(payload)
     return cid
+
+
+def _coerce_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Coerce values to CBOR-friendly primitives (bool/int/float/str).
+
+    Non-primitives are stringified via str() so emit never raises.
+    """
+    out: dict[str, Any] = {}
+    for k, v in fields.items():
+        if isinstance(v, (bool, int, float, str)):
+            out[k] = v
+        else:
+            out[k] = str(v)
+    return out
 
 
 def _pop(expected_cid: int) -> None:
