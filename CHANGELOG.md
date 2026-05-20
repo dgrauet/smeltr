@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/dgrauet/smeltr/compare/v0.5.0...v0.6.0) (2026-05-20)
+
+
+### Features
+
+* chrome-trace counters + MCP get_model_loads tool (PR3/3) ([#60](https://github.com/dgrauet/smeltr/issues/60)) ([4e4fb98](https://github.com/dgrauet/smeltr/commit/4e4fb98c8aa5016019785e08eeac7d4d9c2fd1b2))
+* ModelLoad event + sidecar + duplicate-load analyzer (PR1/3) ([#57](https://github.com/dgrauet/smeltr/issues/57)) ([855782a](https://github.com/dgrauet/smeltr/commit/855782a7ebfc13a6ba02bca8b5b1fb421d89089d))
+* **tui:** Models view with cumulative GPU memory + stable colors (PR2/3) ([#59](https://github.com/dgrauet/smeltr/issues/59)) ([7e1e395](https://github.com/dgrauet/smeltr/commit/7e1e39528d4250c83add37cf7dc2d5d0b67a96a1))
+
 ## [0.5.0](https://github.com/dgrauet/smeltr/compare/v0.4.1...v0.5.0) (2026-05-20)
 
 
