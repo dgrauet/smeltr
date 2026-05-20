@@ -392,6 +392,13 @@ eval call. Without this, real workloads (where `mx.eval` typically
 returns in ~5 ms while CBs complete tens to hundreds of ms later) would
 return an empty origins list.
 
+## Migrating from a bespoke MLX profiler?
+
+If your project ships its own `profiling.section(name, **fields)` /
+`event(label, **fields)` pattern, see
+[`docs/migration-from-bespoke-profilers.md`](migration-from-bespoke-profilers.md)
+for a side-by-side API mapping and a removal checklist.
+
 ## Typical workflow
 
 ```
