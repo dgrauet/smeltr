@@ -10,6 +10,8 @@ use smeltr_core::event::{Event, OpSample, Payload};
 use std::collections::HashMap;
 use std::path::Path;
 
+const ASYNC_GRACE_NS: u64 = 500_000_000; // 500 ms — mirrors breakdown.rs
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DispatchOrigin {
     pub kind: String,
@@ -48,11 +50,18 @@ pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
                     open.insert(*call_id, (ev.ts_mono_ns, file_line));
                 }
             }
-            Payload::MlxEvalReturned { call_id, .. } => {
+            Payload::MlxEvalReturned {
+                call_id, was_async, ..
+            } => {
                 if let Some((t_in, file_line)) = open.remove(call_id) {
+                    let t_out = if *was_async {
+                        ev.ts_mono_ns.saturating_add(ASYNC_GRACE_NS)
+                    } else {
+                        ev.ts_mono_ns
+                    };
                     evals.push(EvalWindow {
                         t_in,
-                        t_out: ev.ts_mono_ns,
+                        t_out,
                         file_line,
                     });
                 }
@@ -162,6 +171,19 @@ mod tests {
         )
     }
 
+    fn ret_async(seq: u64, ts: u64, call_id: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Source::PythonSidecar,
+            Payload::MlxEvalReturned {
+                call_id,
+                duration_ns: 0,
+                was_async: true,
+            },
+        )
+    }
+
     fn ops(seq: u64, ts: u64, cb_id: u64, symbol: &str, gpu_ns: u64) -> Event {
         ev(
             seq,
@@ -257,5 +279,49 @@ mod tests {
         let lines: Vec<&str> = out.iter().map(|o| o.file_line.as_str()).collect();
         assert!(lines.contains(&"attention.py:100"));
         assert!(lines.contains(&"attention.py:200"));
+    }
+
+    #[test]
+    fn dispatch_origins_attributes_cb_arriving_after_async_return() {
+        // Repro for issue #38: MLX returns async at t=15, but the CB completes
+        // at t=100 (85 ms later, well inside the 500 ms grace window).
+        let evs = vec![
+            enter(1, 10, 1, "/user/script.py", 17),
+            ret_async(2, 15, 1),
+            ops(3, 100, 9, "gemm_bf16", 300),
+        ];
+        let out = compute_dispatch_origins(&evs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].file_line, "script.py:17");
+        assert_eq!(out[0].gpu_ns, 300);
+        assert_eq!(out[0].dispatch_count, 1);
+    }
+
+    #[test]
+    fn dispatch_origins_skips_cb_outside_grace() {
+        let evs = vec![
+            enter(1, 10, 1, "/user/script.py", 17),
+            ret_async(2, 15, 1),
+            // 600 ms past return.
+            ops(3, 600_000_015, 9, "gemm_bf16", 300),
+        ];
+        let out = compute_dispatch_origins(&evs);
+        assert!(out.is_empty(), "CB past grace must not be attributed");
+    }
+
+    #[test]
+    fn dispatch_origins_sync_return_does_not_apply_grace() {
+        // was_async=false: grace must NOT extend the window. A CB just past
+        // t_out should be dropped, preserving existing strict semantics.
+        let evs = vec![
+            enter(1, 10, 1, "/user/script.py", 17),
+            ret(2, 15, 1), // existing helper: was_async=false
+            ops(3, 100, 9, "gemm_bf16", 300),
+        ];
+        let out = compute_dispatch_origins(&evs);
+        assert!(
+            out.is_empty(),
+            "sync return must not extend window via grace"
+        );
     }
 }
