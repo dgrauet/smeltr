@@ -7,7 +7,13 @@ tree.
 
 ## Contents
 
-- [`usage.md`](usage.md) — mental model + recipes for day-to-day use.
+- [`usage.md`](usage.md) — mental model + recipes for day-to-day use
+  (scopes, marks, structured fields, memory tracking, naming sessions, MCP).
+- [`migration-from-bespoke-profilers.md`](migration-from-bespoke-profilers.md)
+  — moving an MLX project off a hand-rolled profiler to smeltr: API
+  equivalence table, boot sequence, JSON-report replacements.
+- [`dogfood-findings.md`](dogfood-findings.md) — verdicts and follow-ups
+  from dogfooding smeltr against real MLX workloads.
 - [`adr/`](adr/) — Architecture Decision Records.
   - [`0001-initial-architecture.md`](adr/0001-initial-architecture.md)
     — initial architecture (daemon + probes + hook + sidecars + flight
