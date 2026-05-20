@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4](https://github.com/dgrauet/smeltr/compare/v0.3.3...v0.3.4) (2026-05-20)
+
+
+### Bug Fixes
+
+* **analyzer:** 500ms async-grace for dispatch_origins and memory ([#38](https://github.com/dgrauet/smeltr/issues/38) [#40](https://github.com/dgrauet/smeltr/issues/40)) ([#41](https://github.com/dgrauet/smeltr/issues/41)) ([947ee99](https://github.com/dgrauet/smeltr/commit/947ee99dda3cd9a133aec23d3d8203510a4ddaca))
+
 ## [0.3.3](https://github.com/dgrauet/smeltr/compare/v0.3.2...v0.3.3) (2026-05-19)
 
 
