@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1](https://github.com/dgrauet/smeltr/compare/v0.4.0...v0.4.1) (2026-05-20)
+
+
+### Bug Fixes
+
+* surface scope **fields end-to-end + per-scope mem samples ([#46](https://github.com/dgrauet/smeltr/issues/46) [#47](https://github.com/dgrauet/smeltr/issues/47)) ([#48](https://github.com/dgrauet/smeltr/issues/48)) ([6226744](https://github.com/dgrauet/smeltr/commit/622674451080c4feedfaa5d591d527e8ae498c0e))
+
 ## [0.4.0](https://github.com/dgrauet/smeltr/compare/v0.3.4...v0.4.0) (2026-05-20)
 
 
