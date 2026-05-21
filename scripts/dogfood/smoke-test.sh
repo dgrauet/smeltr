@@ -268,6 +268,28 @@ ok = len(lane) >= 2 and len(counters) >= 2
 print('PASS' if ok else f'FAIL: {len(lane)} lane events, {len(counters)} counters')
 "
 
+# v0.6.x ModelUnload events emitted.
+assert_py "v0.6.x model unload events emitted" "
+import json
+with open('$JSON') as f:
+    d = json.load(f)
+events = d if isinstance(d, list) else d.get('events', d)
+unloads = [e for e in events if e.get('payload', {}).get('kind') == 'ModelUnload']
+ok = len(unloads) >= 1
+print('PASS' if ok else f'FAIL: {len(unloads)} ModelUnload events (expected >=1)')
+"
+
+# v0.6.x duplicate-model-load count is exactly 1 (not 2 or 3).
+# load #1 -> load #2 (dup) -> unload -> load #3 (not dup) = exactly 1 duplicate.
+assert_py "v0.6.x duplicate count is exactly 1" "
+import subprocess
+r = subprocess.run(['$SMELTR', 'analyze', '$SHORT_ID'], capture_output=True, text=True)
+out = r.stdout.lower()
+# Count lines containing 'duplicate load of' (one per duplicate finding).
+dup_lines = [l for l in out.splitlines() if 'duplicate load of' in l]
+print('PASS' if len(dup_lines) == 1 else f'FAIL: {len(dup_lines)} duplicate-load lines (expected 1); output={r.stdout[:200]}')
+"
+
 # --- summary -------------------------------------------------------------
 
 echo
