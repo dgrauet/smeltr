@@ -18,6 +18,13 @@ pub struct ModelLoadSample {
     pub framework: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelUnloadSample {
+    pub path: String,
+    pub t_ns: u64,
+    pub sha8: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UiState {
     pub events_total: u64,
@@ -32,6 +39,7 @@ pub struct UiState {
     pub log_feed: VecDeque<LogEntry>,
     pub hot_kernels: VecDeque<HotKernelSample>,
     pub model_loads: Vec<ModelLoadSample>,
+    pub model_unloads: Vec<ModelUnloadSample>,
     pub gpu_mem_samples: Vec<(u64, u64)>,
     pub session_short: Option<String>,
     pub last_ts_wall_ns: u64,
@@ -306,6 +314,16 @@ impl UiState {
                 });
                 if self.model_loads.len() > MODEL_LOADS_CAP {
                     self.model_loads.remove(0);
+                }
+            }
+            Payload::ModelUnload { path, t_ns, sha8 } => {
+                self.model_unloads.push(ModelUnloadSample {
+                    path: path.clone(),
+                    t_ns: *t_ns,
+                    sha8: sha8.clone(),
+                });
+                if self.model_unloads.len() > MODEL_LOADS_CAP {
+                    self.model_unloads.remove(0);
                 }
             }
             Payload::MetalCbOps { ops, .. } => {
@@ -616,6 +634,37 @@ mod tests {
             },
         ));
         assert_eq!(s.model_loads.len(), 2);
+    }
+
+    #[test]
+    fn ingest_model_unload_appends_sample() {
+        let mut s = UiState::default();
+        assert_eq!(s.model_unloads.len(), 0);
+        s.ingest(&ev(
+            2_000_000_000,
+            Payload::ModelUnload {
+                path: "/models/gemma-2b/model.safetensors".into(),
+                t_ns: 2_000_000_000,
+                sha8: Some("deadbeef".into()),
+            },
+        ));
+        assert_eq!(s.model_unloads.len(), 1);
+        assert_eq!(
+            s.model_unloads[0].path,
+            "/models/gemma-2b/model.safetensors"
+        );
+        assert_eq!(s.model_unloads[0].t_ns, 2_000_000_000);
+        assert_eq!(s.model_unloads[0].sha8.as_deref(), Some("deadbeef"));
+        // A second unload appends.
+        s.ingest(&ev(
+            3_000_000_000,
+            Payload::ModelUnload {
+                path: "/models/other/model.safetensors".into(),
+                t_ns: 3_000_000_000,
+                sha8: None,
+            },
+        ));
+        assert_eq!(s.model_unloads.len(), 2);
     }
 
     #[test]
