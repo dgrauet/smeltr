@@ -98,7 +98,7 @@ def _attach_unload_finalizer(obj: Any, canonical: str, sha8: str) -> Any:
     subclass so we can track GC. Returns the (possibly wrapped) object.
     """
     target = obj
-    if type(obj) is dict:  # noqa: E721 — exact type check, not isinstance
+    if type(obj) is dict:
         try:
             target = _WeakRefableDict(obj)
         except Exception:

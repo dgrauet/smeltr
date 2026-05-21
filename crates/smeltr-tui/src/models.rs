@@ -127,10 +127,12 @@ fn render_swim_lanes(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
 /// - A ModelUnload at t subtracts `size_bytes` (clamped to 0).
 ///
 /// Key: sha8 if present, else canonical path.
+pub type StackedBand = (String, Color, Vec<(f64, f64)>);
+
 pub fn compute_stacked_points(
     loads: &[ModelLoadSample],
     unloads: &[ModelUnloadSample],
-) -> Vec<(String, Color, Vec<(f64, f64)>)> {
+) -> Vec<StackedBand> {
     // Build a timeline of (t_ns, key, delta_bytes) events.
     // Sort by t_ns so bands are correct for interleaved loads/unloads.
     #[derive(Clone)]
@@ -260,7 +262,7 @@ fn render_gpu_mem_chart(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     let offset_sec = stack_t0_actual.saturating_sub(t0) as f64 / 1e9;
 
     // Shift all stacked points by the offset so they align on the same x-axis.
-    let stacked_shifted: Vec<(String, Color, Vec<(f64, f64)>)> = stacked
+    let stacked_shifted: Vec<StackedBand> = stacked
         .into_iter()
         .map(|(key, color, pts)| {
             let shifted: Vec<(f64, f64)> =
