@@ -21,8 +21,12 @@ pub struct ModelLoadInfo {
     pub duration_ns: u64,
     pub sha8: Option<String>,
     pub framework: Option<String>,
-    /// Index of the first load with the same canonical path. None if this is the first.
+    /// Index of the previous load with the same canonical path (chained: dup2 → dup1 → original).
+    /// None if this is the first load (or first after an unload).
     pub duplicate_of: Option<usize>,
+    /// Monotonic ns when the matching ModelUnload fired. None if still loaded (or unload not seen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unloaded_at_ns: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -34,39 +38,55 @@ pub struct Response {
     pub duplicate_count: usize,
 }
 
-/// Pure, testable logic: extract model loads and mark duplicates.
+/// Pure, testable logic: extract model loads, mark duplicates, and record unload timestamps.
+///
+/// Chronological walk:
+/// - `ModelLoad`: if the path is currently tracked, the new load is `duplicate_of`
+///   the previous load index; update the current index. Otherwise first load.
+/// - `ModelUnload`: look up the current load index for that path, set its
+///   `unloaded_at_ns`, remove from the map.
 pub fn compute_model_loads(events: &[Event]) -> Vec<ModelLoadInfo> {
     let mut loads: Vec<ModelLoadInfo> = Vec::new();
-    // Map from canonical path to first index in `loads`.
-    let mut first_seen: HashMap<String, usize> = HashMap::new();
+    // Map from canonical path to index of the most recent load in `loads`.
+    let mut current_load_idx: HashMap<String, usize> = HashMap::new();
 
     for ev in events {
-        if let Payload::ModelLoad {
-            path,
-            size_bytes,
-            t_start_ns,
-            t_end_ns,
-            sha8,
-            framework,
-        } = &ev.payload
-        {
-            let idx = loads.len();
-            let duplicate_of = if let Some(&first) = first_seen.get(path.as_str()) {
-                Some(first)
-            } else {
-                first_seen.insert(path.clone(), idx);
-                None
-            };
-            loads.push(ModelLoadInfo {
-                path: path.clone(),
-                size_bytes: *size_bytes,
-                t_start_ns: *t_start_ns,
-                t_end_ns: *t_end_ns,
-                duration_ns: t_end_ns - t_start_ns,
-                sha8: sha8.clone(),
-                framework: framework.clone(),
-                duplicate_of,
-            });
+        match &ev.payload {
+            Payload::ModelLoad {
+                path,
+                size_bytes,
+                t_start_ns,
+                t_end_ns,
+                sha8,
+                framework,
+            } => {
+                let idx = loads.len();
+                let duplicate_of = if let Some(&prev_idx) = current_load_idx.get(path.as_str()) {
+                    Some(prev_idx)
+                } else {
+                    None
+                };
+                // Update current load index for this path (whether or not it's a dup).
+                current_load_idx.insert(path.clone(), idx);
+                loads.push(ModelLoadInfo {
+                    path: path.clone(),
+                    size_bytes: *size_bytes,
+                    t_start_ns: *t_start_ns,
+                    t_end_ns: *t_end_ns,
+                    duration_ns: t_end_ns - t_start_ns,
+                    sha8: sha8.clone(),
+                    framework: framework.clone(),
+                    duplicate_of,
+                    unloaded_at_ns: None,
+                });
+            }
+            Payload::ModelUnload { path, t_ns, .. } => {
+                if let Some(&idx) = current_load_idx.get(path.as_str()) {
+                    loads[idx].unloaded_at_ns = Some(*t_ns);
+                    current_load_idx.remove(path.as_str());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -127,6 +147,19 @@ mod tests {
         )
     }
 
+    fn model_unload_ev(seq: u64, path: &str) -> Event {
+        ev(
+            seq,
+            seq * 1000,
+            Source::PythonSidecar,
+            Payload::ModelUnload {
+                path: path.to_string(),
+                t_ns: seq * 1000,
+                sha8: None,
+            },
+        )
+    }
+
     #[test]
     fn compute_model_loads_no_loads_returns_empty() {
         let evs: Vec<Event> = vec![];
@@ -143,10 +176,12 @@ mod tests {
         assert_eq!(result[0].size_bytes, 1024);
         assert_eq!(result[0].duration_ns, 500);
         assert!(result[0].duplicate_of.is_none());
+        assert!(result[0].unloaded_at_ns.is_none());
     }
 
     #[test]
-    fn compute_model_loads_three_same_path_marks_duplicates() {
+    fn compute_model_loads_three_same_path_chained_dup_refs() {
+        // Three loads without unloads: dup2 → dup1 → original (chained, not always → 0).
         let evs = vec![
             model_load_ev(1, "/models/weights.safetensors", 1024),
             model_load_ev(2, "/models/weights.safetensors", 1024),
@@ -154,21 +189,12 @@ mod tests {
         ];
         let result = compute_model_loads(&evs);
         assert_eq!(result.len(), 3);
-        // First is not a duplicate
+        // First is not a duplicate.
         assert!(result[0].duplicate_of.is_none());
-        // Second and third are duplicates of the first (index 0)
+        // Second duplicates the first (index 0).
         assert_eq!(result[1].duplicate_of, Some(0));
-        assert_eq!(result[2].duplicate_of, Some(0));
-    }
-
-    #[test]
-    fn compute_model_loads_duplicate_count_is_two_for_three_same_path() {
-        let evs = vec![
-            model_load_ev(1, "/models/weights.safetensors", 1024),
-            model_load_ev(2, "/models/weights.safetensors", 1024),
-            model_load_ev(3, "/models/weights.safetensors", 1024),
-        ];
-        let result = compute_model_loads(&evs);
+        // Third duplicates the second (index 1) — chained, not always → 0.
+        assert_eq!(result[2].duplicate_of, Some(1));
         let dup_count = result.iter().filter(|l| l.duplicate_of.is_some()).count();
         assert_eq!(dup_count, 2);
     }
@@ -183,6 +209,36 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert!(result[0].duplicate_of.is_none());
         assert!(result[1].duplicate_of.is_none());
+    }
+
+    #[test]
+    fn compute_model_loads_unload_sets_unloaded_at_ns() {
+        let evs = vec![
+            model_load_ev(1, "/models/a.safetensors", 1024),
+            model_unload_ev(2, "/models/a.safetensors"),
+        ];
+        let result = compute_model_loads(&evs);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].duplicate_of.is_none());
+        assert_eq!(result[0].unloaded_at_ns, Some(2 * 1000));
+    }
+
+    #[test]
+    fn compute_model_loads_load_unload_reload_no_dup_second_no_unloaded_at() {
+        // load → unload → reload: no dup, first has unloaded_at_ns, second does not.
+        let evs = vec![
+            model_load_ev(1, "/models/a.safetensors", 1024),
+            model_unload_ev(2, "/models/a.safetensors"),
+            model_load_ev(3, "/models/a.safetensors", 1024),
+        ];
+        let result = compute_model_loads(&evs);
+        assert_eq!(result.len(), 2);
+        // First load was unloaded.
+        assert!(result[0].duplicate_of.is_none());
+        assert_eq!(result[0].unloaded_at_ns, Some(2 * 1000));
+        // Second load is not a duplicate (unload cleared the map).
+        assert!(result[1].duplicate_of.is_none());
+        assert!(result[1].unloaded_at_ns.is_none());
     }
 
     #[test]
@@ -210,6 +266,7 @@ mod tests {
         assert_eq!(resp.loads.len(), 2);
         assert_eq!(resp.duplicate_count, 1);
         assert!(resp.loads[0].duplicate_of.is_none());
+        // Second duplicates first (index 0) — chained.
         assert_eq!(resp.loads[1].duplicate_of, Some(0));
     }
 }
