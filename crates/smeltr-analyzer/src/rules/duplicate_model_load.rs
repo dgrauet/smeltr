@@ -1,9 +1,9 @@
-//! Flags model files loaded more than once in a single session.
+//! Flags model files loaded more than once without an intervening ModelUnload.
 //!
-//! A duplicate is defined as two or more `ModelLoad` events with the same
-//! *exact* canonical path and `size_bytes`. Different paths that share the
-//! same basename are NOT considered duplicates — they may be different copies
-//! of the same model file.
+//! A duplicate is defined as a `ModelLoad` event where the same canonical path
+//! is already present in the "currently loaded" set (i.e. no `ModelUnload` for
+//! that path has been seen since the previous load). Loading → unloading →
+//! reloading is normal and is NOT flagged.
 
 use std::collections::HashMap;
 
@@ -19,57 +19,54 @@ impl Rule for DuplicateModelLoadRule {
     }
 
     fn check(&self, events: &[Event]) -> Vec<Finding> {
-        // key: (canonical_path, size_bytes) → all (t_start_ns, seq) occurrences
-        let mut seen: HashMap<(String, u64), Vec<(u64, u64)>> = HashMap::new();
-
-        for ev in events {
-            if let Payload::ModelLoad {
-                path,
-                size_bytes,
-                t_start_ns,
-                ..
-            } = &ev.payload
-            {
-                seen.entry((path.clone(), *size_bytes))
-                    .or_default()
-                    .push((*t_start_ns, ev.seq));
-            }
-        }
-
+        // Walk events in chronological order (by seq, which is monotonic).
+        // currently_loaded: canonical_path → (t_start_ns, size_bytes, seq) of the last load.
+        let mut currently_loaded: HashMap<String, (u64, u64, u64)> = HashMap::new();
         let mut out = Vec::new();
 
-        for ((path, size_bytes), occurrences) in &seen {
-            if occurrences.len() < 2 {
-                continue;
-            }
-
-            let n = occurrences.len();
-            let mb = *size_bytes as f64 / 1_048_576.0;
-            let basename = std::path::Path::new(path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(path.as_str());
-
-            let title = format!("Model {basename} loaded {n} times (size={mb:.1} MB)",);
-
-            // First occurrence is the "original"; all subsequent are duplicates.
-            let (first_t_start, _) = occurrences[0];
-
-            for (dup_t_start, dup_seq) in occurrences.iter().skip(1) {
-                let detail = format!(
-                    "Duplicate load of {path}: first at t={first_t_start} ns, \
-                     duplicate at t={dup_t_start} ns, size={size_bytes} bytes"
-                );
-                let evidence = EvidenceRef {
-                    seq: *dup_seq,
-                    ts_mono_ns: *dup_t_start,
-                    description: format!("ModelLoad path={path} size_bytes={size_bytes}"),
-                };
-                out.push(
-                    Finding::new(Severity::Warning, Category::ContributingFactor, &title)
-                        .with_detail(detail)
-                        .with_evidence(evidence),
-                );
+        for ev in events {
+            match &ev.payload {
+                Payload::ModelLoad {
+                    path,
+                    size_bytes,
+                    t_start_ns,
+                    ..
+                } => {
+                    if let Some((first_t_start, _, _)) = currently_loaded.get(path.as_str()) {
+                        // Already loaded — this is a duplicate.
+                        let mb = *size_bytes as f64 / 1_048_576.0;
+                        let basename = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(path.as_str());
+                        let title = format!(
+                            "Model {basename} loaded again without prior unload \
+                             (size={mb:.1} MB)"
+                        );
+                        let detail = format!(
+                            "Duplicate load of {path}: first at t={first_t_start} ns, \
+                             duplicate at t={t_start_ns} ns, size={size_bytes} bytes"
+                        );
+                        let evidence = EvidenceRef {
+                            seq: ev.seq,
+                            ts_mono_ns: *t_start_ns,
+                            description: format!("ModelLoad path={path} size_bytes={size_bytes}"),
+                        };
+                        out.push(
+                            Finding::new(Severity::Warning, Category::ContributingFactor, &title)
+                                .with_detail(detail)
+                                .with_evidence(evidence),
+                        );
+                        // Update to the new load's info.
+                        currently_loaded.insert(path.clone(), (*t_start_ns, *size_bytes, ev.seq));
+                    } else {
+                        currently_loaded.insert(path.clone(), (*t_start_ns, *size_bytes, ev.seq));
+                    }
+                }
+                Payload::ModelUnload { path, .. } => {
+                    currently_loaded.remove(path.as_str());
+                }
+                _ => {}
             }
         }
 
@@ -98,6 +95,18 @@ mod tests {
         )
     }
 
+    fn model_unload_event(ts: u64, path: &str) -> Event {
+        ev(
+            ts,
+            Source::PythonSidecar,
+            Payload::ModelUnload {
+                path: path.into(),
+                t_ns: ts,
+                sha8: None,
+            },
+        )
+    }
+
     #[test]
     fn single_load_produces_no_finding() {
         let events = vec![model_load_event(
@@ -113,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn two_loads_same_path_and_size_produce_one_finding() {
+    fn two_loads_same_path_without_unload_produce_one_finding() {
         let events = vec![
             model_load_event(
                 1_000_000_000,
@@ -130,10 +139,6 @@ mod tests {
         assert_eq!(findings.len(), 1, "two identical loads → one finding");
         assert_eq!(findings[0].severity, Severity::Warning);
         assert_eq!(findings[0].category, Category::ContributingFactor);
-        assert!(
-            findings[0].title.contains("2 times"),
-            "title must mention N=2"
-        );
         assert!(
             findings[0]
                 .detail
@@ -165,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn three_loads_same_path_produce_two_findings() {
+    fn three_loads_same_path_without_unload_produce_two_findings() {
         let events = vec![
             model_load_event(
                 1_000_000_000,
@@ -187,11 +192,58 @@ mod tests {
         assert_eq!(
             findings.len(),
             2,
-            "three loads of the same path → two duplicate findings"
+            "three loads of the same path (no unload) → two duplicate findings"
         );
         // All findings should reference the same path
         for f in &findings {
             assert!(f.detail.contains("/models/gemma/model.safetensors"));
         }
+    }
+
+    #[test]
+    fn load_then_unload_then_reload_produces_no_finding() {
+        // load → unload → reload is a legitimate pattern — must NOT flag.
+        let events = vec![
+            model_load_event(
+                1_000_000_000,
+                "/models/gemma/model.safetensors",
+                2_000_000_000,
+            ),
+            model_unload_event(4_000_000_000, "/models/gemma/model.safetensors"),
+            model_load_event(
+                6_000_000_000,
+                "/models/gemma/model.safetensors",
+                2_000_000_000,
+            ),
+        ];
+        let findings = DuplicateModelLoadRule.check(&events);
+        assert!(
+            findings.is_empty(),
+            "load → unload → reload must produce no finding, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn load_load_unload_produces_one_finding() {
+        // load → load (duplicate) → unload: the second load fires before the unload → 1 finding.
+        let events = vec![
+            model_load_event(
+                1_000_000_000,
+                "/models/gemma/model.safetensors",
+                2_000_000_000,
+            ),
+            model_load_event(
+                5_000_000_000,
+                "/models/gemma/model.safetensors",
+                2_000_000_000,
+            ),
+            model_unload_event(9_000_000_000, "/models/gemma/model.safetensors"),
+        ];
+        let findings = DuplicateModelLoadRule.check(&events);
+        assert_eq!(
+            findings.len(),
+            1,
+            "load → load → unload → 1 finding (second load precedes the unload)"
+        );
     }
 }
