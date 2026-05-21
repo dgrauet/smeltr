@@ -18,6 +18,10 @@ type OpenModule = (f64, String, String, u16, BTreeMap<String, FieldValue>);
 /// (path, size_bytes, t_start_ns, t_end_ns, sha8, framework)
 type ModelLoadEntry = (String, u64, u64, u64, Option<String>, Option<String>);
 
+/// Collected ModelUnload event fields for post-loop instant emission.
+/// (path, t_ns, sha8)
+type ModelUnloadEntry = (String, u64, Option<String>);
+
 /// Pretty-printed JSON dump of all events plus session metadata.
 pub fn to_json_raw(events: &[Event], meta: &SessionMetadata) -> String {
     let v = json!({
@@ -61,6 +65,8 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
     // Collect ModelLoad events for swim-lane and counter emission after
     // the main event loop (counters need global sort by t_end_ns).
     let mut model_loads: Vec<ModelLoadEntry> = Vec::new();
+    // Collect ModelUnload events for instant emission.
+    let mut model_unloads: Vec<ModelUnloadEntry> = Vec::new();
 
     // Pair-tracking maps:
     // module_call_id -> (t_enter_us, qualname, class_name, depth, fields)
@@ -241,8 +247,35 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                     framework.clone(),
                 ));
             }
+            Payload::ModelUnload { path, t_ns, sha8 } => {
+                model_unloads.push((path.clone(), *t_ns, sha8.clone()));
+            }
             _ => {}
         }
+    }
+
+    // Emit ModelUnload instant events (ph:"i") on pid=4.
+    for (path, t_ns, sha8) in &model_unloads {
+        let basename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str());
+        let ts_us = *t_ns as f64 / 1000.0;
+        let mut args = serde_json::Map::new();
+        args.insert("path".into(), serde_json::Value::String(path.clone()));
+        if let Some(s) = sha8 {
+            args.insert("sha8".into(), serde_json::Value::String(s.clone()));
+        }
+        trace_events.push(json!({
+            "ph": "i",
+            "name": format!("unload:{basename}"),
+            "cat": "model-unload",
+            "pid": 4,
+            "tid": 0,
+            "ts": ts_us,
+            "args": args,
+            "s": "p",
+        }));
     }
 
     // Emit ModelLoad swim-lane events (ph:"X") on pid=4.
@@ -875,6 +908,58 @@ mod tests {
             .collect();
         assert_eq!(pid4_meta.len(), 1);
         assert_eq!(pid4_meta[0]["args"]["name"], "Model Loads");
+    }
+
+    #[test]
+    fn chrome_trace_model_unload_emits_instant_on_pid4() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![
+            ev(
+                1,
+                1_000_000,
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/llama/weights.safetensors".into(),
+                    size_bytes: 1_048_576,
+                    t_start_ns: 1_000_000,
+                    t_end_ns: 2_000_000,
+                    sha8: Some("ab12cd34".into()),
+                    framework: None,
+                },
+            ),
+            ev(
+                2,
+                5_000_000,
+                Source::PythonSidecar,
+                Payload::ModelUnload {
+                    path: "/models/llama/weights.safetensors".into(),
+                    t_ns: 5_000_000,
+                    sha8: Some("ab12cd34".into()),
+                },
+            ),
+        ];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let instants: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "i" && e["pid"] == 4 && e["cat"] == "model-unload")
+            .collect();
+        assert_eq!(
+            instants.len(),
+            1,
+            "expected one ph:i on pid:4, got {instants:?}"
+        );
+        assert_eq!(instants[0]["name"], "unload:weights.safetensors");
+        // ts = t_ns / 1000.0 = 5_000_000 / 1000.0 = 5000.0 µs
+        assert_eq!(instants[0]["ts"], 5000.0);
+        assert_eq!(instants[0]["s"], "p");
+        assert_eq!(
+            instants[0]["args"]["path"],
+            "/models/llama/weights.safetensors"
+        );
+        assert_eq!(instants[0]["args"]["sha8"], "ab12cd34");
     }
 
     #[test]
