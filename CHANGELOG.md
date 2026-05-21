@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/dgrauet/smeltr/compare/v0.6.0...v0.7.0) (2026-05-21)
+
+
+### Features
+
+* ModelUnload tracking, per-model stacked area, and analyzer refinement ([#62](https://github.com/dgrauet/smeltr/issues/62)) ([f8b8510](https://github.com/dgrauet/smeltr/commit/f8b8510e2ac3e6c9bd8b2f48e94e4b9f95e979e1))
+
 ## [0.6.0](https://github.com/dgrauet/smeltr/compare/v0.5.0...v0.6.0) (2026-05-20)
 
 
