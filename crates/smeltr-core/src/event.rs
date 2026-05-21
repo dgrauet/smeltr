@@ -259,6 +259,15 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         framework: Option<String>,
     },
+    ModelUnload {
+        /// Same canonical path as the matching ModelLoad.
+        path: String,
+        /// Monotonic ns when the weakref finalizer fired.
+        t_ns: u64,
+        /// Join key with ModelLoad (sha256(canonical_path)[:8]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha8: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1068,6 +1077,60 @@ mod tests {
                 assert!(stack_frames.is_empty());
             }
             other => panic!("expected MlxEvalEntered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cbor_round_trip_model_unload_with_sha8() {
+        round_trip(
+            Payload::ModelUnload {
+                path: "/models/gemma-2b/model.safetensors".into(),
+                t_ns: 2_000_000_000,
+                sha8: Some("deadbeef".into()),
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_model_unload_without_sha8() {
+        round_trip(
+            Payload::ModelUnload {
+                path: "/models/model.safetensors".into(),
+                t_ns: 3_500_000_000,
+                sha8: None,
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_decodes_legacy_model_unload_without_sha8() {
+        // Hand-craft a CBOR map without the optional sha8 field.
+        let legacy = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("kind".into()),
+                ciborium::Value::Text("ModelUnload".into()),
+            ),
+            (
+                ciborium::Value::Text("path".into()),
+                ciborium::Value::Text("/models/old.safetensors".into()),
+            ),
+            (
+                ciborium::Value::Text("t_ns".into()),
+                ciborium::Value::Integer(9_000_000_000u64.into()),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut buf).unwrap();
+        let decoded: Payload = ciborium::from_reader(&buf[..]).unwrap();
+        match decoded {
+            Payload::ModelUnload { sha8, path, t_ns } => {
+                assert_eq!(sha8, None);
+                assert_eq!(path, "/models/old.safetensors");
+                assert_eq!(t_ns, 9_000_000_000);
+            }
+            other => panic!("expected ModelUnload, got {other:?}"),
         }
     }
 }
