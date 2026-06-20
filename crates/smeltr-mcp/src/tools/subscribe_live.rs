@@ -5,9 +5,12 @@
 //! event-sequence index (count consumed). See the design spec for why disk-tail
 //! beats a live bus bridge for a turn-based LLM consumer.
 
+use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, Payload};
+use smeltr_core::reader::{list_sessions, read_metadata};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
@@ -203,6 +206,62 @@ pub fn summarize_delta(
         model_loads,
         note,
     }
+}
+
+fn is_live(dir: &std::path::Path) -> bool {
+    read_metadata(dir)
+        .map(|m| m.ended_rfc3339.is_none())
+        .unwrap_or(false)
+}
+
+/// Pick the most-recent live session; fall back to the most-recent overall
+/// (with `live=false`). Errors only when no session exists at all.
+fn resolve_live_session() -> Result<(PathBuf, bool), ToolError> {
+    let metas: Vec<(PathBuf, smeltr_core::session::SessionMetadata)> = list_sessions()?
+        .into_iter()
+        .filter_map(|d| read_metadata(&d).ok().map(|m| (d, m)))
+        .collect();
+
+    let newest = |pred: &dyn Fn(&smeltr_core::session::SessionMetadata) -> bool| {
+        metas
+            .iter()
+            .filter(|(_, m)| pred(m))
+            .max_by(|a, b| a.1.started_rfc3339.cmp(&b.1.started_rfc3339))
+            .map(|(d, _)| d.clone())
+    };
+
+    if let Some(d) = newest(&|m| m.ended_rfc3339.is_none()) {
+        return Ok((d, true));
+    }
+    if let Some(d) = newest(&|_| true) {
+        return Ok((d, false));
+    }
+    Err(ToolError::BadArgs("no sessions found".to_string()))
+}
+
+pub fn run(params: Params) -> Result<Response, ToolError> {
+    let (dir, live) = match params.session.as_deref() {
+        Some(s) => {
+            let dir = resolve_session(s)?;
+            let live = is_live(&dir);
+            (dir, live)
+        }
+        None => resolve_live_session()?,
+    };
+    let meta = read_metadata(&dir).ok();
+    let session_id = meta
+        .as_ref()
+        .map(|m| m.session_id.short())
+        .unwrap_or_default();
+    let session_name = meta.as_ref().and_then(|m| m.name.clone());
+    let events = smeltr_core::reader::read_events(&dir)?;
+    Ok(summarize_delta(
+        &events,
+        params.cursor.unwrap_or(0),
+        session_id,
+        session_name,
+        live,
+    ))
 }
 
 #[cfg(test)]
@@ -410,6 +469,91 @@ mod tests {
     fn finalized_session_notes_finalized() {
         let evs: Vec<Event> = (0..5).map(|i| mark(i, i * 100)).collect();
         let r = summarize_delta(&evs, 3, "sid".into(), None, false);
+        assert_eq!(r.note.as_deref(), Some("session finalized"));
+    }
+
+    use smeltr_core::session::{SessionId, SessionMetadata};
+    use smeltr_core::writer::SessionWriter;
+
+    fn write_live_session(n: u64) -> SessionId {
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        for i in 0..n {
+            w.write_event(&mark(i, i * 100)).unwrap();
+        }
+        w.flush().unwrap(); // NOT finalize: session stays "live"
+        id
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn run_baseline_then_delta_no_double_count() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = write_live_session(3);
+
+        // First poll: baseline.
+        let r1 = run(Params {
+            session: Some(id.short()),
+            cursor: None,
+        })
+        .unwrap();
+        assert!(r1.live);
+        assert_eq!(r1.new_events, 3);
+        assert_eq!(r1.cursor, 3);
+        let sid = r1.session_id.clone();
+
+        // Second poll from the returned cursor: no overlap.
+        let r2 = run(Params {
+            session: Some(sid),
+            cursor: Some(r1.cursor),
+        })
+        .unwrap();
+        assert_eq!(r2.new_events, 0);
+        assert_eq!(r2.note.as_deref(), Some("no new events"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn default_session_picks_most_recent_live() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+
+        // One finalized session.
+        let id_old = SessionId::new();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(id_old)).unwrap();
+        w.write_event(&mark(0, 0)).unwrap();
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        // One live session (more recent).
+        let id_live = write_live_session(2);
+
+        let r = run(Params {
+            session: None,
+            cursor: None,
+        })
+        .unwrap();
+        assert!(r.live);
+        assert!(r.session_id.ends_with(&id_live.short()) || r.session_id == id_live.to_string());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn default_session_falls_back_to_finalized_with_live_false() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(id)).unwrap();
+        w.write_event(&mark(0, 0)).unwrap();
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let r = run(Params {
+            session: None,
+            cursor: None,
+        })
+        .unwrap();
+        assert!(!r.live);
         assert_eq!(r.note.as_deref(), Some("session finalized"));
     }
 }
