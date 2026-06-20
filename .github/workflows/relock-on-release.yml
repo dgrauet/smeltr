@@ -1,0 +1,50 @@
+name: relock-on-release-pr
+
+# release-please bumps the workspace version in Cargo.toml but not Cargo.lock;
+# re-lock on its PR so the committed lockfile matches the released version.
+on:
+  pull_request:
+    branches: [main]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: relock-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  relock:
+    # Gate on the release PR author (the RELEASE_PLEASE_TOKEN owner), not just the
+    # branch name. A `release-please--` branch prefix can be forged by any account
+    # with write access; the PR author cannot. This keeps the PAT scoped to the
+    # genuine release PR.
+    if: >-
+      startsWith(github.head_ref, 'release-please--') &&
+      github.event.pull_request.user.login == 'dgrauet'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          # Don't persist the PAT in .git/config; the push step re-supplies it
+          # via an explicit URL. Defense-in-depth, mirroring mlx-forge.
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Regenerate Cargo.lock
+        run: cargo update --workspace
+      - name: Commit and push if changed
+        env:
+          # Token is exposed only to this final step, which runs trusted git
+          # commands.
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if ! git diff --quiet Cargo.lock; then
+            git config user.name "smeltr-release"
+            git config user.email "release@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: sync Cargo.lock with release version"
+            git push "https://x-access-token:${RELEASE_PLEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+          fi
