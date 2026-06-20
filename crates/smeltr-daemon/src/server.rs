@@ -241,7 +241,7 @@ async fn handle_msg(
     }
 }
 
-async fn read_msg<T: serde::de::DeserializeOwned>(
+pub(crate) async fn read_msg<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
 ) -> std::io::Result<Option<T>> {
     let mut len_buf = [0u8; 4];
