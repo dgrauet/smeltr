@@ -157,6 +157,67 @@ fn tool_error_to_mcp(e: ToolError) -> McpError {
     }
 }
 
+fn tool_list() -> Vec<Tool> {
+    vec![
+        tool::<crate::tools::list_sessions::Params>(
+            "list_sessions",
+            "List recorded smeltr sessions.",
+        ),
+        tool::<crate::tools::session_summary::Params>(
+            "get_session_summary",
+            "Summarize a session: counts, time range, root cause.",
+        ),
+        tool::<crate::tools::query_events::Params>(
+            "query_events",
+            "Query events from a session with filters (source, kind, limit).",
+        ),
+        tool::<crate::tools::correlations::Params>(
+            "find_correlations",
+            "Find correlated events in a session via the analyzer.",
+        ),
+        tool::<crate::tools::crash_report::Params>(
+            "get_crash_report",
+            "Retrieve crash reports captured during a session.",
+        ),
+        tool::<crate::tools::metal_cb_history::Params>(
+            "get_metal_cb_history",
+            "Retrieve Metal command-buffer history events for a session.",
+        ),
+        tool::<crate::tools::compare_sessions::Params>(
+            "compare_sessions",
+            "Compare two sessions side by side.",
+        ),
+        tool::<crate::tools::inference_breakdown::Params>(
+            "get_inference_breakdown",
+            "Per-module GPU time breakdown for an MLX inference session.",
+        ),
+        tool::<crate::tools::op_summary::Params>(
+            "get_op_summary",
+            "Flat cross-module aggregation of GPU time per op kind (Matmul, Softmax, ...).",
+        ),
+        tool::<crate::tools::dispatch_origins::Params>(
+            "get_dispatch_origins",
+            "Per-(kind, file:line) GPU time attribution. Requires sessions recorded with SMELTR_STACK_CAPTURE=1.",
+        ),
+        tool::<crate::tools::memory_breakdown::Params>(
+            "get_memory_breakdown",
+            "Per-scope MTLDevice memory peak/avg/end and per-scope live-heap peak (count + bytes).",
+        ),
+        tool::<crate::tools::export_session::Params>(
+            "export_session",
+            "Export a recorded session to chrome-trace JSON (openable in chrome://tracing / Perfetto / Speedscope) or raw JSON. Writes to disk and returns the file path.",
+        ),
+        tool::<crate::tools::model_loads::Params>(
+            "get_model_loads",
+            "List all model loads in a session with duplicate detection. Returns each load with duration_ns and a duplicate_of index when the same path was loaded more than once.",
+        ),
+        tool::<crate::tools::subscribe_live::Params>(
+            "subscribe_live",
+            "Poll a running session for a delta summary of activity since a cursor (live tail). Returns counts by payload, GPU time + top op kinds, current/peak memory, and model loads for events after `cursor`; pass the returned `cursor` back next poll. Omit `session` to target the most-recent live session, then pass the returned `session_id` as `session` on every later poll to stay bound to it. This is a turn-based poll, not a push stream.",
+        ),
+    ]
+}
+
 impl ServerHandler for SmeltrMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
@@ -192,65 +253,7 @@ impl ServerHandler for SmeltrMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = vec![
-            tool::<crate::tools::list_sessions::Params>(
-                "list_sessions",
-                "List recorded smeltr sessions.",
-            ),
-            tool::<crate::tools::session_summary::Params>(
-                "get_session_summary",
-                "Summarize a session: counts, time range, root cause.",
-            ),
-            tool::<crate::tools::query_events::Params>(
-                "query_events",
-                "Query events from a session with filters (source, kind, limit).",
-            ),
-            tool::<crate::tools::correlations::Params>(
-                "find_correlations",
-                "Find correlated events in a session via the analyzer.",
-            ),
-            tool::<crate::tools::crash_report::Params>(
-                "get_crash_report",
-                "Retrieve crash reports captured during a session.",
-            ),
-            tool::<crate::tools::metal_cb_history::Params>(
-                "get_metal_cb_history",
-                "Retrieve Metal command-buffer history events for a session.",
-            ),
-            tool::<crate::tools::compare_sessions::Params>(
-                "compare_sessions",
-                "Compare two sessions side by side.",
-            ),
-            tool::<crate::tools::inference_breakdown::Params>(
-                "get_inference_breakdown",
-                "Per-module GPU time breakdown for an MLX inference session.",
-            ),
-            tool::<crate::tools::op_summary::Params>(
-                "get_op_summary",
-                "Flat cross-module aggregation of GPU time per op kind (Matmul, Softmax, ...).",
-            ),
-            tool::<crate::tools::dispatch_origins::Params>(
-                "get_dispatch_origins",
-                "Per-(kind, file:line) GPU time attribution. Requires sessions recorded with SMELTR_STACK_CAPTURE=1.",
-            ),
-            tool::<crate::tools::memory_breakdown::Params>(
-                "get_memory_breakdown",
-                "Per-scope MTLDevice memory peak/avg/end and per-scope live-heap peak (count + bytes).",
-            ),
-            tool::<crate::tools::export_session::Params>(
-                "export_session",
-                "Export a recorded session to chrome-trace JSON (openable in chrome://tracing / Perfetto / Speedscope) or raw JSON. Writes to disk and returns the file path.",
-            ),
-            tool::<crate::tools::model_loads::Params>(
-                "get_model_loads",
-                "List all model loads in a session with duplicate detection. Returns each load with duration_ns and a duplicate_of index when the same path was loaded more than once.",
-            ),
-            tool::<crate::tools::subscribe_live::Params>(
-                "subscribe_live",
-                "Poll a running session for a delta summary of activity since a cursor (live tail). Returns counts by payload, GPU time + top op kinds, current/peak memory, and model loads for events after `cursor`; pass the returned `cursor` back next poll. Omit `session` to target the most-recent live session, then pass the returned `session_id` as `session` on every later poll to stay bound to it. This is a turn-based poll, not a push stream.",
-            ),
-        ];
-        Ok(ListToolsResult::with_all_items(tools))
+        Ok(ListToolsResult::with_all_items(tool_list()))
     }
 
     async fn call_tool(
@@ -410,9 +413,14 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_live_is_listed() {
+    fn unknown_tool_rejected() {
         // Unknown-tool guard still works and the new arm compiles into dispatch.
         let err = dispatch_call("definitely_not_a_tool", serde_json::json!({}));
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn subscribe_live_in_tool_list() {
+        assert!(tool_list().iter().any(|t| t.name == "subscribe_live"));
     }
 }

@@ -144,21 +144,20 @@ pub fn summarize_delta(
         new_cbs,
         gpu_ms_added: gpu_ns_total as f64 / 1e6,
     };
-    let mut top_ops: Vec<OpDelta> = op_acc
+    let mut ranked: Vec<(String, u64, u64)> = op_acc
         .into_iter()
-        .map(|(kind, (gpu_ns, count))| OpDelta {
+        .map(|(kind, (gpu_ns, count))| (kind, gpu_ns, count))
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    ranked.truncate(8);
+    let top_ops: Vec<OpDelta> = ranked
+        .into_iter()
+        .map(|(kind, gpu_ns, count)| OpDelta {
             kind,
             count,
             gpu_ms: gpu_ns as f64 / 1e6,
         })
         .collect();
-    top_ops.sort_by(|a, b| {
-        b.gpu_ms
-            .partial_cmp(&a.gpu_ms)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.kind.cmp(&b.kind))
-    });
-    top_ops.truncate(8);
 
     // Memory: scan history up to the new cursor.
     let mut current_bytes: u64 = 0;
@@ -248,12 +247,9 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         }
         None => resolve_live_session()?,
     };
-    let meta = read_metadata(&dir).ok();
-    let session_id = meta
-        .as_ref()
-        .map(|m| m.session_id.to_string())
-        .unwrap_or_default();
-    let session_name = meta.as_ref().and_then(|m| m.name.clone());
+    let meta = read_metadata(&dir)?;
+    let session_id = meta.session_id.to_string();
+    let session_name = meta.name.clone();
     let events = smeltr_core::reader::read_events(&dir)?;
     Ok(summarize_delta(
         &events,
@@ -562,5 +558,46 @@ mod tests {
         .unwrap();
         assert!(!r.live);
         assert_eq!(r.note.as_deref(), Some("session finalized"));
+    }
+
+    #[test]
+    fn top_ops_fallback_to_op_name_when_symbol_unrecognized() {
+        // An op whose symbol is not recognized by resolve_kind should fall
+        // back to using the op's name as the kind.
+        let evs = vec![ev(
+            0,
+            Source::MetalHook,
+            Payload::MetalCbOps {
+                cb_id: 1,
+                ops: vec![
+                    smeltr_core::event::OpSample {
+                        name: "myop".into(),
+                        symbol: Some("totally_unknown_sym_xyz".into()),
+                        gpu_ns: 1_000_000,
+                        count: 1,
+                    },
+                    smeltr_core::event::OpSample {
+                        name: "nosy".into(),
+                        symbol: None,
+                        gpu_ns: 500_000,
+                        count: 2,
+                    },
+                ],
+            },
+        )];
+        let r = summarize_delta(&evs, 0, "sid".into(), None, true);
+        assert_eq!(r.top_ops.len(), 2);
+        // Largest gpu_ns first: "myop" (1_000_000 ns) before "nosy" (500_000 ns).
+        assert_eq!(r.top_ops[0].kind, "myop");
+        assert_eq!(r.top_ops[1].kind, "nosy");
+    }
+
+    #[test]
+    fn memory_zero_when_no_mem_samples_in_history() {
+        // With no MetalDeviceMemSample events in history, both fields are 0.
+        let evs: Vec<Event> = (0..3).map(|i| mark(i, i * 100)).collect();
+        let r = summarize_delta(&evs, 2, "sid".into(), None, true);
+        assert_eq!(r.memory.current_bytes, 0);
+        assert_eq!(r.memory.peak_bytes_session, 0);
     }
 }

@@ -25,11 +25,13 @@ pub enum ToolError {
 /// Resolve a session ref to a directory path. Tries (in order):
 ///   1. Directory-name suffix match (short id / partial). Returns the
 ///      most recent matching session.
-///   2. Exact `SessionMetadata.name` match across all sessions
+///   2. Full-UUID match against `metadata.session_id` (for callers that
+///      pass back the full UUID returned by a previous call).
+///   3. Exact `SessionMetadata.name` match across all sessions
 ///      (`smeltr_core::session_resolve::resolve_session_dir_by_name`),
 ///      most-recent wins.
 ///
-/// Returns `NotFound` if neither path matches.
+/// Returns `NotFound` if no path matches.
 pub fn resolve_session(arg: &str) -> Result<std::path::PathBuf, ToolError> {
     let sessions = smeltr_core::reader::list_sessions()?;
     if !sessions.is_empty() {
