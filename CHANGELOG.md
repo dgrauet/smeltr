@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/dgrauet/smeltr/compare/v0.7.0...v0.8.0) (2026-06-20)
+
+
+### Features
+
+* **cli:** smeltr tail — NDJSON bus stream with per-session gap detection ([5d97453](https://github.com/dgrauet/smeltr/commit/5d97453830dc813d06b56b331c65baaeb693d265))
+* **cli:** smeltr tail — real-time NDJSON event stream (Approach B) ([7550260](https://github.com/dgrauet/smeltr/commit/7550260dbc2cebae358784d579f92c26f68c5f83))
+* **daemon:** reusable subscribe_events bus client ([dff4b57](https://github.com/dgrauet/smeltr/commit/dff4b57640d224fec85d3baab4a7fe2c4d26701c))
+* **mcp:** subscribe_live delta core (cursor mechanics + payload counts) ([f5f01c0](https://github.com/dgrauet/smeltr/commit/f5f01c026d95547b7c1e80d5cfec7b085177d4a3))
+* **mcp:** subscribe_live GPU/top-ops/memory/model-load rollups ([c5fed21](https://github.com/dgrauet/smeltr/commit/c5fed21e8488e6d6b4fd2de2c36195d3e2de3563))
+* **mcp:** subscribe_live I/O shell + live-session resolver ([f775417](https://github.com/dgrauet/smeltr/commit/f775417b26c64e90b7ceea5f80f6e63bd72238d1))
+* **mcp:** subscribe_live live-tail delta tool ([3a9a543](https://github.com/dgrauet/smeltr/commit/3a9a543753aac46f89c3bc3c53081d0e741a2c8c))
+* **mcp:** wire subscribe_live into dispatch and list_tools ([a641eab](https://github.com/dgrauet/smeltr/commit/a641eab2a7e7edeef619d62939607b735bef869e))
+
+
+### Bug Fixes
+
+* **cli:** smeltr tail SeqTracker ignores seq regression without false gap ([9b8ac8b](https://github.com/dgrauet/smeltr/commit/9b8ac8b9199d5ae7a296a86b8e16316bcf853238))
+* **mcp:** return full-UUID session_id and resolve it in resolve_session ([65b2789](https://github.com/dgrauet/smeltr/commit/65b2789b4437802abe24599ee94c99afedd57445))
+* **mcp:** subscribe_live memory must scan full history, not events[..cursor] ([c381d47](https://github.com/dgrauet/smeltr/commit/c381d47f496a3641e58619e37679292e7e018845))
+
 ## [0.7.0](https://github.com/dgrauet/smeltr/compare/v0.6.0...v0.7.0) (2026-05-21)
 
 
