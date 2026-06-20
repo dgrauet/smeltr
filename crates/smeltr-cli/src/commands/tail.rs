@@ -25,14 +25,29 @@ impl SeqTracker {
     /// expected value for its session. The first event for a session sets a
     /// baseline (no gap) because `tail` joins the stream mid-flight.
     pub fn observe(&mut self, ev: &Event) -> Option<Gap> {
-        match self.last.insert(ev.session_id, ev.seq) {
-            None => None,
-            Some(prev) if ev.seq > prev + 1 => Some(Gap {
-                session_id: ev.session_id,
-                expected: prev + 1,
-                got: ev.seq,
-            }),
-            Some(_) => None,
+        match self.last.get(&ev.session_id).copied() {
+            // First event for this session: baseline, no gap (tail joins mid-stream).
+            None => {
+                self.last.insert(ev.session_id, ev.seq);
+                None
+            }
+            // Regression or duplicate (should not happen on the monotonic happy
+            // path): ignore, and do not move the cursor backward.
+            Some(prev) if ev.seq <= prev => None,
+            // Forward jump: events were dropped upstream.
+            Some(prev) if ev.seq > prev + 1 => {
+                self.last.insert(ev.session_id, ev.seq);
+                Some(Gap {
+                    session_id: ev.session_id,
+                    expected: prev + 1,
+                    got: ev.seq,
+                })
+            }
+            // Contiguous.
+            Some(_) => {
+                self.last.insert(ev.session_id, ev.seq);
+                None
+            }
         }
     }
 }
@@ -182,6 +197,15 @@ mod tests {
         assert_eq!(v["skipped"], 3);
         assert_eq!(v["expected"], 6);
         assert_eq!(v["got"], 9);
+    }
+
+    #[test]
+    fn seqtracker_ignores_regression_without_false_gap() {
+        let s = Uuid::from_u128(1);
+        let mut t = SeqTracker::default();
+        assert_eq!(t.observe(&ev(s, 5)), None); // baseline
+        assert_eq!(t.observe(&ev(s, 4)), None); // regression/duplicate: no gap
+        assert_eq!(t.observe(&ev(s, 6)), None); // next contiguous after 5 is still clean
     }
 
     #[test]
