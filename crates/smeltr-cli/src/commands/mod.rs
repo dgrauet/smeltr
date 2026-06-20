@@ -10,4 +10,5 @@ pub mod memory;
 pub mod origins;
 pub mod record;
 pub mod sessions;
+pub mod tail;
 pub mod tui;

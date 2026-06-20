@@ -121,6 +121,13 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         top: usize,
     },
+    /// Stream the daemon event bus as NDJSON on stdout (real-time tail).
+    Tail {
+        /// Restrict to one session: short id, full UUID, or name.
+        /// Default: all sessions (firehose).
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Spawn a child process under smeltr's scoped probes.
     Record {
         /// Command to execute.
@@ -198,6 +205,7 @@ fn main() -> anyhow::Result<()> {
             Cmd::Memory { session, top } => commands::memory::run(&session, top),
             Cmd::Mcp => commands::mcp::run().await,
             Cmd::Origins { session, top } => commands::origins::run(&session, top),
+            Cmd::Tail { session } => commands::tail::run(session).await,
             Cmd::Record {
                 cmd,
                 args,
