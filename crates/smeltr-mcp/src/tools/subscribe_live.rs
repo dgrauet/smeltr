@@ -251,7 +251,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let meta = read_metadata(&dir).ok();
     let session_id = meta
         .as_ref()
-        .map(|m| m.session_id.short())
+        .map(|m| m.session_id.to_string())
         .unwrap_or_default();
     let session_name = meta.as_ref().and_then(|m| m.name.clone());
     let events = smeltr_core::reader::read_events(&dir)?;
@@ -535,7 +535,14 @@ mod tests {
         })
         .unwrap();
         assert!(r.live);
-        assert!(r.session_id.ends_with(&id_live.short()) || r.session_id == id_live.to_string());
+        assert_eq!(r.session_id, id_live.to_string());
+        // round-trips through resolve_session
+        let again = run(Params {
+            session: Some(r.session_id.clone()),
+            cursor: None,
+        })
+        .unwrap();
+        assert_eq!(again.session_id, id_live.to_string());
     }
 
     #[test]
