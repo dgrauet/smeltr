@@ -159,10 +159,11 @@ pub fn summarize_delta(
         })
         .collect();
 
-    // Memory: scan history up to the new cursor.
+    // Memory: scan full history — current/peak reflect device state as of NOW,
+    // independent of the delta window.
     let mut current_bytes: u64 = 0;
     let mut peak_bytes_session: u64 = 0;
-    for e in &events[..cur] {
+    for e in events {
         if let Payload::MetalDeviceMemSample {
             allocated_bytes, ..
         } = &e.payload
@@ -333,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_uses_history_up_to_cursor() {
+    fn memory_is_history_wide_regardless_of_cursor() {
         let evs = vec![
             ev(
                 0,
@@ -362,10 +363,47 @@ mod tests {
                 },
             ),
         ];
-        // new cursor = 3; current = last sample (300), peak = 300
+        // delta poll (cursor=2): memory must still see ALL history (both mem samples)
         let r = summarize_delta(&evs, 2, "sid".into(), None, true);
-        assert_eq!(r.memory.current_bytes, 300);
-        assert_eq!(r.memory.peak_bytes_session, 300);
+        assert_eq!(r.memory.current_bytes, 300); // last sample wins
+        assert_eq!(r.memory.peak_bytes_session, 300); // max over all
+    }
+
+    #[test]
+    fn memory_reflects_full_history_on_baseline() {
+        let evs = vec![
+            ev(
+                0,
+                Source::MetalHook,
+                Payload::MetalDeviceMemSample {
+                    allocated_bytes: 100,
+                    recommended_max_bytes: 1000,
+                    at_event: "scope_enter".into(),
+                },
+            ),
+            ev(
+                1,
+                Source::MetalHook,
+                Payload::MetalDeviceMemSample {
+                    allocated_bytes: 300,
+                    recommended_max_bytes: 1000,
+                    at_event: "scope_exit".into(),
+                },
+            ),
+            ev(
+                2,
+                Source::MetalHook,
+                Payload::MetalDeviceMemSample {
+                    allocated_bytes: 250,
+                    recommended_max_bytes: 1000,
+                    at_event: "cb_committed".into(),
+                },
+            ),
+        ];
+        // baseline poll (cursor 0): memory must still see ALL samples
+        let r = summarize_delta(&evs, 0, "sid".into(), None, true);
+        assert_eq!(r.memory.current_bytes, 250); // last sample wins
+        assert_eq!(r.memory.peak_bytes_session, 300); // max over all
     }
 
     #[test]
