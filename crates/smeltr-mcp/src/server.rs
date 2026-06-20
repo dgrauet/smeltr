@@ -76,6 +76,11 @@ pub fn dispatch_call(name: &str, args: serde_json::Value) -> Result<serde_json::
             let r = tools::model_loads::run(p)?;
             Ok(serde_json::to_value(r)?)
         }
+        "subscribe_live" => {
+            let p: tools::subscribe_live::Params = serde_json::from_value(args)?;
+            let r = tools::subscribe_live::run(p)?;
+            Ok(serde_json::to_value(r)?)
+        }
         other => Err(ToolError::BadArgs(format!("unknown tool {other:?}"))),
     }
 }
@@ -240,6 +245,10 @@ impl ServerHandler for SmeltrMcpServer {
                 "get_model_loads",
                 "List all model loads in a session with duplicate detection. Returns each load with duration_ns and a duplicate_of index when the same path was loaded more than once.",
             ),
+            tool::<crate::tools::subscribe_live::Params>(
+                "subscribe_live",
+                "Poll a running session for a delta summary of activity since a cursor (live tail). Returns counts by payload, GPU time + top op kinds, current/peak memory, and model loads for events after `cursor`; pass the returned `cursor` back next poll. Omit `session` to target the most-recent live session, then pass the returned `session_id` as `session` on every later poll to stay bound to it. This is a turn-based poll, not a push stream.",
+            ),
         ];
         Ok(ListToolsResult::with_all_items(tools))
     }
@@ -368,5 +377,42 @@ mod tests {
         let v = read_session_resource(&format!("smeltr://session/{dir_name}")).unwrap();
         assert!(v.get("metadata").is_some());
         assert!(v.get("events").is_some());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn dispatch_subscribe_live_returns_summary() {
+        use smeltr_core::session::{SessionId, SessionMetadata};
+        use smeltr_core::writer::SessionWriter;
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(id)).unwrap();
+        w.write_event(&smeltr_core::event::Event {
+            ts_mono_ns: 0,
+            ts_wall_ns: 0,
+            session_id: uuid::Uuid::nil(),
+            source: smeltr_core::event::Source::Mark,
+            pid: None,
+            seq: 0,
+            payload: smeltr_core::event::Payload::Mark {
+                label: "x".into(),
+                fields: Default::default(),
+            },
+        })
+        .unwrap();
+        w.flush().unwrap();
+
+        let args = serde_json::json!({ "session": id.short() });
+        let v = dispatch_call("subscribe_live", args).unwrap();
+        assert_eq!(v.get("new_events").and_then(|x| x.as_u64()), Some(1));
+        assert_eq!(v.get("live").and_then(|x| x.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn subscribe_live_is_listed() {
+        // Unknown-tool guard still works and the new arm compiles into dispatch.
+        let err = dispatch_call("definitely_not_a_tool", serde_json::json!({}));
+        assert!(err.is_err());
     }
 }
