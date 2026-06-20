@@ -430,6 +430,24 @@ eval call. Without this, real workloads (where `mx.eval` typically
 returns in ~5 ms while CBs complete tens to hundreds of ms later) would
 return an empty origins list.
 
+### `smeltr tail` — real-time event stream (NDJSON)
+
+`smeltr tail` subscribes to the daemon's live event bus and writes one JSON
+object per event to stdout (NDJSON), flushed per event. Default is all active
+sessions (firehose); each line carries `session_id`. Use `--session <ref>`
+(short id / UUID / name) to follow one session.
+
+It is **live only** (events from connection onward) and aimed at fast consumers
+(dashboards, SSE bridges, `jq` pipelines). If the upstream bus drops events
+because a consumer lagged, `tail` emits a marker line
+`{"_smeltr_tail":"gap","session_id":...,"skipped":N}` so the drop is explicit.
+For complete history use `subscribe_live`, `query_events`, or `export_session`.
+
+```bash
+smeltr tail                       # firehose, all sessions
+smeltr tail --session my-run | jq # one session, filtered downstream
+```
+
 ## Migrating from a bespoke MLX profiler?
 
 If your project ships its own `profiling.section(name, **fields)` /
