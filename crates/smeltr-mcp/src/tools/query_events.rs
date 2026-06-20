@@ -79,7 +79,7 @@ fn parse_source(s: &str) -> Result<Source, ToolError> {
     })
 }
 
-fn payload_kind(e: &Event) -> &'static str {
+pub(crate) fn payload_kind(e: &Event) -> &'static str {
     use smeltr_core::event::Payload;
     match &e.payload {
         Payload::Mark { .. } => "Mark",

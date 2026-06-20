@@ -498,6 +498,7 @@ Every tool accepts a session ref as short id (8 hex), full UUID, or
 | `compare_sessions` | A/B regression analysis | `scope_deltas`, `op_deltas`, `memory_deltas`, `origin_deltas`, scopes-only-in-A/B |
 | `export_session` | Dump for external viewer | writes chrome-trace JSON (or raw JSON) to `output_path` |
 | `get_model_loads` | Inspect safetensors / `mlx.load` calls + flag duplicates | `loads[].{path,size_bytes,duration_ns,sha8,duplicate_of}`, `duplicate_count` |
+| `subscribe_live` | Poll a running session for a delta summary since a cursor (live tail; turn-based, not a push stream) | `cursor`, `new_events`, `by_payload`, `gpu`, `top_ops`, `memory`, `model_loads`; pass `cursor`+`session_id` back next poll |
 
 ### Typical agent workflow
 

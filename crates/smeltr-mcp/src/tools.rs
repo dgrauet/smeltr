@@ -13,3 +13,4 @@ pub mod model_loads;
 pub mod op_summary;
 pub mod query_events;
 pub mod session_summary;
+pub mod subscribe_live;
