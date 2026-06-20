@@ -6,7 +6,7 @@
 //! beats a live bus bridge for a turn-based LLM consumer.
 
 use serde::{Deserialize, Serialize};
-use smeltr_core::event::Event;
+use smeltr_core::event::{Event, Payload};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
@@ -99,6 +99,81 @@ pub fn summarize_delta(
         .collect();
     by_payload.sort_by(|a, b| b.count.cmp(&a.count).then(a.kind.cmp(&b.kind)));
 
+    // GPU: completed CBs + summed op GPU time over the delta window.
+    let mut new_cbs: u64 = 0;
+    let mut gpu_ns_total: u64 = 0;
+    let mut op_acc: BTreeMap<String, (u64, u64)> = BTreeMap::new(); // kind -> (gpu_ns, count)
+    let mut model_loads: Vec<ModelLoadDelta> = Vec::new();
+    for e in delta {
+        match &e.payload {
+            Payload::MetalCbCompleted { .. } => new_cbs += 1,
+            Payload::MetalCbOps { ops, .. } => {
+                for o in ops {
+                    gpu_ns_total += o.gpu_ns;
+                    let kind = o
+                        .symbol
+                        .as_deref()
+                        .and_then(smeltr_analyzer::resolve_kind)
+                        .map(|k| k.to_string())
+                        .unwrap_or_else(|| o.name.clone());
+                    let slot = op_acc.entry(kind).or_insert((0, 0));
+                    slot.0 += o.gpu_ns;
+                    slot.1 += o.count as u64;
+                }
+            }
+            Payload::ModelLoad {
+                path, size_bytes, ..
+            } => {
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path.as_str())
+                    .to_string();
+                model_loads.push(ModelLoadDelta {
+                    name,
+                    bytes: *size_bytes,
+                });
+            }
+            _ => {}
+        }
+    }
+    let gpu = GpuDelta {
+        new_cbs,
+        gpu_ms_added: gpu_ns_total as f64 / 1e6,
+    };
+    let mut top_ops: Vec<OpDelta> = op_acc
+        .into_iter()
+        .map(|(kind, (gpu_ns, count))| OpDelta {
+            kind,
+            count,
+            gpu_ms: gpu_ns as f64 / 1e6,
+        })
+        .collect();
+    top_ops.sort_by(|a, b| {
+        b.gpu_ms
+            .partial_cmp(&a.gpu_ms)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.kind.cmp(&b.kind))
+    });
+    top_ops.truncate(8);
+
+    // Memory: scan history up to the new cursor.
+    let mut current_bytes: u64 = 0;
+    let mut peak_bytes_session: u64 = 0;
+    for e in &events[..cur] {
+        if let Payload::MetalDeviceMemSample {
+            allocated_bytes, ..
+        } = &e.payload
+        {
+            current_bytes = *allocated_bytes;
+            peak_bytes_session = peak_bytes_session.max(*allocated_bytes);
+        }
+    }
+    let memory = MemDelta {
+        current_bytes,
+        peak_bytes_session,
+    };
+
     let note = if clamped {
         Some("cursor ahead of log (clamped)".to_string())
     } else if new_events == 0 {
@@ -122,10 +197,10 @@ pub fn summarize_delta(
         new_events,
         elapsed_ns,
         by_payload,
-        gpu: GpuDelta::default(),
-        top_ops: Vec::new(),
-        memory: MemDelta::default(),
-        model_loads: Vec::new(),
+        gpu,
+        top_ops,
+        memory,
+        model_loads,
         note,
     }
 }
@@ -135,6 +210,142 @@ mod tests {
     use super::*;
     use smeltr_core::event::{Payload, Source};
     use uuid::Uuid;
+
+    fn ev(seq: u64, source: Source, payload: Payload) -> Event {
+        Event {
+            ts_mono_ns: seq * 10,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source,
+            pid: None,
+            seq,
+            payload,
+        }
+    }
+
+    fn op(name: &str, symbol: &str, gpu_ns: u64, count: u32) -> smeltr_core::event::OpSample {
+        smeltr_core::event::OpSample {
+            name: name.into(),
+            symbol: Some(symbol.into()),
+            gpu_ns,
+            count,
+        }
+    }
+
+    #[test]
+    fn gpu_and_top_ops_aggregate_over_delta() {
+        let evs = vec![
+            ev(
+                0,
+                Source::Mark,
+                Payload::Mark {
+                    label: "x".into(),
+                    fields: Default::default(),
+                },
+            ),
+            ev(
+                1,
+                Source::MetalHook,
+                Payload::MetalCbCompleted {
+                    cb_id: 1,
+                    queue_id: 1,
+                    status: 0,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 5_000_000,
+                },
+            ),
+            ev(
+                2,
+                Source::MetalHook,
+                Payload::MetalCbOps {
+                    cb_id: 1,
+                    ops: vec![
+                        op("gemm", "gemm_t_n_bf16", 2_000_000, 3),
+                        op("softmax", "softmax_kernel", 1_000_000, 1),
+                    ],
+                },
+            ),
+        ];
+        // cursor=1 -> delta is the CbCompleted + CbOps (skip the Mark)
+        let r = summarize_delta(&evs, 1, "sid".into(), None, true);
+        assert_eq!(r.gpu.new_cbs, 1);
+        assert!((r.gpu.gpu_ms_added - 3.0).abs() < 1e-9); // (2e6 + 1e6)/1e6
+        assert_eq!(r.top_ops.len(), 2);
+        assert_eq!(r.top_ops[0].kind, "Matmul"); // gemm_* -> Matmul, largest gpu_ns first
+        assert!((r.top_ops[0].gpu_ms - 2.0).abs() < 1e-9);
+        assert_eq!(r.top_ops[0].count, 3);
+    }
+
+    #[test]
+    fn memory_uses_history_up_to_cursor() {
+        let evs = vec![
+            ev(
+                0,
+                Source::MetalHook,
+                Payload::MetalDeviceMemSample {
+                    allocated_bytes: 100,
+                    recommended_max_bytes: 1000,
+                    at_event: "scope_enter".into(),
+                },
+            ),
+            ev(
+                1,
+                Source::MetalHook,
+                Payload::MetalDeviceMemSample {
+                    allocated_bytes: 300,
+                    recommended_max_bytes: 1000,
+                    at_event: "scope_exit".into(),
+                },
+            ),
+            ev(
+                2,
+                Source::Mark,
+                Payload::Mark {
+                    label: "x".into(),
+                    fields: Default::default(),
+                },
+            ),
+        ];
+        // new cursor = 3; current = last sample (300), peak = 300
+        let r = summarize_delta(&evs, 2, "sid".into(), None, true);
+        assert_eq!(r.memory.current_bytes, 300);
+        assert_eq!(r.memory.peak_bytes_session, 300);
+    }
+
+    #[test]
+    fn model_loads_in_delta_use_basename() {
+        let evs = vec![
+            ev(
+                0,
+                Source::Mark,
+                Payload::Mark {
+                    label: "x".into(),
+                    fields: Default::default(),
+                },
+            ),
+            ev(
+                1,
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/llama/weights.safetensors".into(),
+                    size_bytes: 4_096,
+                    t_start_ns: 0,
+                    t_end_ns: 10,
+                    sha8: None,
+                    framework: Some("safetensors".into()),
+                },
+            ),
+        ];
+        let r = summarize_delta(&evs, 1, "sid".into(), None, true);
+        assert_eq!(
+            r.model_loads,
+            vec![ModelLoadDelta {
+                name: "weights.safetensors".into(),
+                bytes: 4_096
+            }]
+        );
+    }
 
     fn mark(seq: u64, ts: u64) -> Event {
         Event {
