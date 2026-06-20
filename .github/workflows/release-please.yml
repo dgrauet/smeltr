@@ -27,6 +27,13 @@ jobs:
       - id: rp
         uses: googleapis/release-please-action@v4
         with:
+          # Use a PAT so the release PR is authored by a real user, not the
+          # GITHUB_TOKEN. PRs (and pushes) made with GITHUB_TOKEN do NOT
+          # trigger pull_request/push workflows (GitHub anti-recursion), which
+          # left the required CI checks stuck on action_required and the
+          # release PR unmergeable. Falls back to GITHUB_TOKEN when the secret
+          # is unset, preserving prior behavior until the PAT is added.
+          token: ${{ secrets.RELEASE_PLEASE_PAT || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -45,7 +52,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release-please.outputs.pr_branch }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Same PAT (with GITHUB_TOKEN fallback): the Cargo.lock refresh commit
+          # is the last push to the release PR branch, so it must come from a
+          # real user for CI to run on the final PR head.
+          token: ${{ secrets.RELEASE_PLEASE_PAT || secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Refresh Cargo.lock with new workspace version
         run: |
