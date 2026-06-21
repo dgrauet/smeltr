@@ -149,6 +149,136 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
     out
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ResidencyMemory {
+    pub qualname: String,
+    pub peak_resident_bytes: u64,
+    pub avg_resident_bytes: u64,
+    pub end_resident_bytes: u64,
+    pub sample_count: u64,
+}
+
+/// Compute per-scope residency memory stats from `MetalResidencySample`
+/// events. Returns one `ResidencyMemory` per qualname, with the max-peak
+/// record kept across multiple call sites of the same qualname. Sorted
+/// by `peak_resident_bytes` desc.
+///
+/// Uses the same async-grace window as `compute_memory_breakdown` so that
+/// Metal CB committed/completed residency samples still credit the scope
+/// that launched the work even after the scope has returned.
+pub fn compute_residency_breakdown(events: &[Event]) -> Vec<ResidencyMemory> {
+    #[derive(Default)]
+    struct Accum {
+        peak: u64,
+        sum: u128,
+        count: u64,
+        last: u64,
+    }
+    struct OpenScope {
+        qualname: String,
+        accum: Accum,
+    }
+    struct DrainingScope {
+        qualname: String,
+        accum: Accum,
+        deadline_ns: u64,
+    }
+
+    let mut stack: Vec<OpenScope> = Vec::new();
+    let mut draining: Vec<DrainingScope> = Vec::new();
+    let mut by_qualname: HashMap<String, ResidencyMemory> = HashMap::new();
+
+    let finalize = |qualname: String, accum: Accum, map: &mut HashMap<String, ResidencyMemory>| {
+        let avg = if accum.count > 0 {
+            (accum.sum / accum.count as u128) as u64
+        } else {
+            0
+        };
+        let sm = ResidencyMemory {
+            qualname: qualname.clone(),
+            peak_resident_bytes: accum.peak,
+            avg_resident_bytes: avg,
+            end_resident_bytes: accum.last,
+            sample_count: accum.count,
+        };
+        map.entry(qualname)
+            .and_modify(|existing| {
+                if sm.peak_resident_bytes > existing.peak_resident_bytes {
+                    *existing = sm.clone();
+                }
+            })
+            .or_insert(sm);
+    };
+
+    for ev in events {
+        // Sweep expired draining scopes BEFORE handling this event.
+        let mut i = 0;
+        while i < draining.len() {
+            if draining[i].deadline_ns < ev.ts_mono_ns {
+                let d = draining.swap_remove(i);
+                finalize(d.qualname, d.accum, &mut by_qualname);
+            } else {
+                i += 1;
+            }
+        }
+
+        match &ev.payload {
+            Payload::ModuleEntered { qualname, .. } => {
+                stack.push(OpenScope {
+                    qualname: qualname.clone(),
+                    accum: Accum::default(),
+                });
+            }
+            Payload::ModuleReturned { .. } => {
+                if let Some(open) = stack.pop() {
+                    draining.push(DrainingScope {
+                        qualname: open.qualname,
+                        accum: open.accum,
+                        deadline_ns: ev.ts_mono_ns.saturating_add(ASYNC_GRACE_NS),
+                    });
+                }
+            }
+            Payload::MetalResidencySample { resident_bytes, .. } => {
+                for OpenScope { accum, .. } in stack.iter_mut() {
+                    if *resident_bytes > accum.peak {
+                        accum.peak = *resident_bytes;
+                    }
+                    accum.sum += *resident_bytes as u128;
+                    accum.count += 1;
+                    accum.last = *resident_bytes;
+                }
+                for DrainingScope {
+                    accum, deadline_ns, ..
+                } in draining.iter_mut()
+                {
+                    if ev.ts_mono_ns <= *deadline_ns {
+                        if *resident_bytes > accum.peak {
+                            accum.peak = *resident_bytes;
+                        }
+                        accum.sum += *resident_bytes as u128;
+                        accum.count += 1;
+                        accum.last = *resident_bytes;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Flush any remaining draining scopes (deadlines irrelevant at end of stream).
+    for d in draining.drain(..) {
+        finalize(d.qualname, d.accum, &mut by_qualname);
+    }
+    // Flush any still-open scopes (no matching ModuleReturned in the stream).
+    for o in stack.drain(..) {
+        finalize(o.qualname, o.accum, &mut by_qualname);
+    }
+
+    let mut out: Vec<ResidencyMemory> = by_qualname.into_values().collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.peak_resident_bytes));
+    out
+}
+
 /// Compute per-scope heap state peak. Walks `MetalHeapAlloc/Free` to
 /// maintain `live_heaps`; on each mutation OR scope event, updates each
 /// open scope's `peak_heap_count` / `peak_heap_bytes`. Returns one entry
@@ -509,6 +639,46 @@ mod tests {
         for sm in &out {
             assert_eq!(sm.sample_count, 1, "{}: expected 1 sample", sm.qualname);
         }
+    }
+
+    // ── new tests: compute_residency_breakdown ────────────────────────────
+
+    fn module_entered(qualname: &str) -> Event {
+        enter(1, 10, qualname)
+    }
+
+    fn module_returned(qualname: &str) -> Event {
+        let _ = qualname;
+        ret(2, 20, 1)
+    }
+
+    fn residency_sample(resident: u64, rec_max: u64) -> Event {
+        ev(
+            3,
+            15,
+            Source::MetalHook,
+            Payload::MetalResidencySample {
+                resident_bytes: resident,
+                recommended_max_bytes: rec_max,
+                set_count: 1,
+                at_event: "cb_committed".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn residency_breakdown_peak_and_avg_per_scope() {
+        let evs = vec![
+            module_entered("vae.decode"),
+            residency_sample(100, 1000),
+            residency_sample(300, 1000),
+            module_returned("vae.decode"),
+        ];
+        let out = compute_residency_breakdown(&evs);
+        let s = out.iter().find(|s| s.qualname == "vae.decode").unwrap();
+        assert_eq!(s.peak_resident_bytes, 300);
+        assert_eq!(s.avg_resident_bytes, 200);
+        assert_eq!(s.end_resident_bytes, 300);
     }
 
     // ── new tests: async-grace for compute_heap_breakdown (#40) ──────────

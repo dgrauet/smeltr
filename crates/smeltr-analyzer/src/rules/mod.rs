@@ -3,6 +3,7 @@ pub mod metal_error;
 pub mod mlx_timing;
 pub mod queue_depth;
 pub mod queue_pressure;
+pub mod residency_pressure;
 pub mod system_pressure;
 
 #[cfg(test)]
