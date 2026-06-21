@@ -250,6 +250,15 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
             Payload::ModelUnload { path, t_ns, sha8 } => {
                 model_unloads.push((path.clone(), *t_ns, sha8.clone()));
             }
+            Payload::MetalResidencySample { resident_bytes, .. } => {
+                trace_events.push(json!({
+                    "ph": "C",
+                    "name": "resident_bytes",
+                    "pid": 0,
+                    "ts": ts_us,
+                    "args": { "bytes": resident_bytes },
+                }));
+            }
             _ => {}
         }
     }
@@ -960,6 +969,38 @@ mod tests {
             "/models/llama/weights.safetensors"
         );
         assert_eq!(instants[0]["args"]["sha8"], "ab12cd34");
+    }
+
+    #[test]
+    fn export_emits_resident_counter() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![ev(
+            1,
+            5_000_000,
+            Source::MetalHook,
+            Payload::MetalResidencySample {
+                resident_bytes: 500,
+                recommended_max_bytes: 1_000,
+                set_count: 1,
+                at_event: "cb_committed".into(),
+            },
+        )];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let counters: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "C" && e["name"] == "resident_bytes")
+            .collect();
+        assert_eq!(
+            counters.len(),
+            1,
+            "expected one resident_bytes counter, got {counters:?}"
+        );
+        assert_eq!(counters[0]["args"]["bytes"], 500_u64);
+        assert_eq!(counters[0]["ts"], 5000.0);
+        assert_eq!(counters[0]["pid"], 0);
     }
 
     #[test]

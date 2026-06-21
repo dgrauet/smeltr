@@ -3,7 +3,8 @@
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::memory::{
-    compute_heap_breakdown, compute_memory_breakdown, HeapMemory, ScopeMemory,
+    compute_heap_breakdown, compute_memory_breakdown, compute_residency_breakdown, HeapMemory,
+    ResidencyMemory, ScopeMemory,
 };
 use smeltr_core::reader::read_events;
 
@@ -16,6 +17,7 @@ pub struct Params {
 pub struct Response {
     pub scope_memory: Vec<ScopeMemory>,
     pub heap_memory: Vec<HeapMemory>,
+    pub scope_residency: Vec<ResidencyMemory>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -24,6 +26,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     Ok(Response {
         scope_memory: compute_memory_breakdown(&events),
         heap_memory: compute_heap_breakdown(&events),
+        scope_residency: compute_residency_breakdown(&events),
     })
 }
 
@@ -121,5 +124,65 @@ mod tests {
             .expect("heap present");
         assert_eq!(heap.peak_heap_count, 1);
         assert_eq!(heap.peak_heap_bytes, 500_000);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn breakdown_includes_residency() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        let evs = vec![
+            ev(
+                1,
+                1,
+                Source::PythonSidecar,
+                Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 0,
+                    qualname: "denoise.pass:cond".into(),
+                    class_name: "Scope".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields: Default::default(),
+                },
+            ),
+            ev(
+                2,
+                2,
+                Source::MetalHook,
+                Payload::MetalResidencySample {
+                    resident_bytes: 2_000_000,
+                    recommended_max_bytes: 8_000_000,
+                    set_count: 1,
+                    at_event: "cb_committed".into(),
+                },
+            ),
+            ev(
+                3,
+                3,
+                Source::PythonSidecar,
+                Payload::ModuleReturned { module_call_id: 1 },
+            ),
+        ];
+        for e in &evs {
+            w.write_event(e).unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+        })
+        .unwrap();
+        let residency = resp
+            .scope_residency
+            .iter()
+            .find(|r| r.qualname == "denoise.pass:cond")
+            .expect("residency scope present");
+        assert!(residency.peak_resident_bytes > 0);
+        assert_eq!(residency.peak_resident_bytes, 2_000_000);
     }
 }

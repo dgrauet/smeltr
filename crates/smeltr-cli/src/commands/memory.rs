@@ -2,7 +2,8 @@
 
 use anyhow::{anyhow, Context};
 use smeltr_analyzer::memory::{
-    compute_heap_breakdown, compute_memory_breakdown, HeapMemory, ScopeMemory,
+    compute_heap_breakdown, compute_memory_breakdown, compute_residency_breakdown, HeapMemory,
+    ResidencyMemory, ScopeMemory,
 };
 use smeltr_core::reader::read_events;
 use smeltr_mcp::types::resolve_session;
@@ -13,15 +14,23 @@ pub fn run(session: &str, top: usize) -> anyhow::Result<()> {
     let events = read_events(&dir).context("read session events")?;
     let scope_memory = compute_memory_breakdown(&events);
     let heap_memory = compute_heap_breakdown(&events);
-    print!("{}", render(&scope_memory, &heap_memory, top));
+    let residency = compute_residency_breakdown(&events);
+    print!("{}", render(&scope_memory, &heap_memory, &residency, top));
     Ok(())
 }
 
-pub(crate) fn render(scopes: &[ScopeMemory], heaps: &[HeapMemory], top: usize) -> String {
+pub(crate) fn render(
+    scopes: &[ScopeMemory],
+    heaps: &[HeapMemory],
+    residency: &[ResidencyMemory],
+    top: usize,
+) -> String {
     let mut out = String::new();
     render_scopes(&mut out, scopes, top);
     out.push('\n');
     render_heaps(&mut out, heaps, top);
+    out.push('\n');
+    render_residency(&mut out, residency, top);
     out
 }
 
@@ -45,6 +54,29 @@ fn render_scopes(out: &mut String, rows: &[ScopeMemory], top: usize) {
     }
     if rows.is_empty() {
         out.push_str("(no scopes with memory samples)\n");
+    }
+}
+
+fn render_residency(out: &mut String, rows: &[ResidencyMemory], top: usize) {
+    out.push_str(&format!(
+        "{:<48} {:>12} {:>12} {:>12} {:>10}\n",
+        "RESIDENCY PEAK", "PEAK", "AVG", "END", "SAMPLES"
+    ));
+    for r in rows.iter().take(top) {
+        out.push_str(&format!(
+            "{:<48} {:>12} {:>12} {:>12} {:>10}\n",
+            truncate(&r.qualname, 48),
+            fmt_bytes(r.peak_resident_bytes),
+            fmt_bytes(r.avg_resident_bytes),
+            fmt_bytes(r.end_resident_bytes),
+            r.sample_count
+        ));
+    }
+    if rows.len() > top {
+        out.push_str(&format!("(showing top {top} of {})\n", rows.len()));
+    }
+    if rows.is_empty() {
+        out.push_str("(no residency samples)\n");
     }
 }
 
@@ -100,11 +132,13 @@ mod tests {
 
     #[test]
     fn render_empty_breakdown_shows_section_titles() {
-        let s = render(&[], &[], 20);
+        let s = render(&[], &[], &[], 20);
         assert!(s.contains("SCOPE PEAK MEMORY"));
         assert!(s.contains("HEAP PEAK"));
+        assert!(s.contains("RESIDENCY PEAK"));
         assert!(s.contains("no scopes with memory samples"));
         assert!(s.contains("no heap allocations"));
+        assert!(s.contains("no residency samples"));
     }
 
     #[test]
@@ -116,7 +150,7 @@ mod tests {
             end_bytes: 1024,
             sample_count: 100,
         }];
-        let s = render(&scopes, &[], 20);
+        let s = render(&scopes, &[], &[], 20);
         assert!(s.contains("8.00 GB"));
         assert!(s.contains("4.00 MB"));
         assert!(s.contains("1.00 KB"));
@@ -133,7 +167,23 @@ mod tests {
                 sample_count: 5,
             })
             .collect();
-        let s = render(&scopes, &[], 5);
+        let s = render(&scopes, &[], &[], 5);
         assert!(s.contains("showing top 5 of 50"));
+    }
+
+    #[test]
+    fn render_shows_residency_section() {
+        use smeltr_analyzer::memory::ResidencyMemory;
+        let residency = vec![ResidencyMemory {
+            qualname: "denoise.pass:cond".into(),
+            peak_resident_bytes: 2_000_000,
+            avg_resident_bytes: 1_500_000,
+            end_resident_bytes: 1_000_000,
+            sample_count: 3,
+        }];
+        let s = render(&[], &[], &residency, 20);
+        assert!(s.contains("RESIDENCY PEAK"));
+        assert!(s.contains("denoise.pass:cond"));
+        assert!(s.contains("1.91 MB"));
     }
 }
