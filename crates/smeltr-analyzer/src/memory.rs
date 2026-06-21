@@ -647,8 +647,7 @@ mod tests {
         enter(1, 10, qualname)
     }
 
-    fn module_returned(qualname: &str) -> Event {
-        let _ = qualname;
+    fn module_returned() -> Event {
         ret(2, 20, 1)
     }
 
@@ -672,13 +671,57 @@ mod tests {
             module_entered("vae.decode"),
             residency_sample(100, 1000),
             residency_sample(300, 1000),
-            module_returned("vae.decode"),
+            module_returned(),
         ];
         let out = compute_residency_breakdown(&evs);
         let s = out.iter().find(|s| s.qualname == "vae.decode").unwrap();
         assert_eq!(s.peak_resident_bytes, 300);
         assert_eq!(s.avg_resident_bytes, 200);
         assert_eq!(s.end_resident_bytes, 300);
+    }
+
+    fn residency_sample_ts(seq: u64, ts: u64, resident: u64, rec_max: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Source::MetalHook,
+            Payload::MetalResidencySample {
+                resident_bytes: resident,
+                recommended_max_bytes: rec_max,
+                set_count: 1,
+                at_event: "cb_committed".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn compute_residency_breakdown_attributes_sample_after_scope_return() {
+        // Repro for async-grace: scope exits at t=15, MetalResidencySample lands
+        // at t=100 (85 ns post-return, inside the 500 ms grace window).
+        let evs = vec![
+            enter(1, 10, "foo"),
+            ret(2, 15, 1),
+            residency_sample_ts(3, 100, 100 * 1024 * 1024, 16_000_000_000),
+        ];
+        let out = compute_residency_breakdown(&evs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].qualname, "foo");
+        assert_eq!(out[0].peak_resident_bytes, 100 * 1024 * 1024);
+        assert_eq!(out[0].sample_count, 1);
+    }
+
+    #[test]
+    fn compute_residency_breakdown_drops_sample_past_grace() {
+        // 600 ms past return — outside the 500 ms grace.
+        let evs = vec![
+            enter(1, 10, "foo"),
+            ret(2, 15, 1),
+            residency_sample_ts(3, 15 + 600_000_000, 100 * 1024 * 1024, 16_000_000_000),
+        ];
+        let out = compute_residency_breakdown(&evs);
+        assert_eq!(out.len(), 1, "scope still finalizes (with 0 samples)");
+        assert_eq!(out[0].qualname, "foo");
+        assert_eq!(out[0].sample_count, 0);
     }
 
     // ── new tests: async-grace for compute_heap_breakdown (#40) ──────────

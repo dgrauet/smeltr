@@ -16,8 +16,8 @@ pub struct Params {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub scope_memory: Vec<ScopeMemory>,
-    pub heap_memory: Vec<HeapMemory>,
     pub scope_residency: Vec<ResidencyMemory>,
+    pub heap_memory: Vec<HeapMemory>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -25,8 +25,8 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let events = read_events(&dir)?;
     Ok(Response {
         scope_memory: compute_memory_breakdown(&events),
-        heap_memory: compute_heap_breakdown(&events),
         scope_residency: compute_residency_breakdown(&events),
+        heap_memory: compute_heap_breakdown(&events),
     })
 }
 

@@ -60,7 +60,7 @@ fn render_scopes(out: &mut String, rows: &[ScopeMemory], top: usize) {
 fn render_residency(out: &mut String, rows: &[ResidencyMemory], top: usize) {
     out.push_str(&format!(
         "{:<48} {:>12} {:>12} {:>12} {:>10}\n",
-        "RESIDENCY PEAK", "PEAK", "AVG", "END", "SAMPLES"
+        "RESIDENCY PEAK MEMORY", "PEAK", "AVG", "END", "SAMPLES"
     ));
     for r in rows.iter().take(top) {
         out.push_str(&format!(
@@ -135,7 +135,7 @@ mod tests {
         let s = render(&[], &[], &[], 20);
         assert!(s.contains("SCOPE PEAK MEMORY"));
         assert!(s.contains("HEAP PEAK"));
-        assert!(s.contains("RESIDENCY PEAK"));
+        assert!(s.contains("RESIDENCY PEAK MEMORY"));
         assert!(s.contains("no scopes with memory samples"));
         assert!(s.contains("no heap allocations"));
         assert!(s.contains("no residency samples"));
@@ -182,7 +182,7 @@ mod tests {
             sample_count: 3,
         }];
         let s = render(&[], &[], &residency, 20);
-        assert!(s.contains("RESIDENCY PEAK"));
+        assert!(s.contains("RESIDENCY PEAK MEMORY"));
         assert!(s.contains("denoise.pass:cond"));
         assert!(s.contains("1.91 MB"));
     }

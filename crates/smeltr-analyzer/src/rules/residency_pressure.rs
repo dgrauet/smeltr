@@ -16,28 +16,42 @@ impl Rule for ResidencyPressureRule {
     fn check(&self, events: &[Event]) -> Vec<Finding> {
         // Report only the single worst sample (highest ratio) to avoid one
         // finding per CB boundary.
-        let mut worst: Option<(f64, &Event, u64, u64)> = None;
+        let mut worst: Option<(f64, &Event, u64, u64, String)> = None;
+        let mut scope_stack: Vec<String> = Vec::new();
         for ev in events {
-            if let Payload::MetalResidencySample {
-                resident_bytes,
-                recommended_max_bytes,
-                ..
-            } = &ev.payload
-            {
-                if *recommended_max_bytes == 0 {
-                    continue;
+            match &ev.payload {
+                Payload::ModuleEntered { qualname, .. } => {
+                    scope_stack.push(qualname.clone());
                 }
-                let ratio = *resident_bytes as f64 / *recommended_max_bytes as f64;
-                if ratio < WARN_RATIO {
-                    continue;
+                Payload::ModuleReturned { .. } => {
+                    scope_stack.pop();
                 }
-                if worst.map(|(r, ..)| ratio > r).unwrap_or(true) {
-                    worst = Some((ratio, ev, *resident_bytes, *recommended_max_bytes));
+                Payload::MetalResidencySample {
+                    resident_bytes,
+                    recommended_max_bytes,
+                    ..
+                } => {
+                    if *recommended_max_bytes == 0 {
+                        continue;
+                    }
+                    let ratio = *resident_bytes as f64 / *recommended_max_bytes as f64;
+                    if ratio < WARN_RATIO {
+                        continue;
+                    }
+                    let qualname = scope_stack
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "<unscoped>".to_string());
+                    if worst.as_ref().map(|(r, ..)| ratio > *r).unwrap_or(true) {
+                        worst =
+                            Some((ratio, ev, *resident_bytes, *recommended_max_bytes, qualname));
+                    }
                 }
+                _ => {}
             }
         }
         let mut out = Vec::new();
-        if let Some((ratio, ev, resident, rec_max)) = worst {
+        if let Some((ratio, ev, resident, rec_max, qualname)) = worst {
             let (severity, category) = if ratio > 1.0 {
                 (Severity::Critical, Category::ContributingFactor)
             } else {
@@ -52,7 +66,7 @@ impl Rule for ResidencyPressureRule {
             out.push(
                 Finding::new(severity, category, title)
                     .with_detail(format!(
-                        "peak resident {resident} bytes vs recommendedMaxWorkingSetSize {rec_max} bytes"
+                        "peak resident {resident} bytes vs recommendedMaxWorkingSetSize {rec_max} bytes; scope: {qualname}"
                     ))
                     .with_evidence(EvidenceRef {
                         seq: ev.seq,
@@ -72,21 +86,56 @@ mod tests {
     use smeltr_core::event::{Event, Payload, Source};
     use uuid::Uuid;
 
-    fn sample(resident: u64, rec_max: u64) -> Event {
+    fn make_event(seq: u64, ts: u64, source: Source, payload: Payload) -> Event {
         Event {
-            ts_mono_ns: 0,
-            ts_wall_ns: 0,
+            ts_mono_ns: ts,
+            ts_wall_ns: ts,
             session_id: Uuid::nil(),
-            source: Source::MetalHook,
+            source,
             pid: None,
-            seq: 0,
-            payload: Payload::MetalResidencySample {
+            seq,
+            payload,
+        }
+    }
+
+    fn sample(resident: u64, rec_max: u64) -> Event {
+        make_event(
+            0,
+            0,
+            Source::MetalHook,
+            Payload::MetalResidencySample {
                 resident_bytes: resident,
                 recommended_max_bytes: rec_max,
                 set_count: 1,
                 at_event: "cb_committed".into(),
             },
-        }
+        )
+    }
+
+    fn module_entered_ev(qualname: &str) -> Event {
+        make_event(
+            1,
+            10,
+            Source::PythonSidecar,
+            Payload::ModuleEntered {
+                module_call_id: 1,
+                module_def_id: 0,
+                qualname: qualname.into(),
+                class_name: "Scope".into(),
+                parent_call_id: None,
+                depth: 0,
+                fields: Default::default(),
+            },
+        )
+    }
+
+    fn module_returned_ev() -> Event {
+        make_event(
+            2,
+            20,
+            Source::PythonSidecar,
+            Payload::ModuleReturned { module_call_id: 1 },
+        )
     }
 
     #[test]
@@ -106,5 +155,22 @@ mod tests {
     #[test]
     fn silent_below_threshold() {
         assert!(ResidencyPressureRule.check(&[sample(500, 1000)]).is_empty());
+    }
+
+    #[test]
+    fn scope_name_in_finding_detail() {
+        let evs = vec![
+            module_entered_ev("vae.decode"),
+            sample(1100, 1000),
+            module_returned_ev(),
+        ];
+        let f = ResidencyPressureRule.check(&evs);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Critical);
+        let detail = &f[0].detail;
+        assert!(
+            detail.contains("vae.decode"),
+            "expected 'vae.decode' in detail, got: {detail:?}"
+        );
     }
 }

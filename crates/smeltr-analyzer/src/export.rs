@@ -250,13 +250,17 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
             Payload::ModelUnload { path, t_ns, sha8 } => {
                 model_unloads.push((path.clone(), *t_ns, sha8.clone()));
             }
-            Payload::MetalResidencySample { resident_bytes, .. } => {
+            Payload::MetalResidencySample {
+                resident_bytes,
+                set_count,
+                ..
+            } => {
                 trace_events.push(json!({
                     "ph": "C",
                     "name": "resident_bytes",
                     "pid": 0,
                     "ts": ts_us,
-                    "args": { "bytes": resident_bytes },
+                    "args": { "bytes": resident_bytes, "sets": set_count },
                 }));
             }
             _ => {}
@@ -999,6 +1003,7 @@ mod tests {
             "expected one resident_bytes counter, got {counters:?}"
         );
         assert_eq!(counters[0]["args"]["bytes"], 500_u64);
+        assert_eq!(counters[0]["args"]["sets"], 1_u32);
         assert_eq!(counters[0]["ts"], 5000.0);
         assert_eq!(counters[0]["pid"], 0);
     }
