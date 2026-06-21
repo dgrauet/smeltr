@@ -1326,6 +1326,7 @@ static void smeltr_on_heap_alloc(id<MTLHeap> heap) {
             if (g_residency_sets) [g_residency_sets addObject:set];
             os_unfair_lock_unlock(&g_residency_lock);
         } @catch (NSException *e) {
+            os_unfair_lock_unlock(&g_residency_lock);
             smeltr_log("residency set track exc: %s", e.reason.UTF8String);
         }
     }
