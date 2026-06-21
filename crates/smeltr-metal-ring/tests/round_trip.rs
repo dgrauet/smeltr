@@ -273,3 +273,31 @@ fn device_mem_sample_round_trip() {
         other => panic!("expected DeviceMemSample, got {other:?}"),
     }
 }
+
+#[test]
+fn residency_sample_round_trips() {
+    let dir = tempdir().unwrap();
+    let path = tmp_ring(dir.path());
+    {
+        let mut w = create_ring(&path, 64 * 1024).unwrap();
+        w.write_residency_sample(123, 4_000_000, 10_000_000, 2, "cb_committed")
+            .unwrap();
+    }
+    let mut r = open_for_read(&path).unwrap();
+    let e = r.next().unwrap().unwrap();
+    match e.frame {
+        DecodedFrame::ResidencySample {
+            resident_bytes,
+            recommended_max_bytes,
+            set_count,
+            at_event,
+        } => {
+            assert_eq!(resident_bytes, 4_000_000);
+            assert_eq!(recommended_max_bytes, 10_000_000);
+            assert_eq!(set_count, 2);
+            assert_eq!(at_event, "cb_committed");
+        }
+        other => panic!("expected ResidencySample, got {other:?}"),
+    }
+    assert!(r.next().unwrap().is_none());
+}

@@ -41,6 +41,7 @@ fn kinds_match() {
         ("SMELTR_KIND_SKIPPED", kind::SKIPPED),
         ("SMELTR_KIND_CB_OPS", kind::CB_OPS),
         ("SMELTR_KIND_DEVICE_MEM_SAMPLE", kind::DEVICE_MEM_SAMPLE),
+        ("SMELTR_KIND_RESIDENCY_SAMPLE", kind::RESIDENCY_SAMPLE),
     ];
     // Normalize whitespace runs in the header so column-aligned #defines match.
     let normalized: String = HEADER.split_whitespace().collect::<Vec<_>>().join(" ");

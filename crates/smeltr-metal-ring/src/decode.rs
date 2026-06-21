@@ -43,6 +43,12 @@ pub enum DecodedFrame {
         recommended_max_bytes: u64,
         at_event: String,
     },
+    ResidencySample {
+        resident_bytes: u64,
+        recommended_max_bytes: u64,
+        set_count: u32,
+        at_event: String,
+    },
     HeapAlloc {
         heap_id: u64,
         size_bytes: u64,
@@ -237,6 +243,22 @@ pub fn decode_frame(kind_val: u32, payload: &[u8]) -> Result<DecodedFrame, RingE
             DecodedFrame::DeviceMemSample {
                 allocated_bytes,
                 recommended_max_bytes,
+                at_event,
+            }
+        }
+        k if k == kind::RESIDENCY_SAMPLE => {
+            let resident_bytes = c.read_u64()?;
+            let recommended_max_bytes = c.read_u64()?;
+            let set_count = c.read_u32()?;
+            let at_event_len = c.read_u32()? as usize;
+            if c.pos + at_event_len > c.buf.len() {
+                return Err(RingError::Truncated(c.pos as u64));
+            }
+            let at_event = std::str::from_utf8(&c.buf[c.pos..c.pos + at_event_len])?.to_string();
+            DecodedFrame::ResidencySample {
+                resident_bytes,
+                recommended_max_bytes,
+                set_count,
                 at_event,
             }
         }

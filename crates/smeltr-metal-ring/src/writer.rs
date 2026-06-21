@@ -311,6 +311,23 @@ impl RingWriter {
         p.extend_from_slice(at_event.as_bytes());
         self.write_frame(kind::DEVICE_MEM_SAMPLE, ts, &p)
     }
+
+    pub fn write_residency_sample(
+        &mut self,
+        ts: u64,
+        resident_bytes: u64,
+        recommended_max_bytes: u64,
+        set_count: u32,
+        at_event: &str,
+    ) -> Result<(), RingError> {
+        let mut p = Vec::new();
+        push_u64(&mut p, resident_bytes);
+        push_u64(&mut p, recommended_max_bytes);
+        push_u32(&mut p, set_count);
+        push_u32(&mut p, at_event.len() as u32);
+        p.extend_from_slice(at_event.as_bytes());
+        self.write_frame(kind::RESIDENCY_SAMPLE, ts, &p)
+    }
 }
 
 /// C ABI shim for `RingWriter::write_device_mem_sample`.

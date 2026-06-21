@@ -63,6 +63,14 @@ void smeltr_write_device_mem_sample(smeltr_ring_t *r, uint64_t ts,
     uint64_t recommended_max_bytes,
     const char *at_event);
 
+/* MetalResidencySample: sampled MTLResidencySet resident bytes.
+   `at_event` marks the sampling site ("cb_committed"/"cb_completed"). */
+void smeltr_write_residency_sample(smeltr_ring_t *r, uint64_t ts,
+    uint64_t resident_bytes,
+    uint64_t recommended_max_bytes,
+    uint32_t set_count,
+    const char *at_event);
+
 #ifdef __cplusplus
 }
 #endif
