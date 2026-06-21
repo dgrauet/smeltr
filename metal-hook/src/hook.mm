@@ -25,6 +25,7 @@
 #include <objc/message.h>
 #include <stdatomic.h>
 #include <errno.h>
+#include <os/lock.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +52,9 @@ static BOOL g_dispatch_sampling_enabled = NO;
 // `setPipelineState:` is deliberately untouched (replacing it crashes
 // Apple's ML proxy machinery). Off by default.
 static BOOL g_ml_encoder_enabled = NO;
+static BOOL g_residency_tracking_enabled = NO;
+static NSHashTable *g_residency_sets = nil;     // zeroing-weak set of MTLResidencySet
+static os_unfair_lock g_residency_lock = OS_UNFAIR_LOCK_INIT;
 static id<MTLCounterSet> g_timestamp_counter_set = nil;
 // Holds the bit pattern of the current double ns-per-tick ratio. Stored as
 // _Atomic so the optional recalibration timer can update it concurrently
@@ -209,6 +213,7 @@ static const uint64_t kSmeltrMLEncoderPsoMarker = 0xFF00000000000000ULL;
 /* Forward declaration — defined later, used in smeltr_swizzle_device_class. */
 static void smeltr_emit_metal_hook_skipped(const char *reason);
 static void smeltr_emit_device_mem_sample(const char *at_event);
+static void smeltr_emit_residency_sample(const char *at_event);
 
 static BOOL smeltr_trace_enabled(void) {
     static BOOL cached = NO;
@@ -887,6 +892,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
             smeltr_write_cb_committed(g_ring, commit_ts, cb_id, q_id,
                 new_depth, label_c);
             smeltr_emit_device_mem_sample("cb_committed");
+            smeltr_emit_residency_sample("cb_committed");
 
             // Register handlers. Capture ids by value into the blocks (they
             // become __block-stable copies).
@@ -918,6 +924,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                     err_present, err_code, domain, in_flight);
                 smeltr_emit_cb_ops_pso(done_cb, captured_cb_id, in_flight);
                 smeltr_emit_device_mem_sample("cb_completed");
+                smeltr_emit_residency_sample("cb_completed");
                 id<MTLCommandQueue> q2 = [done_cb commandQueue];
                 if (q2) {
                     atomic_fetch_sub_explicit(&queue_depth_of(q2)->value, 1,
@@ -1292,10 +1299,12 @@ static void smeltr_on_heap_alloc(id<MTLHeap> heap) {
     }
 }
 
-/* MTLDevice swizzles for newBufferWithLength:options: and newHeapWithDescriptor: */
+/* MTLDevice swizzles for newBufferWithLength:options:, newHeapWithDescriptor:,
+   and newResidencySetWithDescriptor:error: (opt-in, SMELTR_HOOK_RESIDENCY=1). */
 @interface NSObject (SmeltrDeviceAllocHook)
 - (id<MTLBuffer>)smeltr_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts;
 - (id<MTLHeap>)smeltr_newHeapWithDescriptor:(MTLHeapDescriptor *)desc;
+- (id)smeltr_newResidencySetWithDescriptor:(id)desc error:(NSError **)err;
 @end
 
 @implementation NSObject (SmeltrDeviceAllocHook)
@@ -1308,6 +1317,19 @@ static void smeltr_on_heap_alloc(id<MTLHeap> heap) {
     id<MTLHeap> h = [self smeltr_newHeapWithDescriptor:desc];
     if (h) smeltr_on_heap_alloc(h);
     return h;
+}
+- (id)smeltr_newResidencySetWithDescriptor:(id)desc error:(NSError **)err {
+    id set = [self smeltr_newResidencySetWithDescriptor:desc error:err]; // original
+    if (set && g_residency_tracking_enabled) {
+        @try {
+            os_unfair_lock_lock(&g_residency_lock);
+            if (g_residency_sets) [g_residency_sets addObject:set];
+            os_unfair_lock_unlock(&g_residency_lock);
+        } @catch (NSException *e) {
+            smeltr_log("residency set track exc: %s", e.reason.UTF8String);
+        }
+    }
+    return set;
 }
 @end
 
@@ -1352,6 +1374,29 @@ static void smeltr_emit_device_mem_sample(const char *at_event) {
     uint64_t recommended = (uint64_t)[g_device recommendedMaxWorkingSetSize];
     smeltr_write_device_mem_sample(g_ring, smeltr_mono_ns(),
                                    allocated, recommended, at_event);
+}
+
+static void smeltr_emit_residency_sample(const char *at_event) {
+    if (!g_device || !g_ring) return;
+    if (!g_residency_tracking_enabled) return;
+    if (!atomic_load_explicit(&g_enabled, memory_order_relaxed)) return;
+    uint64_t resident = 0;
+    uint32_t count = 0;
+    @try {
+        os_unfair_lock_lock(&g_residency_lock);
+        for (id set in g_residency_sets) {
+            resident += (uint64_t)[set allocatedSize];
+            count++;
+        }
+        os_unfair_lock_unlock(&g_residency_lock);
+    } @catch (NSException *e) {
+        os_unfair_lock_unlock(&g_residency_lock);
+        smeltr_log("residency sample exc: %s", e.reason.UTF8String);
+        return;
+    }
+    uint64_t recommended = (uint64_t)[g_device recommendedMaxWorkingSetSize];
+    smeltr_write_residency_sample(g_ring, smeltr_mono_ns(),
+                                  resident, recommended, count, at_event);
 }
 
 static void smeltr_swizzle_device_class(void) {
@@ -1400,6 +1445,21 @@ static void smeltr_swizzle_device_class(void) {
     }
 
     Class dcls = object_getClass(d);
+
+    const char *res = getenv("SMELTR_HOOK_RESIDENCY");
+    if (res && strcmp(res, "1") == 0) {
+        g_residency_tracking_enabled = YES;
+        g_residency_sets = [NSHashTable weakObjectsHashTable];
+        if (swizzle_instance(dcls, @selector(newResidencySetWithDescriptor:error:),
+                                    @selector(smeltr_newResidencySetWithDescriptor:error:))) {
+            smeltr_log("residency tracking enabled; swizzled %s.newResidencySetWithDescriptor:error:",
+                       class_getName(dcls));
+        } else {
+            smeltr_log("SMELTR_HOOK_RESIDENCY=1 ignored: "
+                       "newResidencySetWithDescriptor:error: not found (macOS < 14?)");
+            g_residency_tracking_enabled = NO;
+        }
+    }
     if (swizzle_instance(dcls, @selector(newCommandQueue),
                                 @selector(smeltr_newCommandQueue))) {
         smeltr_log("swizzled %s.newCommandQueue", class_getName(dcls));
