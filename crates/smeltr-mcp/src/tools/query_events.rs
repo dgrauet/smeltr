@@ -98,6 +98,7 @@ pub(crate) fn payload_kind(e: &Event) -> &'static str {
         Payload::MetalCbWarning { .. } => "MetalCbWarning",
         Payload::MetalHeapAlloc { .. } => "MetalHeapAlloc",
         Payload::MetalDeviceMemSample { .. } => "MetalDeviceMemSample",
+        Payload::MetalResidencySample { .. } => "MetalResidencySample",
         Payload::MetalHeapFree { .. } => "MetalHeapFree",
         Payload::MetalBufferAlloc { .. } => "MetalBufferAlloc",
         Payload::MetalBufferFree { .. } => "MetalBufferFree",

@@ -96,6 +96,17 @@ pub fn frame_to_payload(f: DecodedFrame) -> Payload {
             recommended_max_bytes,
             at_event,
         },
+        DecodedFrame::ResidencySample {
+            resident_bytes,
+            recommended_max_bytes,
+            set_count,
+            at_event,
+        } => Payload::MetalResidencySample {
+            resident_bytes,
+            recommended_max_bytes,
+            set_count,
+            at_event,
+        },
         DecodedFrame::Dropped { count } => Payload::MetalHookDropped { count },
         DecodedFrame::Skipped { reason } => Payload::MetalHookSkipped { reason },
     }
@@ -223,6 +234,25 @@ mod tests {
             Payload::MetalCbOps { cb_id: 1, ops } => assert!(ops.is_empty()),
             other => panic!("expected MetalCbOps, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn translates_residency_sample() {
+        let f = DecodedFrame::ResidencySample {
+            resident_bytes: 7,
+            recommended_max_bytes: 9,
+            set_count: 1,
+            at_event: "cb_completed".into(),
+        };
+        assert_eq!(
+            frame_to_payload(f),
+            Payload::MetalResidencySample {
+                resident_bytes: 7,
+                recommended_max_bytes: 9,
+                set_count: 1,
+                at_event: "cb_completed".into()
+            }
+        );
     }
 
     #[test]

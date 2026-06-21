@@ -150,6 +150,12 @@ pub enum Payload {
         recommended_max_bytes: u64,
         at_event: String,
     },
+    MetalResidencySample {
+        resident_bytes: u64,
+        recommended_max_bytes: u64,
+        set_count: u32,
+        at_event: String,
+    },
     MetalHeapFree {
         heap_id: u64,
     },
@@ -869,6 +875,20 @@ mod tests {
             },
             Source::MetalHook,
         );
+    }
+
+    #[test]
+    fn metal_residency_sample_cbor_round_trip() {
+        let p = Payload::MetalResidencySample {
+            resident_bytes: 4_000_000,
+            recommended_max_bytes: 10_000_000,
+            set_count: 2,
+            at_event: "cb_committed".into(),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&p, &mut buf).unwrap();
+        let back: Payload = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(p, back);
     }
 
     #[test]
