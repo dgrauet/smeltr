@@ -119,6 +119,15 @@ CBOR length-prefixed frames over a Unix socket. See
   record one dispatch per network. Emits `K_MLNet_<encoder_addr>` in the
   op breakdown. `setPipelineState:` is deliberately NOT swizzled (Apple's
   ML proxy machinery crashes if it is).
+- `SMELTR_HOOK_RESIDENCY=1` — opt-in MTLResidencySet tracking (macOS 14+).
+  Swizzles `newResidencySetWithDescriptor:error:` and, at each command-buffer
+  boundary, sums `[set allocatedSize]` over live residency sets → emits a
+  `MetalResidencySample` (resident vs `recommendedMaxWorkingSetSize`). Off by
+  default; no-op on macOS < 14 (selector absent). Surfaced by
+  `get_memory_breakdown` (scope_residency), `smeltr memory`, the
+  `residency_pressure` analyzer rule, and a `resident_bytes` chrome-trace counter.
+  Metric is an upper-bound proxy (bytes organized into residency sets), not a
+  per-wired-page accounting.
 - `SMELTR_SCOPE_TOKEN` — UUID stamped by `smeltr record` into the child env. The
   Python sidecar reads it at `attach()` and tags every Emit so the daemon
   routes the event to the correct scoped session even when the recorded
