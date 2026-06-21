@@ -16,20 +16,25 @@ concurrency:
 
 jobs:
   relock:
-    # Gate on the release PR author (the RELEASE_PLEASE_TOKEN owner), not just the
-    # branch name. A `release-please--` branch prefix can be forged by any account
-    # with write access; the PR author cannot. This keeps the PAT scoped to the
-    # genuine release PR.
+    # Gate on the release bot: only a Bot-authored `release-please--` PR (i.e. the
+    # release GitHub App) runs the relock. A human collaborator who forges a
+    # `release-please--` branch has user.type == 'User' and is excluded, so the
+    # App token never runs against a crafted Cargo.toml.
     if: >-
-      startsWith(github.head_ref, 'release-please--') &&
-      github.event.pull_request.user.login == 'dgrauet'
+      github.event.pull_request.user.type == 'Bot' &&
+      startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-          # Don't persist the PAT in .git/config; the push step re-supplies it
-          # via an explicit URL. Defense-in-depth, mirroring mlx-forge.
+          # Don't persist the token in .git/config; the push step re-supplies it
+          # via an explicit URL. Defense-in-depth.
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Regenerate Cargo.lock
@@ -38,7 +43,7 @@ jobs:
         env:
           # Token is exposed only to this final step, which runs trusted git
           # commands.
-          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_REF: ${{ github.head_ref }}
         run: |
           if ! git diff --quiet Cargo.lock; then
@@ -46,5 +51,5 @@ jobs:
             git config user.email "release@users.noreply.github.com"
             git add Cargo.lock
             git commit -m "chore: sync Cargo.lock with release version"
-            git push "https://x-access-token:${RELEASE_PLEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
           fi
