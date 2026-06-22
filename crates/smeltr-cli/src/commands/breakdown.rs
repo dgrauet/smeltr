@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use smeltr_analyzer::{
     compute_breakdown, render_chrome_trace, render_ops_flat, render_table, ModuleBreakdown,
+    OpGroupBy,
 };
 use smeltr_core::event::FieldValue;
 use smeltr_core::reader::read_events;
@@ -53,8 +54,15 @@ pub fn run(
     top_ops: usize,
     no_ops: bool,
     ops_flat: bool,
+    group_by: String,
     field_filter_raw: Vec<String>,
 ) -> Result<()> {
+    let group_by_enum = match group_by.as_str() {
+        "name" => OpGroupBy::Name,
+        "kind" => OpGroupBy::Kind,
+        other => anyhow::bail!("--group-by must be \"name\" or \"kind\", got {other:?}"),
+    };
+
     let dir = crate::session_resolver::resolve(id, last, include_ambient)?;
     let events =
         read_events(&dir).with_context(|| format!("reading events from {}", dir.display()))?;
@@ -77,7 +85,7 @@ pub fn run(
     }
 
     if ops_flat {
-        println!("{}", render_ops_flat(&root, top));
+        println!("{}", render_ops_flat(&root, group_by_enum, top));
     } else {
         let show_ops = !no_ops;
         println!("{}", render_table(&root, top, depth, top_ops, show_ops));

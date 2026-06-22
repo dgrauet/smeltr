@@ -193,7 +193,7 @@ fn tool_list() -> Vec<Tool> {
         ),
         tool::<crate::tools::op_summary::Params>(
             "get_op_summary",
-            "Flat cross-module aggregation of GPU time per op kind (Matmul, Softmax, ...).",
+            "Flat cross-module aggregation of GPU time per kernel name (default) or per op kind (group_by=\"kind\"; Matmul, SDPA, ...). top_n caps rows.",
         ),
         tool::<crate::tools::dispatch_origins::Params>(
             "get_dispatch_origins",

@@ -7,8 +7,9 @@ pub mod rules;
 
 pub mod breakdown;
 pub use breakdown::{
-    compute as compute_breakdown, render_chrome_trace, render_ops_flat, render_table,
-    BreakdownError, Diagnostics, ModuleBreakdown, OpAttribution,
+    aggregate_ops_flat, compute as compute_breakdown, render_chrome_trace, render_ops_flat,
+    render_table, BreakdownError, Diagnostics, ModuleBreakdown, OpAttribution, OpFlatRow,
+    OpGroupBy,
 };
 
 pub mod diff;

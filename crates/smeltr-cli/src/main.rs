@@ -71,6 +71,9 @@ enum Cmd {
         /// Print a flat cross-module ops table instead of the module tree.
         #[arg(long, default_value_t = false)]
         ops_flat: bool,
+        /// Aggregate --ops-flat by "name" (default) or "kind".
+        #[arg(long, default_value = "name")]
+        group_by: String,
         /// Filter by field equality. Repeatable. Format: key=value.
         /// Keeps only nodes (and their ancestors) whose fields contain
         /// all specified key/value pairs.
@@ -178,6 +181,7 @@ fn main() -> anyhow::Result<()> {
                 top_ops,
                 no_ops,
                 ops_flat,
+                group_by,
                 field_filter,
             } => commands::breakdown::run(
                 id,
@@ -190,6 +194,7 @@ fn main() -> anyhow::Result<()> {
                 top_ops,
                 no_ops,
                 ops_flat,
+                group_by,
                 field_filter,
             ),
             Cmd::Compare {
