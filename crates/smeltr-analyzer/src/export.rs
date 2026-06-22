@@ -263,6 +263,97 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                     "args": { "allocated_bytes": allocated_bytes, "budget_bytes": recommended_max_bytes },
                 }));
             }
+            Payload::VmSample {
+                wired_bytes,
+                active_bytes,
+                compressed_bytes,
+                swap_used_bytes,
+                page_outs_per_sec,
+            } => {
+                let ts = ev.ts_mono_ns as f64 / 1000.0;
+                trace_events.push(json!({
+                    "ph": "C",
+                    "name": "system_memory",
+                    "pid": 0,
+                    "ts": ts,
+                    "args": {
+                        "wired_bytes": wired_bytes,
+                        "active_bytes": active_bytes,
+                        "compressed_bytes": compressed_bytes,
+                        "swap_used_bytes": swap_used_bytes,
+                    },
+                }));
+                if page_outs_per_sec.is_finite() {
+                    trace_events.push(json!({
+                        "ph": "C",
+                        "name": "vm_page_outs_per_sec",
+                        "pid": 0,
+                        "ts": ts,
+                        "args": { "rate": page_outs_per_sec },
+                    }));
+                }
+            }
+            Payload::ThermalState { level } => {
+                trace_events.push(json!({
+                    "ph": "C",
+                    "name": "thermal_level",
+                    "pid": 0,
+                    "ts": ev.ts_mono_ns as f64 / 1000.0,
+                    "args": { "level": level },
+                }));
+            }
+            Payload::IoReportSample {
+                gpu_residency_pct,
+                ane_residency_pct,
+                cpu_residency_pct,
+                gpu_power_mw,
+                gpu_freq_mhz,
+            } => {
+                let ts = ev.ts_mono_ns as f64 / 1000.0;
+                let mut util = serde_json::Map::new();
+                if let Some(p) = gpu_residency_pct {
+                    if p.is_finite() {
+                        util.insert("gpu".into(), json!(p));
+                    }
+                }
+                if let Some(p) = ane_residency_pct {
+                    if p.is_finite() {
+                        util.insert("ane".into(), json!(p));
+                    }
+                }
+                if let Some(p) = cpu_residency_pct {
+                    if p.is_finite() {
+                        util.insert("cpu".into(), json!(p));
+                    }
+                }
+                if !util.is_empty() {
+                    trace_events.push(json!({
+                        "ph": "C",
+                        "name": "utilization_pct",
+                        "pid": 0,
+                        "ts": ts,
+                        "args": util,
+                    }));
+                }
+                if let Some(mw) = gpu_power_mw {
+                    trace_events.push(json!({
+                        "ph": "C",
+                        "name": "gpu_power_mw",
+                        "pid": 0,
+                        "ts": ts,
+                        "args": { "mw": mw },
+                    }));
+                }
+                if let Some(mhz) = gpu_freq_mhz {
+                    trace_events.push(json!({
+                        "ph": "C",
+                        "name": "gpu_freq_mhz",
+                        "pid": 0,
+                        "ts": ts,
+                        "args": { "mhz": mhz },
+                    }));
+                }
+            }
             _ => {}
         }
     }
@@ -973,6 +1064,102 @@ mod tests {
             "/models/llama/weights.safetensors"
         );
         assert_eq!(instants[0]["args"]["sha8"], "ab12cd34");
+    }
+
+    #[test]
+    fn chrome_trace_emits_system_counters() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![
+            ev(
+                1,
+                1_000,
+                Source::Vm,
+                Payload::VmSample {
+                    wired_bytes: 100,
+                    active_bytes: 200,
+                    compressed_bytes: 50,
+                    swap_used_bytes: 10,
+                    page_outs_per_sec: 1.5,
+                },
+            ),
+            ev(
+                2,
+                2_000,
+                Source::Thermal,
+                Payload::ThermalState { level: 2 },
+            ),
+            ev(
+                3,
+                3_000,
+                Source::IoReport,
+                Payload::IoReportSample {
+                    gpu_residency_pct: Some(80.0),
+                    ane_residency_pct: None,
+                    cpu_residency_pct: Some(40.0),
+                    gpu_power_mw: Some(1500),
+                    gpu_freq_mhz: None,
+                },
+            ),
+        ];
+        let v = parse_trace(&to_chrome_trace(&evs, &meta));
+        let counters: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "C")
+            .collect();
+        let by_name = |n: &str| counters.iter().find(|e| e["name"] == n);
+
+        let mem = by_name("system_memory").expect("system_memory");
+        assert_eq!(mem["args"]["wired_bytes"], 100);
+        assert_eq!(mem["args"]["swap_used_bytes"], 10);
+
+        assert!(by_name("vm_page_outs_per_sec").is_some());
+        assert_eq!(by_name("thermal_level").unwrap()["args"]["level"], 2);
+
+        let util = by_name("utilization_pct").expect("utilization_pct");
+        assert_eq!(util["args"]["gpu"], 80.0);
+        assert_eq!(util["args"]["cpu"], 40.0);
+        assert!(util["args"].get("ane").is_none(), "None pct must be absent");
+
+        assert_eq!(by_name("gpu_power_mw").unwrap()["args"]["mw"], 1500);
+        assert!(
+            by_name("gpu_freq_mhz").is_none(),
+            "None field skips its track"
+        );
+    }
+
+    #[test]
+    fn chrome_trace_skips_non_finite_f32() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![ev(
+            1,
+            1_000,
+            Source::Vm,
+            Payload::VmSample {
+                wired_bytes: 1,
+                active_bytes: 1,
+                compressed_bytes: 1,
+                swap_used_bytes: 1,
+                page_outs_per_sec: f32::NAN,
+            },
+        )];
+        // Must not panic and must produce valid JSON (NaN would otherwise fail
+        // serde_json::to_string and break the whole export).
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let has_rate = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "vm_page_outs_per_sec");
+        assert!(!has_rate, "non-finite page_outs_per_sec must be skipped");
+        // system_memory still emitted (its fields are finite u64s)
+        assert!(v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "system_memory"));
     }
 
     #[test]
