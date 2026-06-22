@@ -529,6 +529,45 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
     .to_string()
 }
 
+/// Re-aggregate one node's ops by resolved kind, falling back to the op name
+/// when `kind` is None. `symbol` is dropped (a kind row spans many kernels);
+/// `kind` is the first non-None in the bucket. Sorted by gpu_ns desc, tie by name.
+fn regroup_ops_by_kind(ops: &[OpAttribution]) -> Vec<OpAttribution> {
+    let mut agg: HashMap<String, (u64, u64, Option<String>)> = HashMap::new();
+    for op in ops {
+        let key = op.kind.clone().unwrap_or_else(|| op.name.clone());
+        let e = agg.entry(key).or_insert((0, 0, None));
+        e.0 += op.gpu_ns;
+        e.1 += op.count;
+        if e.2.is_none() {
+            e.2 = op.kind.clone();
+        }
+    }
+    let mut rows: Vec<OpAttribution> = agg
+        .into_iter()
+        .map(|(name, (gpu_ns, count, kind))| OpAttribution {
+            name,
+            gpu_ns,
+            count,
+            symbol: None,
+            kind,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.gpu_ns.cmp(&a.gpu_ns).then(a.name.cmp(&b.name)));
+    rows
+}
+
+/// Walk the tree; for `OpGroupBy::Kind`, replace every node's `ops` with the
+/// per-node kind-regrouped version. No-op for `OpGroupBy::Name`.
+pub fn apply_op_group_by(node: &mut ModuleBreakdown, group_by: OpGroupBy) {
+    if let OpGroupBy::Kind = group_by {
+        node.ops = regroup_ops_by_kind(&node.ops);
+        for c in &mut node.children {
+            apply_op_group_by(c, group_by);
+        }
+    }
+}
+
 /// Controls how ops are grouped in the flat summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpGroupBy {
@@ -1769,6 +1808,98 @@ mod tests {
             forward.fields.get("kind"),
             Some(&FieldValue::String("matmul".into()))
         );
+    }
+
+    fn leaf_with_ops(qualname: &str, ops: Vec<OpAttribution>) -> ModuleBreakdown {
+        ModuleBreakdown {
+            qualname: qualname.into(),
+            class_name: String::new(),
+            calls: 1,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: 0,
+            eval_count: 0,
+            cb_count: 0,
+            children: vec![],
+            ops,
+            diagnostics: None,
+            fields: Default::default(),
+        }
+    }
+
+    #[test]
+    fn apply_op_group_by_kind_regroups_each_node() {
+        // Build a parent with a child; both have matmul kernels + one unresolved.
+        let mut root = leaf_with_ops(
+            "root",
+            vec![
+                OpAttribution {
+                    name: "gemm_a".into(),
+                    gpu_ns: 100,
+                    count: 1,
+                    symbol: Some("gemm_a".into()),
+                    kind: Some("Matmul".into()),
+                },
+                OpAttribution {
+                    name: "gemm_b".into(),
+                    gpu_ns: 50,
+                    count: 2,
+                    symbol: Some("gemm_b".into()),
+                    kind: Some("Matmul".into()),
+                },
+                OpAttribution {
+                    name: "K_ff00".into(),
+                    gpu_ns: 30,
+                    count: 1,
+                    symbol: None,
+                    kind: None,
+                },
+            ],
+        );
+        let child = leaf_with_ops(
+            "child",
+            vec![OpAttribution {
+                name: "gemm_c".into(),
+                gpu_ns: 10,
+                count: 1,
+                symbol: Some("gemm_c".into()),
+                kind: Some("Matmul".into()),
+            }],
+        );
+        root.children.push(child);
+
+        apply_op_group_by(&mut root, OpGroupBy::Kind);
+
+        let mm = root
+            .ops
+            .iter()
+            .find(|o| o.name == "Matmul")
+            .expect("Matmul row");
+        assert_eq!(mm.gpu_ns, 150);
+        assert_eq!(mm.count, 3);
+        assert!(mm.symbol.is_none());
+        assert!(root.ops.iter().any(|o| o.name == "K_ff00")); // fallback row kept
+                                                              // descending sort: Matmul (150) before K_ff00 (30)
+        assert!(root.ops[0].gpu_ns >= root.ops[root.ops.len() - 1].gpu_ns);
+        // child node regrouped too
+        assert_eq!(root.children[0].ops.len(), 1);
+        assert_eq!(root.children[0].ops[0].name, "Matmul");
+    }
+
+    #[test]
+    fn apply_op_group_by_name_is_noop() {
+        let mut root = leaf_with_ops(
+            "root",
+            vec![OpAttribution {
+                name: "gemm_a".into(),
+                gpu_ns: 100,
+                count: 1,
+                symbol: Some("gemm_a".into()),
+                kind: Some("Matmul".into()),
+            }],
+        );
+        let before = root.ops.clone();
+        apply_op_group_by(&mut root, OpGroupBy::Name);
+        assert_eq!(root.ops, before);
     }
 
     #[test]
