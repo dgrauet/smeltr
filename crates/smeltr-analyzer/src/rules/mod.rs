@@ -1,4 +1,5 @@
 pub mod duplicate_model_load;
+pub mod memory_pressure;
 pub mod metal_error;
 pub mod mlx_timing;
 pub mod queue_depth;

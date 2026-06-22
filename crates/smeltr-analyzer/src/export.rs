@@ -250,6 +250,19 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
             Payload::ModelUnload { path, t_ns, sha8 } => {
                 model_unloads.push((path.clone(), *t_ns, sha8.clone()));
             }
+            Payload::MetalDeviceMemSample {
+                allocated_bytes,
+                recommended_max_bytes,
+                ..
+            } => {
+                trace_events.push(json!({
+                    "ph": "C",
+                    "name": "gpu_memory",
+                    "pid": 0,
+                    "ts": ev.ts_mono_ns as f64 / 1000.0,
+                    "args": { "allocated_bytes": allocated_bytes, "budget_bytes": recommended_max_bytes },
+                }));
+            }
             _ => {}
         }
     }
