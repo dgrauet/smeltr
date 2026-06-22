@@ -14,6 +14,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(crate::rules::queue_depth::QueueDepthRule),
         Box::new(crate::rules::queue_pressure::QueuePressureRule),
         Box::new(crate::rules::mlx_timing::MlxTimingRule),
+        Box::new(crate::rules::memory_pressure::MemoryPressureRule),
         Box::new(crate::rules::system_pressure::SystemPressureRule),
         Box::new(crate::rules::duplicate_model_load::DuplicateModelLoadRule),
     ]
