@@ -539,6 +539,11 @@ pub enum OpGroupBy {
 }
 
 /// A single row in the flat op summary.
+///
+/// In Kind mode (`OpGroupBy::Kind`), `symbol` is always `None` because a kind
+/// row spans many kernels with no single representative symbol. A kernel that
+/// has no resolved kind falls back to using its own name as the key; in that
+/// case `key == op name` and `kind == None`.
 #[derive(Debug, Clone)]
 pub struct OpFlatRow {
     pub key: String,
@@ -1587,6 +1592,75 @@ mod tests {
         assert!(s.contains("Matmul"));
         assert!(s.contains("1.500")); // 1500 ns formatted as us → "1.500"
         assert!(s.contains("Softmax"));
+    }
+
+    #[test]
+    fn render_ops_flat_groups_by_kind() {
+        // Two ops with different kernel names but the same kind "Matmul".
+        // In Kind mode they should collapse into a single "Matmul" row and
+        // the individual kernel names must not appear in the output.
+        let root = ModuleBreakdown {
+            qualname: "<root>".into(),
+            class_name: "".into(),
+            calls: 0,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: 1500,
+            eval_count: 0,
+            cb_count: 0,
+            children: vec![
+                ModuleBreakdown {
+                    qualname: "A".into(),
+                    class_name: "A".into(),
+                    calls: 1,
+                    gpu_ns_self: 800,
+                    gpu_ns_subtree: 800,
+                    eval_count: 1,
+                    cb_count: 1,
+                    children: vec![],
+                    ops: vec![OpAttribution {
+                        name: "gemm_kernel_0".into(),
+                        gpu_ns: 800,
+                        count: 1,
+                        symbol: Some("gemm_kernel_0".into()),
+                        kind: Some("Matmul".into()),
+                    }],
+                    diagnostics: None,
+                    fields: Default::default(),
+                },
+                ModuleBreakdown {
+                    qualname: "B".into(),
+                    class_name: "B".into(),
+                    calls: 1,
+                    gpu_ns_self: 700,
+                    gpu_ns_subtree: 700,
+                    eval_count: 1,
+                    cb_count: 1,
+                    children: vec![],
+                    ops: vec![OpAttribution {
+                        name: "gemm_kernel_1".into(),
+                        gpu_ns: 700,
+                        count: 2,
+                        symbol: Some("gemm_kernel_1".into()),
+                        kind: Some("Matmul".into()),
+                    }],
+                    diagnostics: None,
+                    fields: Default::default(),
+                },
+            ],
+            ops: vec![],
+            diagnostics: Some(Diagnostics::default()),
+            fields: Default::default(),
+        };
+        let s = render_ops_flat(&root, OpGroupBy::Kind, 10);
+        assert!(s.contains("Matmul"), "Kind row 'Matmul' must appear");
+        assert!(
+            !s.contains("gemm_kernel_0"),
+            "individual kernel name must not appear in Kind mode"
+        );
+        assert!(
+            !s.contains("gemm_kernel_1"),
+            "individual kernel name must not appear in Kind mode"
+        );
     }
 
     #[test]
