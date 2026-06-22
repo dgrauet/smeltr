@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/dgrauet/smeltr/compare/v0.9.0...v0.10.0) (2026-06-22)
+
+
+### Features
+
+* **analyzer:** chrome-trace counters for system metrics ([18e8852](https://github.com/dgrauet/smeltr/commit/18e88520ea152388a26a3cc4ad673e06acc4ebbd))
+* **analyzer:** chrome-trace counters for VM/thermal/IOReport system metrics ([0768a2c](https://github.com/dgrauet/smeltr/commit/0768a2c92aed128e79bfc8982accdff5ecb5d51a))
+* **analyzer:** shared aggregate_ops_flat with group-by name|kind ([6d1d84d](https://github.com/dgrauet/smeltr/commit/6d1d84dec96041424f19f12abae4f3f279458152))
+* group_by="kind" for op summary (flat GPU ops) ([ce2e291](https://github.com/dgrauet/smeltr/commit/ce2e2913869ddcff669014b509536b0b89cd49b0))
+* **mcp,cli:** group_by name|kind on op summary ([7439891](https://github.com/dgrauet/smeltr/commit/74398915fd3410bf3bb532a7b009f5e811f631de))
+
+
+### Bug Fixes
+
+* **mcp,analyzer:** clarify op_summary description + cover render kind mode ([e43c175](https://github.com/dgrauet/smeltr/commit/e43c17503f05e4e63c370293547e91f33726380b))
+
 ## [0.9.0](https://github.com/dgrauet/smeltr/compare/v0.8.0...v0.9.0) (2026-06-22)
 
 
