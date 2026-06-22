@@ -2,8 +2,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use smeltr_analyzer::{
-    compute_breakdown, render_chrome_trace, render_ops_flat, render_table, ModuleBreakdown,
-    OpGroupBy,
+    apply_op_group_by, compute_breakdown, render_chrome_trace, render_ops_flat, render_table,
+    ModuleBreakdown, OpGroupBy,
 };
 use smeltr_core::event::FieldValue;
 use smeltr_core::reader::read_events;
@@ -82,6 +82,11 @@ pub fn run(
     // Apply field filter before rendering.
     if !field_filter.is_empty() {
         prune_by_field_filter(&mut root, &field_filter);
+    }
+
+    // Kind grouping applies to the tree path; the flat path aggregates itself.
+    if !ops_flat {
+        apply_op_group_by(&mut root, group_by_enum);
     }
 
     if ops_flat {
