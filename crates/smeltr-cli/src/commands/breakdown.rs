@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use smeltr_analyzer::{
     compute_breakdown, render_chrome_trace, render_ops_flat, render_table, ModuleBreakdown,
+    OpGroupBy,
 };
 use smeltr_core::event::FieldValue;
 use smeltr_core::reader::read_events;
@@ -77,7 +78,7 @@ pub fn run(
     }
 
     if ops_flat {
-        println!("{}", render_ops_flat(&root, top));
+        println!("{}", render_ops_flat(&root, OpGroupBy::Name, top));
     } else {
         let show_ops = !no_ops;
         println!("{}", render_table(&root, top, depth, top_ops, show_ops));

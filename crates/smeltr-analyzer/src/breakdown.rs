@@ -529,28 +529,79 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
     .to_string()
 }
 
-/// Aggregate ops across all module leaves and return a flat table sorted by gpu_ns desc.
-pub fn render_ops_flat(root: &ModuleBreakdown, top: usize) -> String {
-    let mut agg: HashMap<String, (u64, u64)> = HashMap::new();
-    fn walk(n: &ModuleBreakdown, agg: &mut HashMap<String, (u64, u64)>) {
+/// Controls how ops are grouped in the flat summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpGroupBy {
+    /// Group by op name (original behavior).
+    Name,
+    /// Group by resolved kind (falls back to op name when kind is None).
+    Kind,
+}
+
+/// A single row in the flat op summary.
+#[derive(Debug, Clone)]
+pub struct OpFlatRow {
+    pub key: String,
+    pub gpu_ns: u64,
+    pub count: u64,
+    /// Representative kernel symbol (Name mode only; None in Kind mode).
+    pub symbol: Option<String>,
+    pub kind: Option<String>,
+}
+
+// key -> (gpu_ns, count, symbol, kind)
+type OpAggMap = HashMap<String, (u64, u64, Option<String>, Option<String>)>;
+
+/// Flatten all ops in the module tree into rows keyed by op name or resolved
+/// kind. Returns ALL rows sorted by gpu_ns desc (no truncation — callers
+/// compute totals over the full set, then truncate, so percentages stay
+/// correct).
+pub fn aggregate_ops_flat(root: &ModuleBreakdown, group_by: OpGroupBy) -> Vec<OpFlatRow> {
+    let mut agg: OpAggMap = HashMap::new();
+    fn walk(n: &ModuleBreakdown, group_by: OpGroupBy, agg: &mut OpAggMap) {
         for op in &n.ops {
-            let e = agg.entry(op.name.clone()).or_insert((0, 0));
+            let key = match group_by {
+                OpGroupBy::Name => op.name.clone(),
+                OpGroupBy::Kind => op.kind.clone().unwrap_or_else(|| op.name.clone()),
+            };
+            let e = agg.entry(key).or_insert((0, 0, None, None));
             e.0 += op.gpu_ns;
             e.1 += op.count;
+            if e.2.is_none() {
+                e.2 = op.symbol.clone();
+            }
+            if e.3.is_none() {
+                e.3 = op.kind.clone();
+            }
         }
         for c in &n.children {
-            walk(c, agg);
+            walk(c, group_by, agg);
         }
     }
-    walk(root, &mut agg);
+    walk(root, group_by, &mut agg);
 
-    let total: u64 = agg.values().map(|(ns, _)| *ns).sum::<u64>().max(1);
-    let mut rows: Vec<(String, u64, u64)> = agg
+    let mut rows: Vec<OpFlatRow> = agg
         .into_iter()
-        .map(|(name, (ns, c))| (name, ns, c))
+        .map(|(key, (gpu_ns, count, symbol, kind))| OpFlatRow {
+            key,
+            gpu_ns,
+            count,
+            // A kind row spans many kernels: no single representative symbol.
+            symbol: match group_by {
+                OpGroupBy::Name => symbol,
+                OpGroupBy::Kind => None,
+            },
+            kind,
+        })
         .collect();
-    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
-    rows.truncate(top);
+    rows.sort_by(|a, b| b.gpu_ns.cmp(&a.gpu_ns).then(a.key.cmp(&b.key)));
+    rows
+}
+
+/// Aggregate ops across all module leaves and return a flat table sorted by gpu_ns desc.
+pub fn render_ops_flat(root: &ModuleBreakdown, group_by: OpGroupBy, top: usize) -> String {
+    let rows = aggregate_ops_flat(root, group_by);
+    let total: u64 = rows.iter().map(|r| r.gpu_ns).sum::<u64>().max(1);
 
     let mut out = String::new();
     out.push_str(&format!(
@@ -559,13 +610,13 @@ pub fn render_ops_flat(root: &ModuleBreakdown, top: usize) -> String {
     ));
     out.push_str(&"-".repeat(64));
     out.push('\n');
-    for (name, ns, c) in rows {
-        let pct = (ns as f64 / total as f64) * 100.0;
+    for r in rows.iter().take(top) {
+        let pct = (r.gpu_ns as f64 / total as f64) * 100.0;
         out.push_str(&format!(
             "{:<32} {:>8} {:>14.3} {:>5.1}%\n",
-            name,
-            c,
-            ns as f64 / 1000.0,
+            r.key,
+            r.count,
+            r.gpu_ns as f64 / 1000.0,
             pct,
         ));
     }
@@ -1532,10 +1583,67 @@ mod tests {
             diagnostics: Some(Diagnostics::default()),
             fields: Default::default(),
         };
-        let s = render_ops_flat(&root, 10);
+        let s = render_ops_flat(&root, OpGroupBy::Name, 10);
         assert!(s.contains("Matmul"));
         assert!(s.contains("1.500")); // 1500 ns formatted as us → "1.500"
         assert!(s.contains("Softmax"));
+    }
+
+    #[test]
+    fn aggregate_ops_flat_by_kind_collapses_kernels() {
+        // Build a root with two matmul-kind ops (different names/symbols) + one other.
+        let root = ModuleBreakdown {
+            qualname: "root".into(),
+            class_name: String::new(),
+            calls: 0,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: 0,
+            eval_count: 0,
+            cb_count: 0,
+            ops: vec![
+                OpAttribution {
+                    name: "gemm_a".into(),
+                    gpu_ns: 100,
+                    count: 1,
+                    symbol: Some("gemm_a".into()),
+                    kind: Some("Matmul".into()),
+                },
+                OpAttribution {
+                    name: "gemm_b".into(),
+                    gpu_ns: 50,
+                    count: 2,
+                    symbol: Some("gemm_b".into()),
+                    kind: Some("Matmul".into()),
+                },
+                OpAttribution {
+                    name: "K_ff00".into(),
+                    gpu_ns: 30,
+                    count: 1,
+                    symbol: None,
+                    kind: None,
+                },
+            ],
+            children: vec![],
+            diagnostics: None,
+            fields: Default::default(),
+        };
+
+        let kind_rows = aggregate_ops_flat(&root, OpGroupBy::Kind);
+        let mm = kind_rows
+            .iter()
+            .find(|r| r.key == "Matmul")
+            .expect("Matmul row");
+        assert_eq!(mm.gpu_ns, 150);
+        assert_eq!(mm.count, 3);
+        assert!(mm.symbol.is_none(), "kind mode drops symbol");
+        // unresolved kernel falls back to its name as its own row
+        assert!(kind_rows.iter().any(|r| r.key == "K_ff00"));
+
+        let by_name = aggregate_ops_flat(&root, OpGroupBy::Name);
+        assert!(by_name.iter().any(|r| r.key == "gemm_a"));
+        assert!(by_name.iter().any(|r| r.key == "gemm_b"));
+        // sorted desc by gpu_ns
+        assert!(by_name.windows(2).all(|w| w[0].gpu_ns >= w[1].gpu_ns));
     }
 
     #[test]
