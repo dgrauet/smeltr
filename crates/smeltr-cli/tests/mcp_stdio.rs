@@ -4,15 +4,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn smeltr_path() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    while p.file_name().map(|n| n != "deps").unwrap_or(true) {
-        p.pop();
-    }
-    p.pop();
-    p.join("smeltr")
-}
-
 fn write_line<W: Write>(w: &mut W, line: &str) {
     w.write_all(line.as_bytes()).unwrap();
     w.write_all(b"\n").unwrap();
@@ -44,12 +35,11 @@ fn read_json_line<R: BufRead>(r: &mut R, deadline: Instant) -> Option<serde_json
 #[test]
 #[serial_test::serial]
 fn mcp_stdio_initialize_then_list_tools() {
-    let _ = Command::new("cargo")
-        .args(["build", "-p", "smeltr-cli"])
-        .status();
-
+    // `smeltr` is a bin in this crate: Cargo builds it before this integration
+    // test and exposes it via CARGO_BIN_EXE_smeltr. (Do NOT shell out to
+    // `cargo build` here — a nested cargo deadlocks on the outer build lock.)
     let home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(smeltr_path())
+    let mut child = Command::new(env!("CARGO_BIN_EXE_smeltr"))
         .env("SMELTR_HOME", home.path())
         .env("RUST_LOG", "warn")
         .arg("mcp")
