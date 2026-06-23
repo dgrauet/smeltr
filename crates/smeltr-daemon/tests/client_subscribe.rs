@@ -6,26 +6,17 @@ use smeltr_daemon::protocol::{ClientToDaemon, DaemonToClient};
 use std::process::Stdio;
 use std::time::Duration;
 
-fn smeltrd_path() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    while p.file_name().map(|n| n != "deps").unwrap_or(true) {
-        p.pop();
-    }
-    p.pop();
-    p.join("smeltrd")
-}
-
 #[tokio::test]
 #[serial_test::serial]
 async fn subscribe_events_forwards_bus_events() {
-    let _ = std::process::Command::new("cargo")
-        .args(["build", "-p", "smeltr-daemon"])
-        .status();
+    // smeltrd is a bin in this crate: Cargo builds it before this integration
+    // test and exposes it via CARGO_BIN_EXE_smeltrd. (Do NOT shell out to
+    // `cargo build` here — a nested cargo deadlocks on the outer build lock.)
     let home = tempfile::tempdir().unwrap();
     let sock_dir = tempfile::tempdir().unwrap();
     let sock = sock_dir.path().join("sm.sock");
 
-    let mut daemon = std::process::Command::new(smeltrd_path())
+    let mut daemon = std::process::Command::new(env!("CARGO_BIN_EXE_smeltrd"))
         .env("SMELTR_HOME", home.path())
         .env("SMELTR_SOCKET", &sock)
         .env("RUST_LOG", "warn")

@@ -7,26 +7,17 @@ use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-fn smeltrd_path() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    while p.file_name().map(|n| n != "deps").unwrap_or(true) {
-        p.pop();
-    }
-    p.pop();
-    p.join("smeltrd")
-}
-
 #[test]
 #[serial_test::serial]
 fn subscribe_receives_emitted_events() {
-    let _ = Command::new("cargo")
-        .args(["build", "-p", "smeltr-daemon"])
-        .status();
+    // smeltrd is a bin in this crate: Cargo builds it before this integration
+    // test and exposes it via CARGO_BIN_EXE_smeltrd. (Do NOT shell out to
+    // `cargo build` here — a nested cargo deadlocks on the outer build lock.)
     let home = tempfile::tempdir().unwrap();
     let sock_dir = tempfile::tempdir().unwrap();
     let sock = sock_dir.path().join("sm.sock");
 
-    let mut daemon = Command::new(smeltrd_path())
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_smeltrd"))
         .env("SMELTR_HOME", home.path())
         .env("SMELTR_SOCKET", &sock)
         .env("RUST_LOG", "warn")
