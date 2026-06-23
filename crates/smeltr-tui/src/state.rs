@@ -1,5 +1,6 @@
 //! Aggregated UI state. Pure data; no rendering.
 
+use serde::Serialize;
 use smeltr_core::event::{Event, Payload, ProbeHealthState, ProcEntry};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -8,7 +9,7 @@ const HOT_KERNELS_CAP: usize = 4096;
 const MODEL_LOADS_CAP: usize = 256;
 const GPU_MEM_SAMPLES_CAP: usize = 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModelLoadSample {
     pub path: String,
     pub size_bytes: u64,
@@ -18,14 +19,14 @@ pub struct ModelLoadSample {
     pub framework: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModelUnloadSample {
     pub path: String,
     pub t_ns: u64,
     pub sha8: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct UiState {
     pub events_total: u64,
     pub timeline_buckets: VecDeque<(u64, u32)>,
@@ -46,7 +47,7 @@ pub struct UiState {
     pub last_ts_mono_ns: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct MetalQueueState {
     pub depth: u32,
     pub in_flight: HashMap<u64, u64>,
@@ -55,7 +56,7 @@ pub struct MetalQueueState {
     pub last_completed_error: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MlxMemorySample {
     pub active_bytes: u64,
     pub peak_bytes: u64,
@@ -63,7 +64,7 @@ pub struct MlxMemorySample {
     pub ts_mono_ns: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VmSample {
     pub wired_bytes: u64,
     pub active_bytes: u64,
@@ -73,7 +74,7 @@ pub struct VmSample {
     pub ts_mono_ns: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HotKernelSample {
     pub ts_mono_ns: u64,
     pub name: String,
@@ -81,7 +82,7 @@ pub struct HotKernelSample {
     pub count: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
     pub ts_mono_ns: u64,
     pub kind: String,
