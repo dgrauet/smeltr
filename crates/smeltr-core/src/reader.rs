@@ -1,10 +1,12 @@
 //! Sequential session reader. Used by `smeltr sessions show` and replay.
 
+use crate::chunked::ChunkIndexEntry;
 use crate::codec::read_frame;
 use crate::event::Event;
+use crate::filter::EventFilter;
 use crate::session::{metadata_path, sessions_root, SessionId, SessionMetadata};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Lists every session directory under `sessions_root()`.
@@ -50,14 +52,116 @@ pub fn read_metadata(dir: &Path) -> std::io::Result<SessionMetadata> {
 
 pub fn read_events(dir: &Path) -> std::io::Result<Vec<Event>> {
     let path = crate::session::events_path_for_read(dir);
-    let f = File::open(&path)?;
+    let mut f = File::open(&path)?;
+    // Only the .zst path can be chunked; the legacy uncompressed .cbor never is.
     if path.extension().and_then(|e| e.to_str()) == Some("zst") {
-        let mut r = zstd::stream::Decoder::new(f)?;
-        read_loop(&mut r, &path)
-    } else {
-        let mut r = BufReader::new(f);
-        read_loop(&mut r, &path)
+        match crate::chunked::detect(&mut f)? {
+            crate::chunked::Format::Chunked => match crate::chunked::read_footer(&mut f) {
+                Ok(Some(entries)) => return read_chunked_from_footer(&mut f, &entries, None),
+                Ok(None) => {
+                    let mut f2 = File::open(&path)?;
+                    return crate::chunked::scan_chunks(&mut f2);
+                }
+                Err(crate::chunked::SessionFormatError::FooterCorrupt(m)) => {
+                    tracing::warn!(path=?path, "{m}; falling back to chunk scan");
+                    let mut f2 = File::open(&path)?;
+                    return crate::chunked::scan_chunks(&mut f2);
+                }
+                Err(crate::chunked::SessionFormatError::Io(e)) => return Err(e),
+            },
+            crate::chunked::Format::Unsupported(v) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("session written by a newer smeltr (format v{v}); upgrade to read it"),
+                ));
+            }
+            crate::chunked::Format::Legacy => {
+                f.seek(SeekFrom::Start(0))?;
+                let mut r = zstd::stream::Decoder::new(f)?;
+                return read_loop(&mut r, &path);
+            }
+        }
     }
+    // legacy uncompressed
+    let mut r = BufReader::new(f);
+    read_loop(&mut r, &path)
+}
+
+/// Read all events from a sealed chunked session via its footer index.
+///
+/// Iterates entries in footer order (which preserves write order).  If a
+/// `filter` is supplied, chunks whose `chunk_overlaps` returns `false` are
+/// skipped entirely, and individual events that do not satisfy `matches` are
+/// dropped.
+fn read_chunked_from_footer(
+    file: &mut File,
+    entries: &[ChunkIndexEntry],
+    filter: Option<&EventFilter>,
+) -> std::io::Result<Vec<Event>> {
+    let mut out = Vec::new();
+    for entry in entries {
+        // Skip chunks that cannot contain a matching event.
+        if let Some(f) = filter {
+            if !f.chunk_overlaps(entry) {
+                continue;
+            }
+        }
+        // Read the comp_len-prefixed compressed chunk bytes.
+        file.seek(SeekFrom::Start(entry.offset))?;
+        let mut len_buf = [0u8; 4];
+        file.read_exact(&mut len_buf)?;
+        let comp_len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; comp_len];
+        file.read_exact(&mut buf)?;
+
+        let events = crate::chunked::decode_chunk(&buf)?;
+        if let Some(f) = filter {
+            for ev in events {
+                if f.matches(&ev) {
+                    out.push(ev);
+                }
+            }
+        } else {
+            out.extend(events);
+        }
+    }
+    Ok(out)
+}
+
+/// Like `read_events` but applies an `EventFilter`, using the chunk index to
+/// skip irrelevant chunks when the session is sealed and chunked.
+pub fn read_events_filtered(dir: &Path, filter: &EventFilter) -> std::io::Result<Vec<Event>> {
+    let path = crate::session::events_path_for_read(dir);
+    let mut f = File::open(&path)?;
+    if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+        if let crate::chunked::Format::Chunked = crate::chunked::detect(&mut f)? {
+            if let Ok(Some(entries)) = crate::chunked::read_footer(&mut f) {
+                return read_chunked_from_footer(&mut f, &entries, Some(filter));
+            }
+        }
+    }
+    // Legacy / unsealed / corrupt: full read then filter.
+    Ok(read_events(dir)?
+        .into_iter()
+        .filter(|e| filter.matches(e))
+        .collect())
+}
+
+/// Return the total number of events in the session.
+///
+/// For sealed chunked sessions this is O(chunks) via the footer index;
+/// otherwise it falls back to a full read.
+pub fn session_event_count(dir: &Path) -> std::io::Result<usize> {
+    let path = crate::session::events_path_for_read(dir);
+    let mut f = File::open(&path)?;
+    if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+        if let crate::chunked::Format::Chunked = crate::chunked::detect(&mut f)? {
+            if let Ok(Some(entries)) = crate::chunked::read_footer(&mut f) {
+                return Ok(entries.iter().map(|e| e.event_count as usize).sum());
+            }
+        }
+    }
+    Ok(read_events(dir)?.len())
 }
 
 fn read_loop<R: std::io::Read>(r: &mut R, path: &Path) -> std::io::Result<Vec<Event>> {
@@ -95,16 +199,146 @@ fn parse_metadata(text: &str) -> Option<SessionMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunked::ChunkConfig;
     use crate::event::{Payload, Source};
-    use crate::session::{SessionKind, SessionMetadata};
+    use crate::filter::EventFilter;
+    use crate::session::{SessionId, SessionKind, SessionMetadata};
     use crate::writer::SessionWriter;
     use serial_test::serial;
+    use std::path::PathBuf;
     use uuid::Uuid;
 
     fn temp_home() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_HOME", d.path());
         d
+    }
+
+    fn ev(ts: u64, src: Source) -> Event {
+        Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: ts,
+            session_id: Uuid::nil(),
+            source: src,
+            pid: None,
+            seq: ts,
+            payload: Payload::Mark {
+                label: format!("m-{ts}"),
+                fields: Default::default(),
+            },
+        }
+    }
+
+    /// Write a session with the given events.
+    ///
+    /// When `chunked` is `true` the session uses a small `ChunkConfig`
+    /// (max_events=64) so 2500 events span many chunks.  When `false` the
+    /// legacy streaming zstd writer is used.
+    fn write_session(evs: &[Event], chunked: bool) -> PathBuf {
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let cfg = if chunked {
+            Some(ChunkConfig {
+                max_events: 64,
+                max_bytes: crate::chunked::CHUNK_BYTES,
+                flush_min_bytes: crate::chunked::FLUSH_MIN_BYTES,
+            })
+        } else {
+            None
+        };
+        let mut w = SessionWriter::create_with_chunk_config(meta, cfg).unwrap();
+        for e in evs {
+            w.write_event(e).unwrap();
+        }
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), "2026-06-23T00:00:00Z".into()).unwrap();
+        dir
+    }
+
+    #[test]
+    #[serial]
+    fn reads_chunked_identically_to_legacy() {
+        let _home = temp_home();
+        let evs: Vec<Event> = (0..2500u64)
+            .map(|i| {
+                ev(
+                    i,
+                    if i % 2 == 0 {
+                        Source::Mark
+                    } else {
+                        Source::MetalHook
+                    },
+                )
+            })
+            .collect();
+        let legacy = write_session(&evs, false);
+        let chunked = write_session(&evs, true);
+        let a = read_events(&legacy).unwrap();
+        let b = read_events(&chunked).unwrap();
+        assert_eq!(a.len(), b.len());
+        assert_eq!(
+            a.iter().map(|e| e.ts_mono_ns).collect::<Vec<_>>(),
+            b.iter().map(|e| e.ts_mono_ns).collect::<Vec<_>>(),
+            "order preserved"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn filtered_equals_full_filter_at_boundaries() {
+        let _home = temp_home();
+        let evs: Vec<Event> = (0..2500u64)
+            .map(|i| {
+                ev(
+                    i,
+                    if i % 3 == 0 {
+                        Source::Mark
+                    } else {
+                        Source::MetalHook
+                    },
+                )
+            })
+            .collect();
+        let dir = write_session(&evs, true);
+        for f in [
+            EventFilter {
+                source: Some(Source::Mark),
+                from_ts: None,
+                to_ts: None,
+                payload_kind: None,
+            },
+            EventFilter {
+                source: None,
+                from_ts: Some(1000),
+                to_ts: Some(1000),
+                payload_kind: None,
+            }, // single ts
+            EventFilter {
+                source: Some(Source::MetalHook),
+                from_ts: Some(500),
+                to_ts: Some(1500),
+                payload_kind: None,
+            },
+            EventFilter {
+                source: None,
+                from_ts: Some(2000),
+                to_ts: Some(10),
+                payload_kind: None,
+            }, // inverted → empty
+        ] {
+            let want: Vec<u64> = read_events(&dir)
+                .unwrap()
+                .into_iter()
+                .filter(|e| f.matches(e))
+                .map(|e| e.ts_mono_ns)
+                .collect();
+            let got: Vec<u64> = read_events_filtered(&dir, &f)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.ts_mono_ns)
+                .collect();
+            assert_eq!(got, want, "filter parity for {f:?}");
+        }
     }
 
     #[test]

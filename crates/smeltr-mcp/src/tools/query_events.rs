@@ -26,31 +26,20 @@ pub struct Response {
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
     let dir = resolve_session(&params.session)?;
-    let events = smeltr_core::reader::read_events(&dir)?;
-    let total = events.len();
-    let want_source = match params.source.as_deref() {
-        None => None,
-        Some(s) => Some(parse_source(s)?),
-    };
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
 
-    let mut filtered: Vec<Event> = events
-        .into_iter()
-        .filter(|e| match want_source {
-            None => true,
-            Some(s) => e.source == s,
-        })
-        .filter(|e| match (params.from_ts_mono_ns, params.to_ts_mono_ns) {
-            (Some(from), _) if e.ts_mono_ns < from => false,
-            (_, Some(to)) if e.ts_mono_ns > to => false,
-            _ => true,
-        })
-        .filter(|e| match params.payload_kind.as_deref() {
-            None => true,
-            Some(want) => payload_kind(e).eq_ignore_ascii_case(want),
-        })
-        .collect();
+    let filter = smeltr_core::EventFilter {
+        source: match params.source.as_deref() {
+            None => None,
+            Some(s) => Some(parse_source(s)?),
+        },
+        from_ts: params.from_ts_mono_ns,
+        to_ts: params.to_ts_mono_ns,
+        payload_kind: params.payload_kind.clone(),
+    };
 
+    let total = smeltr_core::reader::session_event_count(&dir)?;
+    let mut filtered = smeltr_core::reader::read_events_filtered(&dir, &filter)?;
     let matched = filtered.len();
     let truncated = matched > limit;
     filtered.truncate(limit);
@@ -77,50 +66,6 @@ fn parse_source(s: &str) -> Result<Source, ToolError> {
         "PythonSidecar" => Source::PythonSidecar,
         other => return Err(ToolError::BadArgs(format!("unknown source {other:?}"))),
     })
-}
-
-pub(crate) fn payload_kind(e: &Event) -> &'static str {
-    use smeltr_core::event::Payload;
-    match &e.payload {
-        Payload::Mark { .. } => "Mark",
-        Payload::SessionStarted { .. } => "SessionStarted",
-        Payload::SessionEnded { .. } => "SessionEnded",
-        Payload::VmSample { .. } => "VmSample",
-        Payload::ProcTop { .. } => "ProcTop",
-        Payload::ThermalState { .. } => "ThermalState",
-        Payload::IoReportSample { .. } => "IoReportSample",
-        Payload::OsLogLine { .. } => "OsLogLine",
-        Payload::MachException { .. } => "MachException",
-        Payload::CrashReportEmitted { .. } => "CrashReportEmitted",
-        Payload::MetalCbCommitted { .. } => "MetalCbCommitted",
-        Payload::MetalCbScheduled { .. } => "MetalCbScheduled",
-        Payload::MetalCbCompleted { .. } => "MetalCbCompleted",
-        Payload::MetalCbWarning { .. } => "MetalCbWarning",
-        Payload::MetalHeapAlloc { .. } => "MetalHeapAlloc",
-        Payload::MetalDeviceMemSample { .. } => "MetalDeviceMemSample",
-        Payload::MetalHeapFree { .. } => "MetalHeapFree",
-        Payload::MetalBufferAlloc { .. } => "MetalBufferAlloc",
-        Payload::MetalBufferFree { .. } => "MetalBufferFree",
-        Payload::MetalTextureAlloc { .. } => "MetalTextureAlloc",
-        Payload::MetalTextureFree { .. } => "MetalTextureFree",
-        Payload::MetalHookDropped { .. } => "MetalHookDropped",
-        Payload::MetalHookSkipped { .. } => "MetalHookSkipped",
-        Payload::MlxEvalEntered { .. } => "MlxEvalEntered",
-        Payload::MlxEvalReturned { .. } => "MlxEvalReturned",
-        Payload::MlxMemoryPoll { .. } => "MlxMemoryPoll",
-        Payload::MlxArrayAlive { .. } => "MlxArrayAlive",
-        Payload::MlxArrayFreed { .. } => "MlxArrayFreed",
-        Payload::MlxSnapshot { .. } => "MlxSnapshot",
-        Payload::MlxPanicTriggered { .. } => "MlxPanicTriggered",
-        Payload::PythonSidecarHello { .. } => "PythonSidecarHello",
-        Payload::PostMortemFlushed { .. } => "PostMortemFlushed",
-        Payload::ProbeHealth { .. } => "ProbeHealth",
-        Payload::ModuleEntered { .. } => "ModuleEntered",
-        Payload::ModuleReturned { .. } => "ModuleReturned",
-        Payload::MetalCbOps { .. } => "MetalCbOps",
-        Payload::ModelLoad { .. } => "ModelLoad",
-        Payload::ModelUnload { .. } => "ModelUnload",
-    }
 }
 
 #[cfg(test)]
