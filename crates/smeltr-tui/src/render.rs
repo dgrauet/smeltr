@@ -39,7 +39,23 @@ pub struct RenderCtx {
     pub show_models: bool,
 }
 
-pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, status: Option<&str>) {
+/// App-level display overlays threaded to the renderer (kept out of the `Copy`
+/// `RenderCtx`). All `None` by default.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RenderOverlay<'a> {
+    pub status: Option<&'a str>,
+    pub filter: Option<&'a str>,
+    pub filtering: Option<&'a str>,
+}
+
+/// Case-insensitive substring match over a notice's kind + summary.
+pub fn matches_filter(entry: &crate::state::LogEntry, query: &str) -> bool {
+    format!("{} {}", entry.kind, entry.summary)
+        .to_lowercase()
+        .contains(&query.to_lowercase())
+}
+
+pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, overlay: RenderOverlay) {
     let area = frame.area();
 
     // Models view takes the entire central area (below the timeline header).
@@ -48,7 +64,7 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, status: Option
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(1)])
             .split(area);
-        render_timeline(frame, outer[0], state, ctx, status);
+        render_timeline(frame, outer[0], state, ctx, overlay.status);
         crate::models::render(frame, outer[1], state);
         return;
     }
@@ -77,7 +93,7 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, status: Option
             .split(area)
     };
 
-    render_timeline(frame, outer[0], state, ctx, status);
+    render_timeline(frame, outer[0], state, ctx, overlay.status);
 
     let mid_rows = Layout::default()
         .direction(Direction::Vertical)
@@ -98,9 +114,23 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, status: Option
     render_pressure(frame, row2[1], state, ctx);
     if ctx.show_hot_kernels {
         render_hot_kernels(frame, outer[2], state);
-        render_notices(frame, outer[3], state, ctx);
+        render_notices(
+            frame,
+            outer[3],
+            state,
+            ctx,
+            overlay.filter,
+            overlay.filtering,
+        );
     } else {
-        render_notices(frame, outer[2], state, ctx);
+        render_notices(
+            frame,
+            outer[2],
+            state,
+            ctx,
+            overlay.filter,
+            overlay.filtering,
+        );
     }
 }
 
@@ -243,10 +273,19 @@ fn render_pressure(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCt
 /// MLX panics, and user `smeltr mark` calls. Quiet by design — when nothing
 /// goes wrong this stays empty. Use `smeltr mark "msg"` to verify the live
 /// pipeline.
-fn render_notices(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCtx) {
+fn render_notices(
+    frame: &mut Frame,
+    area: Rect,
+    state: &UiState,
+    ctx: RenderCtx,
+    filter: Option<&str>,
+    filtering: Option<&str>,
+) {
+    let query = filtering.filter(|b| !b.is_empty()).or(filter);
     let items: Vec<ListItem> = state
         .log_feed
         .iter()
+        .filter(|e| query.is_none_or(|q| matches_filter(e, q)))
         .rev()
         .take(20)
         .map(|e| {
@@ -254,10 +293,12 @@ fn render_notices(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCtx
             ListItem::new(format!("-{:>5.1}s  {:<11} {}", age_s, e.kind, e.summary))
         })
         .collect();
-    let list = List::new(items).block(block(
-        "Notices (incidents · probe-health · marks)".into(),
-        ctx.focus == Panel::Notices,
-    ));
+    let title = match (filtering, filter) {
+        (Some(buf), _) => format!("Notices · filter: {buf}_"),
+        (None, Some(q)) => format!("Notices · [filter: {q}]"),
+        (None, None) => "Notices (incidents · probe-health · marks)".to_string(),
+    };
+    let list = List::new(items).block(block(title, ctx.focus == Panel::Notices));
     frame.render_widget(list, area);
 }
 
@@ -315,5 +356,27 @@ fn human(bytes: u64) -> String {
         format!("{:.0} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::state::LogEntry;
+
+    fn entry(kind: &str, summary: &str) -> LogEntry {
+        LogEntry {
+            ts_mono_ns: 0,
+            kind: kind.into(),
+            summary: summary.into(),
+        }
+    }
+
+    #[test]
+    fn matches_filter_is_case_insensitive_over_kind_and_summary() {
+        let e = entry("MetalError", "command buffer 7 failed: OOM");
+        assert!(super::matches_filter(&e, "oom")); // summary, lowercased
+        assert!(super::matches_filter(&e, "metalerror")); // kind, lowercased
+        assert!(super::matches_filter(&e, "BUFFER 7")); // spans within summary
+        assert!(!super::matches_filter(&e, "softmax")); // no match
     }
 }

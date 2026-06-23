@@ -1,7 +1,7 @@
 //! TUI event loop. Consumes Events from an mpsc::Receiver, updates UiState,
 //! handles keyboard, redraws periodically.
 
-use crate::render::{render, Panel, RenderCtx};
+use crate::render::{render, Panel, RenderCtx, RenderOverlay};
 use crate::state::UiState;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -24,6 +24,8 @@ pub struct App {
     pub show_hot_kernels: bool,
     pub show_models: bool,
     pub status: Option<String>,
+    pub filter: Option<String>,
+    pub filtering: Option<String>,
 }
 
 impl App {
@@ -37,6 +39,8 @@ impl App {
             show_hot_kernels: false,
             show_models: false,
             status: None,
+            filter: None,
+            filtering: None,
         }
     }
 
@@ -91,8 +95,12 @@ impl App {
                     show_hot_kernels: self.show_hot_kernels,
                     show_models: self.show_models,
                 };
-                let status = self.status.as_deref();
-                term.draw(|f| render(f, &self.state, ctx, status))?;
+                let overlay = RenderOverlay {
+                    status: self.status.as_deref(),
+                    filter: self.filter.as_deref(),
+                    filtering: self.filtering.as_deref(),
+                };
+                term.draw(|f| render(f, &self.state, ctx, overlay))?;
                 last_draw = Instant::now();
             }
         }
@@ -100,8 +108,30 @@ impl App {
 
     pub fn handle_key(&mut self, code: KeyCode) {
         self.status = None; // any key dismisses the previous status
+        if self.filtering.is_some() {
+            match code {
+                KeyCode::Char(c) => {
+                    if let Some(b) = self.filtering.as_mut() {
+                        b.push(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(b) = self.filtering.as_mut() {
+                        b.pop();
+                    }
+                }
+                KeyCode::Enter => {
+                    let q = self.filtering.take().unwrap_or_default();
+                    self.filter = if q.is_empty() { None } else { Some(q) };
+                }
+                KeyCode::Esc => self.filtering = None,
+                _ => {}
+            }
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit_requested = true,
+            KeyCode::Char('/') => self.filtering = Some(String::new()),
             KeyCode::Tab => self.focus = self.focus.next(),
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Char('r') => {
@@ -212,6 +242,59 @@ mod tests {
         app.status = Some("stale".into());
         app.handle_key(KeyCode::Tab);
         assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn slash_enters_filter_input_and_builds_query() {
+        let mut app = App::new("test");
+        app.handle_key(KeyCode::Char('/'));
+        assert_eq!(app.filtering.as_deref(), Some(""));
+        app.handle_key(KeyCode::Char('a'));
+        app.handle_key(KeyCode::Char('b'));
+        assert_eq!(app.filtering.as_deref(), Some("ab"));
+        app.handle_key(KeyCode::Backspace);
+        assert_eq!(app.filtering.as_deref(), Some("a"));
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.filter.as_deref(), Some("a"));
+        assert!(app.filtering.is_none());
+    }
+
+    #[test]
+    fn empty_enter_clears_filter() {
+        let mut app = App::new("test");
+        app.filter = Some("old".into());
+        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Enter);
+        assert!(app.filter.is_none());
+        assert!(app.filtering.is_none());
+    }
+
+    #[test]
+    fn esc_cancels_input_keeps_prior_filter() {
+        let mut app = App::new("test");
+        app.filter = Some("keep".into());
+        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Char('x'));
+        app.handle_key(KeyCode::Esc);
+        assert!(app.filtering.is_none());
+        assert_eq!(app.filter.as_deref(), Some("keep"));
+        assert!(!app.quit_requested, "Esc in filter mode must not quit");
+    }
+
+    #[test]
+    fn esc_in_normal_mode_still_quits() {
+        let mut app = App::new("test");
+        app.handle_key(KeyCode::Esc);
+        assert!(app.quit_requested);
+    }
+
+    #[test]
+    fn filtering_swallows_other_keys() {
+        let mut app = App::new("test");
+        app.handle_key(KeyCode::Char('/'));
+        app.handle_key(KeyCode::Char('q')); // literal, must not quit
+        assert!(!app.quit_requested);
+        assert_eq!(app.filtering.as_deref(), Some("q"));
     }
 
     #[test]
