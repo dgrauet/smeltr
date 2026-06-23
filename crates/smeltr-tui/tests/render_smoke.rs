@@ -71,6 +71,7 @@ fn render_after_synthetic_events_shows_all_panels() {
                 show_hot_kernels: false,
                 show_models: false,
             },
+            None,
         )
     })
     .unwrap();
@@ -121,6 +122,7 @@ fn hot_kernels_panel_renders_when_toggled_on() {
                 show_hot_kernels: true,
                 show_models: false,
             },
+            None,
         )
     })
     .unwrap();

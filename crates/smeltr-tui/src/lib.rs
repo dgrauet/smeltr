@@ -6,6 +6,7 @@ pub mod live;
 pub mod models;
 pub mod render;
 pub mod replay;
+pub mod snapshot;
 pub mod state;
 
 pub use app::App;
