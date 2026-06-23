@@ -23,6 +23,7 @@ pub struct App {
     pub quit_requested: bool,
     pub show_hot_kernels: bool,
     pub show_models: bool,
+    pub status: Option<String>,
 }
 
 impl App {
@@ -35,6 +36,7 @@ impl App {
             quit_requested: false,
             show_hot_kernels: false,
             show_models: false,
+            status: None,
         }
     }
 
@@ -89,13 +91,15 @@ impl App {
                     show_hot_kernels: self.show_hot_kernels,
                     show_models: self.show_models,
                 };
-                term.draw(|f| render(f, &self.state, ctx))?;
+                let status = self.status.as_deref();
+                term.draw(|f| render(f, &self.state, ctx, status))?;
                 last_draw = Instant::now();
             }
         }
     }
 
     pub fn handle_key(&mut self, code: KeyCode) {
+        self.status = None; // any key dismisses the previous status
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit_requested = true,
             KeyCode::Tab => self.focus = self.focus.next(),
@@ -104,7 +108,10 @@ impl App {
                 self.state = UiState::default();
             }
             KeyCode::Char('s') => {
-                // Reserved: snapshot. No-op v1.
+                self.status = Some(match crate::snapshot::write_snapshot(&self.state) {
+                    Ok(p) => format!("snapshot \u{2192} {}", p.display()),
+                    Err(e) => format!("snapshot failed: {e}"),
+                });
             }
             KeyCode::Char('k') | KeyCode::Char('K') => {
                 self.show_hot_kernels = !self.show_hot_kernels;
@@ -176,6 +183,35 @@ mod tests {
         // Lowercase 'm' does NOT toggle.
         app.handle_key(KeyCode::Char('m'));
         assert!(!app.show_models);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn handle_key_s_writes_snapshot_and_sets_status() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let mut app = App::new("test");
+        app.handle_key(KeyCode::Char('s'));
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("snapshot \u{2192} "),
+            "status was {:?}",
+            app.status
+        );
+        let dir = home.path().join("snapshots");
+        let count = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(count, 1, "expected one snapshot file");
+        std::env::remove_var("SMELTR_HOME");
+    }
+
+    #[test]
+    fn handle_key_clears_status_on_next_key() {
+        let mut app = App::new("test");
+        app.status = Some("stale".into());
+        app.handle_key(KeyCode::Tab);
+        assert!(app.status.is_none());
     }
 
     #[test]

@@ -39,7 +39,7 @@ pub struct RenderCtx {
     pub show_models: bool,
 }
 
-pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx) {
+pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, status: Option<&str>) {
     let area = frame.area();
 
     // Models view takes the entire central area (below the timeline header).
@@ -48,7 +48,7 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(1)])
             .split(area);
-        render_timeline(frame, outer[0], state, ctx);
+        render_timeline(frame, outer[0], state, ctx, status);
         crate::models::render(frame, outer[1], state);
         return;
     }
@@ -77,7 +77,7 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx) {
             .split(area)
     };
 
-    render_timeline(frame, outer[0], state, ctx);
+    render_timeline(frame, outer[0], state, ctx, status);
 
     let mid_rows = Layout::default()
         .direction(Direction::Vertical)
@@ -116,7 +116,13 @@ fn block(title: String, focused: bool) -> Block<'static> {
         .border_style(style)
 }
 
-fn render_timeline(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCtx) {
+fn render_timeline(
+    frame: &mut Frame,
+    area: Rect,
+    state: &UiState,
+    ctx: RenderCtx,
+    status: Option<&str>,
+) {
     let pause_tag = if ctx.paused { " [PAUSED]" } else { "" };
     let title = format!(
         "smeltr · {} · session: {} · events: {}{}",
@@ -125,6 +131,10 @@ fn render_timeline(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCt
         state.events_total,
         pause_tag,
     );
+    let title = match status {
+        Some(s) => format!("{title} \u{00b7} {s}"),
+        None => title,
+    };
     let data: Vec<u64> = state
         .timeline_buckets
         .iter()
