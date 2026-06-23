@@ -3,19 +3,31 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Origin of an event. `#[repr(u8)]` discriminants are STABLE and append-only:
+/// they back the `source_bitmap` in the chunked session footer. Never reorder or
+/// reuse a value. NOTE: this is NOT `serde_repr` — serde/CBOR still encodes the
+/// variant *name*, so existing sessions are unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum Source {
-    Mark,
-    System,
-    IoReport,
-    Vm,
-    Proc,
-    OsLog,
-    Thermal,
-    MachExc,
-    CrashReport,
-    MetalHook,
-    PythonSidecar,
+    Mark = 0,
+    System = 1,
+    IoReport = 2,
+    Vm = 3,
+    Proc = 4,
+    OsLog = 5,
+    Thermal = 6,
+    MachExc = 7,
+    CrashReport = 8,
+    MetalHook = 9,
+    PythonSidecar = 10,
+}
+
+impl Source {
+    /// Stable numeric identity (bitmap index). Append-only; never reorder.
+    pub fn as_u8(&self) -> u8 {
+        *self as u8
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1132,5 +1144,22 @@ mod tests {
             }
             other => panic!("expected ModelUnload, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn source_discriminants_are_pinned() {
+        use Source::*;
+        assert_eq!(Mark.as_u8(), 0);
+        assert_eq!(System.as_u8(), 1);
+        assert_eq!(IoReport.as_u8(), 2);
+        assert_eq!(Vm.as_u8(), 3);
+        assert_eq!(Proc.as_u8(), 4);
+        assert_eq!(OsLog.as_u8(), 5);
+        assert_eq!(Thermal.as_u8(), 6);
+        assert_eq!(MachExc.as_u8(), 7);
+        assert_eq!(CrashReport.as_u8(), 8);
+        assert_eq!(MetalHook.as_u8(), 9);
+        assert_eq!(PythonSidecar.as_u8(), 10);
+        assert!(PythonSidecar.as_u8() < 64); // fits the u64 bitmap
     }
 }

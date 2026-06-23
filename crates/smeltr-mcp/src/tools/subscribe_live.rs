@@ -90,7 +90,7 @@ pub fn summarize_delta(
     let mut counts: BTreeMap<&'static str, u64> = BTreeMap::new();
     for e in delta {
         *counts
-            .entry(crate::tools::query_events::payload_kind(e))
+            .entry(smeltr_core::filter::payload_kind(e))
             .or_insert(0) += 1;
     }
     let mut by_payload: Vec<PayloadCount> = counts
