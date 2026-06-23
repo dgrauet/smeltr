@@ -2,7 +2,7 @@
 
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
-use smeltr_analyzer::{compute_breakdown, ModuleBreakdown};
+use smeltr_analyzer::{apply_op_group_by, compute_breakdown, ModuleBreakdown, OpGroupBy};
 use smeltr_core::event::FieldValue;
 use smeltr_core::reader::read_events;
 use std::collections::BTreeMap;
@@ -24,6 +24,12 @@ pub struct Params {
     /// absent = no filtering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_filter: Option<BTreeMap<String, serde_json::Value>>,
+    /// How to group ops on each leaf node. `"name"` (default) keeps each
+    /// distinct op name as its own row. `"kind"` collapses ops that share
+    /// the same resolved kind (e.g. `"Matmul"`) into a single row with
+    /// summed `gpu_ns`/`count` and `symbol` set to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
 }
 
 fn default_include_ops() -> bool {
@@ -43,6 +49,7 @@ impl Default for Params {
             include_ops: default_include_ops(),
             top_ops_per_leaf: default_top_ops(),
             field_filter: None,
+            group_by: None,
         }
     }
 }
@@ -78,6 +85,17 @@ fn prune_by_field_filter(
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
+    // Validate group_by early so callers get BadArgs before any I/O.
+    let group_by = match params.group_by.as_deref() {
+        None | Some("name") => OpGroupBy::Name,
+        Some("kind") => OpGroupBy::Kind,
+        Some(other) => {
+            return Err(ToolError::BadArgs(format!(
+                "group_by must be \"name\" or \"kind\", got {other:?}"
+            )))
+        }
+    };
+
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
     let mut root =
@@ -120,6 +138,8 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         }
     }
     prune(&mut root, 0, max_depth, top_n, min_gpu_ns);
+
+    apply_op_group_by(&mut root, group_by);
 
     let top_ops_per_leaf = params.top_ops_per_leaf as usize;
     let include_ops = params.include_ops;
@@ -613,6 +633,172 @@ mod tests {
             .collect();
         assert_eq!(passes.len(), 1, "only one sibling should pass the filter");
         assert_eq!(passes[0].fields.get("pass_idx"), Some(&FieldValue::Int(1)));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn group_by_kind_collapses_leaf_matmuls() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        // Two ops under one scope, both resolving to Matmul via gemm_* symbol.
+        let evs: Vec<Event> = vec![
+            Event {
+                ts_mono_ns: 1,
+                ts_wall_ns: 1,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 1,
+                payload: Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 1,
+                    qualname: "scope.A".into(),
+                    class_name: "Scope".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields: Default::default(),
+                },
+            },
+            Event {
+                ts_mono_ns: 10,
+                ts_wall_ns: 10,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 2,
+                payload: Payload::MlxEvalEntered {
+                    call_id: 1,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![1],
+                    stack_frames: vec![],
+                },
+            },
+            Event {
+                ts_mono_ns: 20,
+                ts_wall_ns: 20,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 3,
+                payload: Payload::MetalCbCommitted {
+                    cb_id: 10,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+            },
+            Event {
+                ts_mono_ns: 30,
+                ts_wall_ns: 30,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 4,
+                payload: Payload::MetalCbCompleted {
+                    cb_id: 10,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 2_000_000,
+                },
+            },
+            Event {
+                ts_mono_ns: 31,
+                ts_wall_ns: 31,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 5,
+                payload: Payload::MetalCbOps {
+                    cb_id: 10,
+                    ops: vec![
+                        smeltr_core::event::OpSample {
+                            name: "K_gemm_a".into(),
+                            symbol: Some("gemm_nn_f32_64_64_32".into()),
+                            gpu_ns: 700_000,
+                            count: 1,
+                        },
+                        smeltr_core::event::OpSample {
+                            name: "K_gemm_b".into(),
+                            symbol: Some("gemm_tt_bf16_64_64_32".into()),
+                            gpu_ns: 300_000,
+                            count: 2,
+                        },
+                    ],
+                },
+            },
+            Event {
+                ts_mono_ns: 40,
+                ts_wall_ns: 40,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 6,
+                payload: Payload::MlxEvalReturned {
+                    call_id: 1,
+                    duration_ns: 30,
+                    was_async: false,
+                },
+            },
+            Event {
+                ts_mono_ns: 50,
+                ts_wall_ns: 50,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq: 7,
+                payload: Payload::ModuleReturned { module_call_id: 1 },
+            },
+        ];
+        for e in &evs {
+            w.write_event(e).unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+            group_by: Some("kind".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let scope = resp
+            .root
+            .children
+            .iter()
+            .find(|c| c.qualname == "scope.A")
+            .expect("scope.A present");
+        // After group_by=kind, the two gemm ops collapse into one "Matmul" op.
+        assert_eq!(
+            scope.ops.len(),
+            1,
+            "two gemm ops should collapse to one Matmul entry"
+        );
+        let op = &scope.ops[0];
+        assert_eq!(op.name, "Matmul");
+        assert_eq!(op.gpu_ns, 1_000_000, "gpu_ns should be summed");
+        assert!(
+            op.symbol.is_none(),
+            "symbol should be None after kind grouping"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn unknown_group_by_is_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let r = run(Params {
+            session: "x".into(),
+            group_by: Some("nope".into()),
+            ..Default::default()
+        });
+        assert!(matches!(r, Err(ToolError::BadArgs(_))));
     }
 
     #[test]
