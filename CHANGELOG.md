@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/dgrauet/smeltr/compare/v0.11.0...v0.12.0) (2026-06-23)
+
+
+### Features
+
+* **core,mcp:** format-aware reader + read_events_filtered; query_events uses the footer index ([67110d7](https://github.com/dgrauet/smeltr/commit/67110d7e2fb574e09ab17589893c6be028cd5152))
+* **core:** chunked session container codec (chunked.rs) ([7d04989](https://github.com/dgrauet/smeltr/commit/7d04989f6d1d6f42dafa53097368cfe4329f909f))
+* **core:** opt-in chunked session format with (source, t_bucket) index ([69bfd4d](https://github.com/dgrauet/smeltr/commit/69bfd4ddb6006551f88b7cd6d1a2979557076bb9))
+* **core:** opt-in chunked SessionWriter (SMELTR_SESSION_INDEX) with seal-on-flush ([a01605c](https://github.com/dgrauet/smeltr/commit/a01605cc5e5bd02133306070a3f3958e59403ec8))
+* **core:** pin Source discriminants with repr(u8) + as_u8 for the chunk bitmap ([c764cbb](https://github.com/dgrauet/smeltr/commit/c764cbb314419a0dc184324b891d13f8a0bfdd7b))
+* **core:** shared EventFilter (source/time/payload_kind) + chunk_overlaps ([73a2121](https://github.com/dgrauet/smeltr/commit/73a2121f448f136e942dd496e0613ab40ce95a3a))
+
 ## [0.11.0](https://github.com/dgrauet/smeltr/compare/v0.10.0...v0.11.0) (2026-06-23)
 
 
