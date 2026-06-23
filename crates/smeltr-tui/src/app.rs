@@ -1,7 +1,7 @@
 //! TUI event loop. Consumes Events from an mpsc::Receiver, updates UiState,
 //! handles keyboard, redraws periodically.
 
-use crate::render::{render, Panel, RenderCtx};
+use crate::render::{render, Panel, RenderCtx, RenderOverlay};
 use crate::state::UiState;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -24,6 +24,8 @@ pub struct App {
     pub show_hot_kernels: bool,
     pub show_models: bool,
     pub status: Option<String>,
+    pub filter: Option<String>,
+    pub filtering: Option<String>,
 }
 
 impl App {
@@ -37,6 +39,8 @@ impl App {
             show_hot_kernels: false,
             show_models: false,
             status: None,
+            filter: None,
+            filtering: None,
         }
     }
 
@@ -91,8 +95,12 @@ impl App {
                     show_hot_kernels: self.show_hot_kernels,
                     show_models: self.show_models,
                 };
-                let status = self.status.as_deref();
-                term.draw(|f| render(f, &self.state, ctx, status))?;
+                let overlay = RenderOverlay {
+                    status: self.status.as_deref(),
+                    filter: self.filter.as_deref(),
+                    filtering: self.filtering.as_deref(),
+                };
+                term.draw(|f| render(f, &self.state, ctx, overlay))?;
                 last_draw = Instant::now();
             }
         }

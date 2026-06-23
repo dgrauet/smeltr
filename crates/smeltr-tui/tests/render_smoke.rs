@@ -1,7 +1,7 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use smeltr_core::event::{Event, OpSample, Payload, Source};
-use smeltr_tui::render::{render, Panel, RenderCtx};
+use smeltr_tui::render::{render, Panel, RenderCtx, RenderOverlay};
 use smeltr_tui::state::UiState;
 use uuid::Uuid;
 
@@ -71,7 +71,7 @@ fn render_after_synthetic_events_shows_all_panels() {
                 show_hot_kernels: false,
                 show_models: false,
             },
-            None,
+            RenderOverlay::default(),
         )
     })
     .unwrap();
@@ -122,7 +122,7 @@ fn hot_kernels_panel_renders_when_toggled_on() {
                 show_hot_kernels: true,
                 show_models: false,
             },
-            None,
+            RenderOverlay::default(),
         )
     })
     .unwrap();
