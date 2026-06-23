@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/dgrauet/smeltr/compare/v0.10.0...v0.11.0) (2026-06-23)
+
+
+### Features
+
+* **analyzer:** apply_op_group_by for per-node kind regrouping of the breakdown tree ([1770ce5](https://github.com/dgrauet/smeltr/commit/1770ce5e14df0417cc915cbe0413c0a85fdf64ce))
+* group_by="kind" on the inference breakdown tree ([e438a7b](https://github.com/dgrauet/smeltr/commit/e438a7bbece4933030b064577c2ca4f3de78a2ea))
+* **mcp,cli:** group_by=kind on the inference breakdown tree ([00c546b](https://github.com/dgrauet/smeltr/commit/00c546baa5bc888f4396b1b2e61f9cc166ddc443))
+* **tui:** [/] key filters the Notices feed ([048f9ec](https://github.com/dgrauet/smeltr/commit/048f9ec99b93b17beb9a520be1deb88d6db5dbb2))
+* **tui:** [s] key snapshots UiState to JSON ([c483b1f](https://github.com/dgrauet/smeltr/commit/c483b1fb3c353bf75b4a6d4323fc8f27283a9710))
+* **tui:** / key filters the Notices feed (input mode) ([0853003](https://github.com/dgrauet/smeltr/commit/08530033f6eb57eed03d7622a86b15d464aaef61))
+* **tui:** RenderOverlay + matches_filter for Notices filtering ([4812656](https://github.com/dgrauet/smeltr/commit/4812656580945730f103331da6941c0af8052db3))
+* **tui:** s key snapshots UiState to JSON with status feedback ([ff8ca13](https://github.com/dgrauet/smeltr/commit/ff8ca13d6958a6bf6a31b3a1363fdfbbf027adbc))
+* **tui:** UiState snapshot-to-JSON helpers ([2f906cc](https://github.com/dgrauet/smeltr/commit/2f906ccb3a754dfe6a94eb49603ed3af8052fdcc))
+
+
+### Bug Fixes
+
+* **tests:** spawn bins via CARGO_BIN_EXE_* instead of nested cargo build ([a0e2e96](https://github.com/dgrauet/smeltr/commit/a0e2e968c5f5c34efeb6c3c14eb14adc4af2fb07))
+* **tests:** use CARGO_BIN_EXE_* instead of nested cargo build (fixes workspace test hang) ([8c9f612](https://github.com/dgrauet/smeltr/commit/8c9f612503e06d2417165777f18172e345cea5c0))
+
 ## [0.10.0](https://github.com/dgrauet/smeltr/compare/v0.9.0...v0.10.0) (2026-06-22)
 
 
