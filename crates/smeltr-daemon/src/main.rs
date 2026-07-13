@@ -27,6 +27,15 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("another smeltrd (pid {pid}) is already running");
     }
     let _ = std::fs::remove_file(&pid_path); // stale (dead pid) or absent
+
+    // Atomic O_EXCL claim: closes the race window between the liveness
+    // check above and taking ownership — the loser bails, never clobbers.
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Err(e) = smeltr_daemon::recovery::claim_pid_file(&pid_path) {
+        anyhow::bail!("another smeltrd is starting up (pid file claim failed: {e})");
+    }
     match smeltr_daemon::recovery::recover_orphaned_sessions() {
         Ok(0) => {}
         Ok(n) => tracing::info!(
@@ -55,12 +64,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::downgrade(&flight_recorder),
     );
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-
-    // Write PID file for `smeltr daemon stop`.
-    if let Some(parent) = pid_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&pid_path, std::process::id().to_string())?;
 
     // Periodic flush so external readers see in-flight events.
     let flush_router = router.clone();
