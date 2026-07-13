@@ -3,7 +3,7 @@
 use crate::chunked::{self, ChunkConfig, ChunkIndexEntry};
 use crate::codec::write_frame;
 use crate::event::Event;
-use crate::session::{events_path_zst, metadata_path, session_dir, SessionMetadata};
+use crate::session::{events_path_zst, session_dir, SessionMetadata};
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -274,9 +274,7 @@ impl SessionWriter {
     }
 
     fn persist_metadata(&self) -> std::io::Result<()> {
-        let text = toml::to_string(&self.metadata)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        std::fs::write(metadata_path(&self.dir), text)
+        crate::session::write_metadata(&self.dir, &self.metadata)
     }
 }
 

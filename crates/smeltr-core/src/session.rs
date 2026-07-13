@@ -65,6 +65,10 @@ pub struct SessionMetadata {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_token: Option<String>,
+    /// Why the session ended when not finalized by its own writer
+    /// (e.g. "recovered-after-crash" set by daemon boot recovery).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
 }
 
 const SESSION_NAME_MAX_LEN: usize = 200;
@@ -119,6 +123,7 @@ impl SessionMetadata {
             kind: SessionKind::Ambient,
             name,
             scope_token: None,
+            end_reason: None,
         }
     }
 }
@@ -170,6 +175,13 @@ pub fn session_dir(meta: &SessionMetadata) -> PathBuf {
 pub fn metadata_path(dir: &Path) -> PathBuf {
     dir.join("metadata.toml")
 }
+
+pub fn write_metadata(dir: &Path, meta: &SessionMetadata) -> std::io::Result<()> {
+    let text = toml::to_string(meta)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    std::fs::write(metadata_path(dir), text)
+}
+
 pub fn events_path(dir: &Path) -> PathBuf {
     dir.join("events.cbor")
 }
@@ -378,5 +390,29 @@ type = "Ambient"
 "#;
         let m: SessionMetadata = toml::from_str(legacy).unwrap();
         assert!(m.scope_token.is_none());
+    }
+
+    #[test]
+    fn metadata_without_end_reason_still_parses() {
+        // Simulates a pre-existing session written before the field existed.
+        let old = r#"
+session_id = "00000000-0000-0000-0000-000000000000"
+started_rfc3339 = "2026-07-13T00:00:00Z"
+host = "mac"
+argv = []
+"#;
+        let meta: SessionMetadata = toml::from_str(old).unwrap();
+        assert_eq!(meta.end_reason, None);
+    }
+
+    #[test]
+    fn write_metadata_roundtrips_end_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.end_reason = Some("recovered-after-crash".into());
+        write_metadata(dir.path(), &meta).unwrap();
+        let text = std::fs::read_to_string(metadata_path(dir.path())).unwrap();
+        let back: SessionMetadata = toml::from_str(&text).unwrap();
+        assert_eq!(back.end_reason.as_deref(), Some("recovered-after-crash"));
     }
 }
