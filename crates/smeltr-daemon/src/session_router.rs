@@ -124,6 +124,28 @@ impl SessionRouter {
         self.ambient.flush()
     }
 
+    /// Panic-safe flush of every session: never blocks, never errors.
+    /// Returns how many sessions were actually flushed.
+    pub fn try_flush_all(&self) -> usize {
+        let mut flushed = 0;
+        let guard = match self.by_pid.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(g) = guard {
+            for s in g.values() {
+                if matches!(s.try_flush(), Ok(true)) {
+                    flushed += 1;
+                }
+            }
+        }
+        if matches!(self.ambient.try_flush(), Ok(true)) {
+            flushed += 1;
+        }
+        flushed
+    }
+
     pub fn finalize_all(&self, reason: &str) -> std::io::Result<()> {
         let scoped: Vec<Arc<ActiveSession>> = {
             let mut g = self.by_pid.lock().unwrap();
@@ -514,5 +536,16 @@ mod tests {
             }
         }
         assert!(found);
+    }
+
+    #[test]
+    #[serial]
+    fn try_flush_all_never_blocks_and_counts() {
+        let _h = temp_home();
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let r = SessionRouter::new(ambient.clone(), None, None);
+        r.attach_scoped(42, vec!["py".into()], None, None).unwrap();
+        assert_eq!(r.try_flush_all(), 2); // scoped + ambient
+        ambient.finalize(Some(0), "test").unwrap();
     }
 }
