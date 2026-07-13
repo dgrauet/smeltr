@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1](https://github.com/dgrauet/smeltr/compare/v0.13.0...v0.13.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **daemon:** harden startup and recovery paths ([#91](https://github.com/dgrauet/smeltr/issues/91)) ([#93](https://github.com/dgrauet/smeltr/issues/93)) ([01ba7de](https://github.com/dgrauet/smeltr/commit/01ba7de0b790596e9a6f21a3766d0439c8af1aa2))
+
 ## [0.13.0](https://github.com/dgrauet/smeltr/compare/v0.12.0...v0.13.0) (2026-07-13)
 
 
