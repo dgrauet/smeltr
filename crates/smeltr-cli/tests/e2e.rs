@@ -1,44 +1,17 @@
 //! Black-box end-to-end test: spawn the daemon as a child, run CLI commands,
 //! assert their output.
 
+mod common;
+
 use assert_cmd::Command;
-use std::process::{Command as StdCommand, Stdio};
-use std::time::{Duration, Instant};
-
-fn smeltrd_path() -> std::path::PathBuf {
-    // assert_cmd places binaries in CARGO_TARGET_DIR or target/debug.
-    let mut p = std::env::current_exe().unwrap();
-    p.pop(); // drop test name
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("smeltrd")
-}
-
-fn wait_for_socket(path: &std::path::Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
-}
+use common::DaemonGuard;
+use std::time::Duration;
 
 #[test]
 fn end_to_end_mark_then_show() {
     let home = tempfile::tempdir().unwrap();
     let sock = home.path().join("smeltr.sock");
-
-    let mut child = StdCommand::new(smeltrd_path())
-        .env("SMELTR_HOME", home.path())
-        .env("SMELTR_SOCKET", &sock)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn smeltrd");
-    assert!(wait_for_socket(&sock), "daemon never created its socket");
+    let mut daemon = DaemonGuard::spawn(home.path(), &sock);
 
     Command::cargo_bin("smeltr")
         .unwrap()
@@ -73,12 +46,7 @@ fn end_to_end_mark_then_show() {
     let short = dirname.rsplit('-').next().unwrap();
 
     // Shut down the daemon so it flushes events to disk.
-    let _ = StdCommand::new("kill")
-        .arg("-TERM")
-        .arg(child.id().to_string())
-        .output();
-    let _ = child.wait();
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    daemon.stop();
 
     let out = Command::cargo_bin("smeltr")
         .unwrap()
@@ -100,15 +68,7 @@ fn end_to_end_mark_then_show() {
 fn record_captures_child_lifecycle() {
     let home = tempfile::tempdir().unwrap();
     let sock = home.path().join("smeltr.sock");
-
-    let mut child = StdCommand::new(smeltrd_path())
-        .env("SMELTR_HOME", home.path())
-        .env("SMELTR_SOCKET", &sock)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn smeltrd");
-    assert!(wait_for_socket(&sock), "daemon never created its socket");
+    let mut daemon = DaemonGuard::spawn(home.path(), &sock);
 
     Command::cargo_bin("smeltr")
         .unwrap()
@@ -119,12 +79,7 @@ fn record_captures_child_lifecycle() {
         .success();
 
     // Shut down the daemon so it flushes events to disk.
-    let _ = StdCommand::new("kill")
-        .arg("-TERM")
-        .arg(child.id().to_string())
-        .output();
-    let _ = child.wait();
-    std::thread::sleep(Duration::from_millis(100));
+    daemon.stop();
 
     let sessions_root = home.path().join("sessions");
     let entries: Vec<_> = std::fs::read_dir(&sessions_root)
@@ -213,14 +168,7 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
     let home = tmp.path().to_path_buf();
     let sock = tmp.path().join("smeltr.sock");
 
-    let mut daemon = StdCommand::new(smeltrd_path())
-        .env("SMELTR_HOME", &home)
-        .env("SMELTR_SOCKET", &sock)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn smeltrd");
-    assert!(wait_for_socket(&sock), "daemon never created its socket");
+    let mut daemon = DaemonGuard::spawn(&home, &sock);
 
     Command::cargo_bin("smeltr")
         .unwrap()
@@ -231,13 +179,10 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
         .assert()
         .success();
 
-    // Shut down the daemon so it flushes events to disk.
-    let _ = StdCommand::new("kill")
-        .arg("-TERM")
-        .arg(daemon.id().to_string())
-        .output();
-    let _ = daemon.wait();
-    std::thread::sleep(Duration::from_millis(200));
+    // Shut down the daemon so it flushes events to disk. The metal-hook
+    // session is heavier; give the flush an extra beat beyond stop()'s grace.
+    daemon.stop();
+    std::thread::sleep(Duration::from_millis(100));
 
     let sessions_root = home.join("sessions");
     let entries: Vec<_> = std::fs::read_dir(&sessions_root)

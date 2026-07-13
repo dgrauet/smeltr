@@ -2148,6 +2148,7 @@ dependencies = [
  "clap",
  "hex",
  "inferno",
+ "libc",
  "predicates",
  "serde",
  "serde_json",

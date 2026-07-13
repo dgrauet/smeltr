@@ -2,30 +2,11 @@
 //! sessions, the ambient stays clean of PID-tagged events, and
 //! `smeltr breakdown --last` picks the newest scoped session.
 
+mod common;
+
 use assert_cmd::Command;
-use std::process::{Command as StdCommand, Stdio};
-use std::time::{Duration, Instant};
-
-fn smeltrd_path() -> std::path::PathBuf {
-    // Mirror the same binary-resolution used in tests/e2e.rs.
-    let mut p = std::env::current_exe().unwrap();
-    p.pop(); // drop test binary name
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("smeltrd")
-}
-
-fn wait_for_socket(path: &std::path::Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
-}
+use common::DaemonGuard;
+use std::time::Duration;
 
 #[test]
 #[serial_test::serial]
@@ -34,14 +15,7 @@ fn two_records_create_two_scoped_sessions() {
     let home = tempfile::tempdir().unwrap();
     let sock = home.path().join("smeltr.sock");
 
-    let mut daemon = StdCommand::new(smeltrd_path())
-        .env("SMELTR_HOME", home.path())
-        .env("SMELTR_SOCKET", &sock)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn smeltrd");
-    assert!(wait_for_socket(&sock), "daemon never created socket");
+    let mut daemon = DaemonGuard::spawn(home.path(), &sock);
 
     // Two records, each running /bin/sleep 1.
     for _ in 0..2 {
@@ -55,12 +29,8 @@ fn two_records_create_two_scoped_sessions() {
     }
 
     // Stop the daemon so the ambient session is finalized to disk.
-    let _ = StdCommand::new("kill")
-        .arg("-TERM")
-        .arg(daemon.id().to_string())
-        .output();
-    let _ = daemon.wait();
-    std::thread::sleep(Duration::from_millis(200));
+    daemon.stop();
+    std::thread::sleep(Duration::from_millis(100));
 
     // Count sessions on disk: expect ≥ 3 (1 ambient + 2 scoped).
     let sessions_dir = home.path().join("sessions");

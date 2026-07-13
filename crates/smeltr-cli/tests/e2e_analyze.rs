@@ -33,14 +33,8 @@ fn kind_of(v: &ciborium::Value) -> Option<&str> {
     None
 }
 
-fn smeltrd_path() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("smeltrd")
-}
+mod common;
+use common::{smeltrd_path, DaemonGuard};
 
 #[test]
 #[serial_test::serial]
@@ -49,15 +43,17 @@ fn analyze_after_daemon_records_synthetic_watchdog() {
     let sock = home.path().join("sm.sock");
 
     let smeltrd = smeltrd_path();
-    let mut daemon = Command::new(&smeltrd)
-        .env("SMELTR_HOME", home.path())
-        .env("SMELTR_SOCKET", &sock)
-        .env("RUST_LOG", "warn")
-        .arg("--foreground")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn smeltrd");
+    let mut daemon = DaemonGuard::new(
+        Command::new(&smeltrd)
+            .env("SMELTR_HOME", home.path())
+            .env("SMELTR_SOCKET", &sock)
+            .env("RUST_LOG", "warn")
+            .arg("--foreground")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn smeltrd"),
+    );
 
     for _ in 0..50 {
         if sock.exists() {
@@ -114,15 +110,14 @@ fn analyze_after_daemon_records_synthetic_watchdog() {
     let _ = read_frame(&mut stream);
     drop(stream);
 
-    // Wait for daemon exit (up to 10s).
+    // Wait for daemon exit (up to 10s); the guard reaps whatever remains.
     for _ in 0..50 {
-        match daemon.try_wait().unwrap() {
+        match daemon.child_mut().and_then(|c| c.try_wait().ok().flatten()) {
             Some(_) => break,
             None => std::thread::sleep(Duration::from_millis(200)),
         }
     }
-    let _ = daemon.kill();
-    let _ = daemon.wait();
+    drop(daemon);
 
     // Run `smeltr analyze --last`.
     let smeltr_bin = env!("CARGO_BIN_EXE_smeltr");
