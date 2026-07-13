@@ -14,6 +14,32 @@ pub fn ensure_loopback(addr: &std::net::SocketAddr) -> Result<(), String> {
     }
 }
 
+use crate::server::SmeltrMcpServer;
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use std::sync::Arc;
+
+/// Serves the MCP server on an already-bound listener (test seam: lets the
+/// integration test bind port 0). Runs until the task is cancelled.
+pub async fn serve_on(listener: tokio::net::TcpListener) -> std::io::Result<()> {
+    let service = StreamableHttpService::new(
+        || Ok(SmeltrMcpServer),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    let router = axum::Router::new().nest_service("/mcp", service);
+    axum::serve(listener, router).await
+}
+
+/// Binds `addr` (loopback only) and serves Streamable HTTP at /mcp.
+pub async fn run_http(addr: std::net::SocketAddr) -> std::io::Result<()> {
+    ensure_loopback(&addr).map_err(std::io::Error::other)?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // The one eprintln a server is allowed: tell the human where it lives.
+    eprintln!("smeltr MCP (streamable HTTP) listening on http://{addr}/mcp");
+    serve_on(listener).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::ensure_loopback;
