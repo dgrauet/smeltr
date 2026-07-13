@@ -18,8 +18,24 @@ pub fn live_daemon_pid(pid_path: &Path) -> Option<u32> {
         .trim()
         .parse()
         .ok()?;
-    // kill(pid, 0) probes existence without signaling.
-    (unsafe { libc::kill(pid as i32, 0) } == 0).then_some(pid)
+    // kill(pid, 0) probes existence without signaling. EPERM means the
+    // process exists but belongs to another user — still alive.
+    if unsafe { libc::kill(pid as i32, 0) } == 0 {
+        return Some(pid);
+    }
+    (std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)).then_some(pid)
+}
+
+/// Atomically claims the pid file (`O_EXCL`). Fails with `AlreadyExists`
+/// when another daemon won the race between the liveness check and this
+/// call — the loser must bail without touching the winner's file.
+pub fn claim_pid_file(pid_path: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(pid_path)?;
+    f.write_all(std::process::id().to_string().as_bytes())
 }
 
 /// Marks every non-finalized, non-post-mortem session as recovered.
@@ -42,7 +58,11 @@ pub fn recover_orphaned_sessions() -> std::io::Result<usize> {
         // robust than decoding a possibly-truncated stream.
         meta.ended_rfc3339 = Some(events_mtime_rfc3339(&dir).unwrap_or_else(now_rfc3339));
         meta.end_reason = Some("recovered-after-crash".to_string());
-        write_metadata(&dir, &meta)?;
+        if let Err(e) = write_metadata(&dir, &meta) {
+            // One unwritable session must not abort the whole pass.
+            tracing::warn!(dir = %dir.display(), error = %e, "failed to rewrite session metadata; skipping");
+            continue;
+        }
         recovered += 1;
     }
     Ok(recovered)
@@ -133,6 +153,63 @@ mod tests {
             .join("post-mortem-daemon-panic-x-deadbeef");
         std::fs::create_dir_all(&pm).unwrap();
         assert_eq!(recover_orphaned_sessions().unwrap(), 0);
+    }
+
+    #[test]
+    fn live_daemon_pid_treats_eperm_as_alive() {
+        // kill(1, 0) targets launchd: EPERM as non-root, 0 as root — either
+        // way the process exists, so it must read as alive.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("smeltrd.pid");
+        std::fs::write(&p, "1").unwrap();
+        assert_eq!(live_daemon_pid(&p), Some(1));
+    }
+
+    #[test]
+    #[serial]
+    fn recovery_continues_past_unwritable_session_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+        let h = temp_home();
+        let root = h.path().join("sessions");
+        // Two hand-built orphan sessions; "aaa-*" sorts first and its
+        // metadata.toml is made read-only so write_metadata fails on it.
+        for name in ["aaa-orphan", "bbb-orphan"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let meta = SessionMetadata::now_starting(SessionId::new());
+            smeltr_core::session::write_metadata(&dir, &meta).unwrap();
+        }
+        let locked = root.join("aaa-orphan").join("metadata.toml");
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&locked, perms).unwrap();
+
+        let n = recover_orphaned_sessions().unwrap();
+        assert_eq!(n, 1, "the writable orphan must still be recovered");
+        let m = read_metadata(&root.join("bbb-orphan")).unwrap();
+        assert_eq!(m.end_reason.as_deref(), Some("recovered-after-crash"));
+    }
+
+    #[test]
+    fn claim_pid_file_writes_our_pid_when_absent() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("smeltrd.pid");
+        claim_pid_file(&p).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap().trim(),
+            std::process::id().to_string()
+        );
+    }
+
+    #[test]
+    fn claim_pid_file_fails_when_already_present() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("smeltrd.pid");
+        std::fs::write(&p, "12345").unwrap();
+        let err = claim_pid_file(&p).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        // The loser must not clobber the winner's pid file.
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "12345");
     }
 
     #[test]
