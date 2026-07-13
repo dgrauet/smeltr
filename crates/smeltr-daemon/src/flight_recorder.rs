@@ -43,6 +43,18 @@ impl FlightRecorder {
         q.iter().cloned().collect()
     }
 
+    /// Panic-safe snapshot: never blocks, never panics. Returns `None` only
+    /// when another thread holds the lock; a poisoned lock is recovered.
+    pub fn try_snapshot(&self) -> Option<Vec<Event>> {
+        match self.inner.try_lock() {
+            Ok(q) => Some(q.iter().cloned().collect()),
+            Err(std::sync::TryLockError::Poisoned(p)) => {
+                Some(p.into_inner().iter().cloned().collect())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
     }
@@ -109,5 +121,39 @@ mod tests {
         let _snap1 = fr.snapshot();
         let snap2 = fr.snapshot();
         assert_eq!(snap2.len(), 2);
+    }
+
+    #[test]
+    fn try_snapshot_returns_events_when_uncontended() {
+        let fr = FlightRecorder::new(std::time::Duration::from_secs(60));
+        fr.push(ev(1));
+        assert_eq!(fr.try_snapshot().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn try_snapshot_recovers_from_poisoned_lock() {
+        let fr = std::sync::Arc::new(FlightRecorder::new(std::time::Duration::from_secs(60)));
+        fr.push(ev(1));
+        let fr2 = fr.clone();
+        // Poison the mutex: panic while holding the guard.
+        let _ = std::thread::spawn(move || {
+            let _guard = fr2.inner.lock().unwrap();
+            panic!("poison");
+        })
+        .join();
+        assert_eq!(
+            fr.try_snapshot().unwrap().len(),
+            1,
+            "poisoned lock must be recovered"
+        );
+    }
+
+    #[test]
+    fn try_snapshot_returns_none_when_lock_held() {
+        let fr = std::sync::Arc::new(FlightRecorder::new(std::time::Duration::from_secs(60)));
+        let guard = fr.inner.lock().unwrap();
+        assert!(fr.try_snapshot().is_none());
+        drop(guard);
+        assert!(fr.try_snapshot().is_some());
     }
 }
