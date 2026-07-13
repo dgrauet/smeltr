@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod client;
 pub mod flight_recorder;
+pub mod panic_flush;
 pub mod probes;
 pub mod protocol;
 pub mod server;
