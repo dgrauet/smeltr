@@ -31,13 +31,24 @@ pub async fn serve_on(listener: tokio::net::TcpListener) -> std::io::Result<()> 
     axum::serve(listener, router).await
 }
 
-/// Binds `addr` (loopback only) and serves Streamable HTTP at /mcp.
+/// Binds `addr` (loopback only) and serves Streamable HTTP at /mcp, shutting
+/// down gracefully on Ctrl-C.
 pub async fn run_http(addr: std::net::SocketAddr) -> std::io::Result<()> {
     ensure_loopback(&addr).map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     // The one eprintln a server is allowed: tell the human where it lives.
     eprintln!("smeltr MCP (streamable HTTP) listening on http://{addr}/mcp");
-    serve_on(listener).await
+    let service = StreamableHttpService::new(
+        || Ok(SmeltrMcpServer),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    let router = axum::Router::new().nest_service("/mcp", service);
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
 }
 
 #[cfg(test)]
