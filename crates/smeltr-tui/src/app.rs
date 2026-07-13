@@ -46,6 +46,15 @@ impl App {
         }
     }
 
+    /// Installs the replay timeline. If it starts fully played (--speed 0),
+    /// fold everything so the UI opens populated instead of blank.
+    pub fn set_scrub(&mut self, scrub: crate::scrub::ScrubState) {
+        if scrub.at_end() {
+            self.state = crate::state::UiState::rebuild(scrub.events());
+        }
+        self.scrub = Some(scrub);
+    }
+
     fn apply_seek(
         &mut self,
         f: impl FnOnce(&mut crate::scrub::ScrubState) -> crate::scrub::SeekOutcome,
@@ -276,6 +285,33 @@ mod tests {
         assert_eq!(app.state.log_feed.len(), 10);
         app.handle_key(KeyCode::Home, KeyModifiers::NONE);
         assert_eq!(app.scrub.as_ref().unwrap().position_ns(), 0);
+    }
+
+    #[test]
+    fn speed_zero_launch_opens_fully_populated() {
+        let mut app = App::new("replay");
+        let evs: Vec<SmeltrEvent> = (0..5u64)
+            .map(|i| mk_mark_event(i * 1_000_000_000, &format!("m{i}")))
+            .collect();
+        app.set_scrub(crate::scrub::ScrubState::new(evs, 0.0));
+        assert_eq!(
+            app.state.log_feed.len(),
+            5,
+            "speed-0 launch must open with all events folded"
+        );
+    }
+
+    #[test]
+    fn seek_back_at_start_does_not_wipe_state() {
+        let mut app = replay_app();
+        app.handle_key(KeyCode::Home, KeyModifiers::NONE); // rebuilds to t=0 -> 1 entry
+        assert_eq!(app.state.log_feed.len(), 1);
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE); // clamped no-op at 0
+        assert_eq!(
+            app.state.log_feed.len(),
+            1,
+            "clamped seek-back must not wipe the t=0 state"
+        );
     }
 
     #[test]

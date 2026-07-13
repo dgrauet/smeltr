@@ -82,8 +82,9 @@ impl ScrubState {
                 self.cursor = 0;
                 self.catch_up()
             } else {
-                // Clamped to same position; return empty range
-                0..0
+                // Clamped to the same position (already at 0): rebuild 0..cursor,
+                // reproducing the current state exactly rather than wiping it.
+                0..self.cursor
             };
             SeekOutcome::Rewind(r)
         } else {
@@ -248,5 +249,20 @@ mod tests {
             1..1,
             "event 0 must not be re-emitted after a clamped seek-back"
         );
+    }
+
+    #[test]
+    fn clamped_seek_back_after_ingest_rewinds_full_prefix_not_empty() {
+        let mut s = ScrubState::new(vec![ev(0), ev(S)], 1.0);
+        let _ = s.seek_to_ns(0); // Forward: ingests event@0, cursor=1
+        match s.seek_by_secs(-5) {
+            // clamped no-op at start (already at 0)
+            SeekOutcome::Rewind(r) => assert_eq!(
+                r,
+                0..1,
+                "clamped seek-back must rebuild the full 0..cursor prefix, not an empty range"
+            ),
+            other => panic!("expected Rewind, got {other:?}"),
+        }
     }
 }

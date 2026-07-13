@@ -24,9 +24,12 @@ pub async fn run_live() -> Result<()> {
 pub async fn run_replay(session_arg: String, speed: f64) -> Result<()> {
     let dir = resolve_session(&session_arg)?;
     let scrub = smeltr_tui::replay::load(&dir, speed).context("load session for replay")?;
-    let (_tx, rx) = mpsc::channel(1); // unused in scrub mode; sender kept out of scope
+    // Scrub mode drives the UI from the timeline, not the channel; the channel
+    // is unused here, but `_tx` is kept alive so `rx` reports Empty rather
+    // than Disconnected.
+    let (_tx, rx) = mpsc::channel(1);
     let mut app = App::new("replay");
-    app.scrub = Some(scrub);
+    app.set_scrub(scrub);
     app.run(rx).await.context("tui replay")
 }
 
