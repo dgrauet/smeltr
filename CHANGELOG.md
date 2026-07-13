@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0](https://github.com/dgrauet/smeltr/compare/v0.12.0...v0.13.0) (2026-07-13)
+
+
+### Features
+
+* **core:** additive SessionMetadata.end_reason + public write_metadata ([2f6f6b7](https://github.com/dgrauet/smeltr/commit/2f6f6b7485802285c701bdcd990efcf703b4ea49))
+* **daemon:** black-box panic flush + boot-time crash recovery ([7b4e4ff](https://github.com/dgrauet/smeltr/commit/7b4e4ff03ea013391c9ebdaee4201aeb8da30250))
+* **daemon:** black-box panic hook (post-mortem dump + try-flush + abort) ([eef62c6](https://github.com/dgrauet/smeltr/commit/eef62c6249da95afdb25322e9e4507d6e6a87b0b))
+* **daemon:** boot-time recovery of orphaned sessions ([986a19a](https://github.com/dgrauet/smeltr/commit/986a19a4abec5ccf4f276cb929c8930065188065))
+* **daemon:** DaemonPanic trigger reason + flush_post_mortem_events ([fe948e1](https://github.com/dgrauet/smeltr/commit/fe948e139bbcdce51b4d8fe4516017b82e313361))
+* **daemon:** panic-safe FlightRecorder::try_snapshot ([fdb624e](https://github.com/dgrauet/smeltr/commit/fdb624ee48818142091fcc12c30e1b09f1d2bfd8))
+* **daemon:** panic-safe try_flush / try_flush_all ([9e67161](https://github.com/dgrauet/smeltr/commit/9e67161c77a177dde5e5385cc23ec9ad77e58589))
+* **daemon:** wire panic hook, boot recovery and SMELTR_TEST_PANIC_MS ([1da201e](https://github.com/dgrauet/smeltr/commit/1da201e404adfd75b10ef62f1df863c5ba765b28))
+
 ## [0.12.0](https://github.com/dgrauet/smeltr/compare/v0.11.0...v0.12.0) (2026-06-23)
 
 
