@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0](https://github.com/dgrauet/smeltr/compare/v0.13.1...v0.14.0) (2026-07-13)
+
+
+### Features
+
+* **tui,cli:** wire replay mode through ScrubState (true pause + seeking) ([0f9a5c3](https://github.com/dgrauet/smeltr/commit/0f9a5c304fcc5a662d381de45e9c70232ffd8034))
+* **tui:** replay scrub gauge in the title bar ([8bb369c](https://github.com/dgrauet/smeltr/commit/8bb369c0d27afe6aab076588cc50f98459ff3959))
+* **tui:** replay scrubbing — seek, true pause, progress gauge ([56d3bd4](https://github.com/dgrauet/smeltr/commit/56d3bd419a198cd653ae4251a91a8b4830ea512f))
+* **tui:** scrub keys (seek/home/end) and virtual-clock replay loop ([8d543a8](https://github.com/dgrauet/smeltr/commit/8d543a8be55a48453fcb988dc6b626416b08b40d))
+* **tui:** ScrubState — pure virtual-clock timeline for replay ([98aa9da](https://github.com/dgrauet/smeltr/commit/98aa9dae563f422ed4d565e9835b021ef87fb2cd))
+* **tui:** UiState::rebuild for scrub rewinds ([9f9f0ca](https://github.com/dgrauet/smeltr/commit/9f9f0ca76affb67eab8796f761bae5418ab49dbf))
+
+
+### Bug Fixes
+
+* **tui:** fold events on speed-0 launch; make clamped seek-back idempotent ([0454590](https://github.com/dgrauet/smeltr/commit/04545909e700f29b4a99042f218194a57072921e))
+* **tui:** keep scrub cursor in sync on clamped seek-back ([ba8bb7d](https://github.com/dgrauet/smeltr/commit/ba8bb7db1ae5db9d4edf3799b7fa260b60302305))
+
 ## [0.13.1](https://github.com/dgrauet/smeltr/compare/v0.13.0...v0.13.1) (2026-07-13)
 
 
