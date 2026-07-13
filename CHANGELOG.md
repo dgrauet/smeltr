@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0](https://github.com/dgrauet/smeltr/compare/v0.14.1...v0.15.0) (2026-07-13)
+
+
+### Features
+
+* **cli:** smeltr mcp --http — streamable HTTP transport flag + docs ([6f8eea3](https://github.com/dgrauet/smeltr/commit/6f8eea34bc1bc5eb5dc1b8123794c376d279751f))
+* **mcp,cli:** streamable HTTP transport — smeltr mcp --http (loopback-only) ([5687ea0](https://github.com/dgrauet/smeltr/commit/5687ea04e11fd3a5c5d29ce3ea22b99e49c2b07d))
+* **mcp:** http feature scaffold + loopback-only bind guard ([c69d11d](https://github.com/dgrauet/smeltr/commit/c69d11d13ca5f33399720ee9789cb51df7dddb38))
+* **mcp:** streamable HTTP transport on /mcp (loopback-only) ([5920d6a](https://github.com/dgrauet/smeltr/commit/5920d6a86d17d765147c6687cae6d39f92535278))
+
 ## [0.14.1](https://github.com/dgrauet/smeltr/compare/v0.14.0...v0.14.1) (2026-07-13)
 
 
