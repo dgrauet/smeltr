@@ -88,6 +88,16 @@ smeltr daemon uninstall
 | `smeltr breakdown [--last] [<id>]` | After | Per-module + per-op GPU time breakdown for an MLX inference session |
 | `smeltr mcp` (in Claude) | After | Query sessions from a Claude conversation via MCP tools |
 
+### TUI controls — replay and live monitoring
+
+The TUI runs live via `smeltr tui`, or in replay mode via `smeltr sessions open <id> [--speed N]`:
+
+**Replay scrubbing** (replay mode only): `←`/`→` seek ±5 s, `Shift+←`/`Shift+→` ±30 s,
+`Home`/`End` jump to start/end, `Space` pauses the virtual clock. The title bar shows
+`▶ mm:ss / mm:ss` with a progress bar.
+
+**Other controls** (both modes): press `K` to toggle a rolling top-5 hot-kernels panel, press `M` to toggle the Models view.
+
 ### Breakdown — recipe
 
 ```
