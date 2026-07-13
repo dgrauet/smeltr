@@ -125,6 +125,12 @@ CBOR length-prefixed frames over a Unix socket. See
   command is a launcher (`uv run`, `poetry run`, `python -m foo`, shell
   wrapper) and the grandchild PID differs from the spawned child PID.
   Internal plumbing — not for end-user manual override.
+- `SMELTR_SESSION_INDEX=1` — opt-in chunked session format: `events.cbor.zst` is
+  written as independent zstd chunks plus a CRC32-protected footer index (per
+  chunk: offset, time range, source bitmap, event count). `query_events` then
+  decodes only the chunks overlapping the requested `(source, time)` filter via
+  `read_events_filtered`. Default remains the legacy mono-stream format; the
+  reader auto-detects both. See `crates/smeltr-core/src/chunked.rs`.
 - `SMELTR_SESSION_NAME` — user-facing session name (validated: cap 200, no NUL/control/`/`);
   surfaced by `list_sessions` and accepted as an alias by every CLI/MCP session arg via
   `smeltr_mcp::types::resolve_session`.
