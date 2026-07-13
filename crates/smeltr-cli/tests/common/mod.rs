@@ -24,7 +24,7 @@ pub fn smeltrd_path() -> PathBuf {
 /// The long deadline costs nothing when healthy and absorbs full-workspace
 /// parallel-test load.
 pub fn wait_for_socket(path: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if path.exists() {
             return true;
@@ -52,7 +52,8 @@ impl DaemonGuard {
 
     /// Spawns smeltrd with the given home/socket and waits for its socket.
     /// Panics (without leaking — the guard is constructed first) if the
-    /// socket never appears.
+    /// socket never appears, distinguishing a dead daemon (exit status in
+    /// the message) from one that is merely too slow under load.
     pub fn spawn(home: &Path, sock: &Path) -> Self {
         let child = Command::new(smeltrd_path())
             .env("SMELTR_HOME", home)
@@ -61,8 +62,16 @@ impl DaemonGuard {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn smeltrd");
-        let guard = Self::new(child);
-        assert!(wait_for_socket(sock), "daemon never created its socket");
+        let mut guard = Self::new(child);
+        if !wait_for_socket(sock) {
+            let cause = match guard.child_mut().and_then(|c| c.try_wait().ok().flatten()) {
+                Some(status) => format!("daemon exited during startup: {status}"),
+                None => "daemon still alive but no socket after the deadline \
+                         (machine overloaded?)"
+                    .to_string(),
+            };
+            panic!("daemon never created its socket — {cause}");
+        }
         guard
     }
 

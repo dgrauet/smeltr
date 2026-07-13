@@ -113,8 +113,13 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         top: usize,
     },
-    /// Run the MCP stdio server (used by LLM clients, e.g. Claude Desktop).
-    Mcp,
+    /// Run the MCP server (stdio by default; used by LLM clients).
+    Mcp {
+        /// Serve over streamable HTTP instead of stdio. Optional value is the
+        /// bind address (loopback only); bare --http means 127.0.0.1:8848.
+        #[arg(long, num_args = 0..=1, default_missing_value = commands::mcp::DEFAULT_HTTP_ADDR)]
+        http: Option<std::net::SocketAddr>,
+    },
     /// Per-(kind, file:line) GPU time attribution. Requires sessions
     /// recorded with SMELTR_STACK_CAPTURE=1.
     Origins {
@@ -208,7 +213,7 @@ fn main() -> anyhow::Result<()> {
                 output,
             } => commands::export::run(&session, &format, output.as_deref()),
             Cmd::Memory { session, top } => commands::memory::run(&session, top),
-            Cmd::Mcp => commands::mcp::run().await,
+            Cmd::Mcp { http } => commands::mcp::run(http).await,
             Cmd::Origins { session, top } => commands::origins::run(&session, top),
             Cmd::Tail { session } => commands::tail::run(session).await,
             Cmd::Record {
@@ -222,4 +227,28 @@ fn main() -> anyhow::Result<()> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_http_flag_defaults_via_clap_wiring() {
+        let cli = Args::try_parse_from(["smeltr", "mcp", "--http"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp { http } => assert_eq!(http, Some("127.0.0.1:8848".parse().unwrap())),
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+        let cli = Args::try_parse_from(["smeltr", "mcp", "--http", "127.0.0.1:9999"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp { http } => assert_eq!(http, Some("127.0.0.1:9999".parse().unwrap())),
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+        let cli = Args::try_parse_from(["smeltr", "mcp"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp { http } => assert_eq!(http, None),
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+    }
 }

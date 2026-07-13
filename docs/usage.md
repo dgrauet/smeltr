@@ -500,6 +500,11 @@ Add to `~/.claude.json` (under `mcpServers`):
 }
 ```
 
+`smeltr mcp --http` serves the same MCP server over streamable HTTP at
+`http://127.0.0.1:8848/mcp` (pass an explicit loopback `ADDR` to change it).
+The bind is loopback-only — no auth is implemented; for remote access use an
+SSH tunnel (`ssh -L 8848:127.0.0.1:8848 <host>`).
+
 From any Claude session, you can then ask things like:
 - "List my smeltr sessions"
 - "Compare sessions A and B"
