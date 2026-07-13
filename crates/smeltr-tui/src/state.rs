@@ -94,6 +94,16 @@ const RECENT_MARKS: usize = 10;
 const LOG_FEED_CAP: usize = 200;
 
 impl UiState {
+    /// Rebuilds the aggregate state from scratch by folding `events` in order.
+    /// Used by replay scrubbing on backward seeks.
+    pub fn rebuild(events: &[Event]) -> UiState {
+        let mut s = UiState::default();
+        for ev in events {
+            s.ingest(ev);
+        }
+        s
+    }
+
     pub fn ingest(&mut self, ev: &Event) {
         self.events_total += 1;
         self.last_ts_wall_ns = ev.ts_wall_ns;
@@ -700,5 +710,33 @@ mod tests {
             ));
         }
         assert_eq!(s.log_feed.len(), 200);
+    }
+
+    #[test]
+    fn rebuild_equals_incremental_ingest() {
+        let evs: Vec<Event> = (0..50u64)
+            .map(|i| {
+                ev(
+                    i * 1_000_000,
+                    Payload::Mark {
+                        label: format!("m{i}"),
+                        fields: Default::default(),
+                    },
+                )
+            })
+            .collect();
+        let mut incremental = UiState::default();
+        for e in &evs {
+            incremental.ingest(e);
+        }
+        let rebuilt = UiState::rebuild(&evs);
+        // Compare observable aggregates (UiState is not PartialEq): log feed len +
+        // last summary + events_total counter
+        assert_eq!(rebuilt.log_feed.len(), incremental.log_feed.len());
+        assert_eq!(
+            rebuilt.log_feed.back().map(|e| e.summary.clone()),
+            incremental.log_feed.back().map(|e| e.summary.clone())
+        );
+        assert_eq!(rebuilt.events_total, incremental.events_total);
     }
 }

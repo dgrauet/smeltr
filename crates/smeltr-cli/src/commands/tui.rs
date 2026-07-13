@@ -23,17 +23,14 @@ pub async fn run_live() -> Result<()> {
 
 pub async fn run_replay(session_arg: String, speed: f64) -> Result<()> {
     let dir = resolve_session(&session_arg)?;
-    let (tx, rx) = mpsc::channel(1024);
-    let replay_dir = dir.clone();
-    let replay_task = tokio::spawn(async move {
-        if let Err(e) = smeltr_tui::replay::spawn(&replay_dir, speed, tx).await {
-            eprintln!("replay adapter ended: {e}");
-        }
-    });
-    let app = App::new("replay");
-    let r = app.run(rx).await;
-    replay_task.abort();
-    r.context("tui replay")
+    let scrub = smeltr_tui::replay::load(&dir, speed).context("load session for replay")?;
+    // Scrub mode drives the UI from the timeline, not the channel; the channel
+    // is unused here, but `_tx` is kept alive so `rx` reports Empty rather
+    // than Disconnected.
+    let (_tx, rx) = mpsc::channel(1);
+    let mut app = App::new("replay");
+    app.set_scrub(scrub);
+    app.run(rx).await.context("tui replay")
 }
 
 fn socket_path() -> PathBuf {
