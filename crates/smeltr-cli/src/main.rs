@@ -228,3 +228,27 @@ fn main() -> anyhow::Result<()> {
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_http_flag_defaults_via_clap_wiring() {
+        let cli = Args::try_parse_from(["smeltr", "mcp", "--http"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp { http } => assert_eq!(http, Some("127.0.0.1:8848".parse().unwrap())),
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+        let cli = Args::try_parse_from(["smeltr", "mcp", "--http", "127.0.0.1:9999"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp { http } => assert_eq!(http, Some("127.0.0.1:9999".parse().unwrap())),
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+        let cli = Args::try_parse_from(["smeltr", "mcp"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp { http } => assert_eq!(http, None),
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+    }
+}
