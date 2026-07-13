@@ -12,6 +12,7 @@ pub enum TriggerReason {
     CrashReport { path: String },
     MachException { target_pid: u32 },
     MetalError { cb_id: u64, error_code: i64 },
+    DaemonPanic { message: String },
 }
 
 impl TriggerReason {
@@ -20,6 +21,7 @@ impl TriggerReason {
             Self::CrashReport { .. } => "crash-report".into(),
             Self::MachException { .. } => "mach-exception".into(),
             Self::MetalError { error_code, .. } => format!("metal-error-{error_code}"),
+            Self::DaemonPanic { .. } => "daemon-panic".into(),
         }
     }
 }
@@ -60,6 +62,15 @@ pub fn flush_post_mortem(
     if events.is_empty() {
         return Err(std::io::Error::other("flight recorder is empty"));
     }
+    flush_post_mortem_events(events, reason)
+}
+
+/// Writes the given events (possibly empty — a daemon panic must still
+/// produce a session dir for its panic report) as a post-mortem session.
+pub fn flush_post_mortem_events(
+    events: Vec<Event>,
+    reason: &TriggerReason,
+) -> std::io::Result<FlushSummary> {
     let id = SessionId::new();
     let meta = SessionMetadata::now_starting(id);
     let root = sessions_root();
@@ -104,6 +115,7 @@ pub fn flush_post_mortem(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use smeltr_core::event::Source;
     use uuid::Uuid;
 
@@ -189,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial]
     fn flush_writes_session_dir_with_events() {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_HOME", home.path());
@@ -225,5 +237,33 @@ mod tests {
             .contains("metal-error-14"));
         let evs = smeltr_core::reader::read_events(&summary.session_dir).unwrap();
         assert_eq!(evs.len(), 5);
+    }
+
+    #[test]
+    fn daemon_panic_label() {
+        let r = TriggerReason::DaemonPanic {
+            message: "boom".into(),
+        };
+        assert_eq!(r.label(), "daemon-panic");
+    }
+
+    #[test]
+    #[serial]
+    fn flush_post_mortem_events_accepts_empty_and_names_dir() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let r = TriggerReason::DaemonPanic {
+            message: "boom".into(),
+        };
+        let summary = flush_post_mortem_events(Vec::new(), &r).unwrap();
+        assert_eq!(summary.event_count, 0);
+        let name = summary
+            .session_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.starts_with("post-mortem-daemon-panic-"), "got {name}");
+        std::env::remove_var("SMELTR_HOME");
     }
 }

@@ -20,6 +20,22 @@ async fn main() -> anyhow::Result<()> {
 
     let _args = Args::parse();
 
+    // Refuse to start beside a live daemon; otherwise recover sessions a
+    // dead daemon (panic-abort, SIGKILL) left unfinalized.
+    let pid_path = pid_file_path();
+    if let Some(pid) = smeltr_daemon::recovery::live_daemon_pid(&pid_path) {
+        anyhow::bail!("another smeltrd (pid {pid}) is already running");
+    }
+    let _ = std::fs::remove_file(&pid_path); // stale (dead pid) or absent
+    match smeltr_daemon::recovery::recover_orphaned_sessions() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            count = n,
+            "recovered orphaned session(s) after unclean shutdown"
+        ),
+        Err(e) => tracing::warn!(error = %e, "session recovery failed"),
+    }
+
     let flight_recorder = Arc::new(smeltr_daemon::flight_recorder::FlightRecorder::new(
         std::time::Duration::from_secs(60),
     ));
@@ -34,10 +50,13 @@ async fn main() -> anyhow::Result<()> {
         Some(flight_recorder.clone()),
         Some(bus.clone()),
     ));
+    smeltr_daemon::panic_flush::install_panic_hook(
+        Arc::downgrade(&router),
+        Arc::downgrade(&flight_recorder),
+    );
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Write PID file for `smeltr daemon stop`.
-    let pid_path = pid_file_path();
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -128,6 +147,18 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx.clone(),
     )?;
     let server_task = tokio::spawn(server.run());
+
+    // Test-internal: SMELTR_TEST_PANIC_MS=<n> panics in a spawned task after
+    // n ms — used by the panic-flush integration test to exercise the hook.
+    if let Some(ms) = std::env::var("SMELTR_TEST_PANIC_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            panic!("SMELTR_TEST_PANIC_MS fired");
+        });
+    }
 
     // SIGTERM / SIGINT → graceful shutdown
     let shutdown_signal = shutdown_tx.clone();

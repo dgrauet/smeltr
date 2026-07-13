@@ -174,6 +174,21 @@ impl ActiveSession {
         }
     }
 
+    /// Panic-safe flush: never blocks, never panics. Returns Ok(false) when
+    /// the session lock is held by another thread (skipped); a poisoned lock
+    /// is recovered. A finalized session reports Ok(true) (nothing to do).
+    pub fn try_flush(&self) -> std::io::Result<bool> {
+        let mut guard = match self.inner.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+        };
+        match guard.as_mut() {
+            Some(inner) => inner.writer.flush().map(|_| true),
+            None => Ok(true),
+        }
+    }
+
     /// Idempotent. Subsequent calls are no-ops.
     pub fn finalize(&self, exit_code: Option<i32>, reason: &str) -> std::io::Result<()> {
         let _ = self.append(
@@ -383,5 +398,27 @@ mod tests {
         // SessionStarted (emitted by constructor) + Mark = 2 events in the ring.
         assert_eq!(fr.len(), 2);
         s.finalize(Some(0), "test").unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn try_flush_flushes_when_uncontended() {
+        let _h = temp_home();
+        let s = ActiveSession::open_new().unwrap();
+        assert!(s.try_flush().unwrap(), "uncontended try_flush must flush");
+    }
+
+    #[test]
+    #[serial]
+    fn try_flush_skips_when_lock_held() {
+        let _h = temp_home();
+        let s = std::sync::Arc::new(ActiveSession::open_new().unwrap());
+        let guard = s.inner.lock().unwrap();
+        assert!(
+            !s.try_flush().unwrap(),
+            "held lock must be skipped, not deadlock"
+        );
+        drop(guard);
+        assert!(s.try_flush().unwrap());
     }
 }
