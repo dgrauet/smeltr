@@ -2198,6 +2198,7 @@ dependencies = [
  "anyhow",
  "ciborium",
  "clap",
+ "libc",
  "serde",
  "serial_test",
  "smeltr-core",

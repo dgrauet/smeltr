@@ -4,6 +4,7 @@ pub mod flight_recorder;
 pub mod panic_flush;
 pub mod probes;
 pub mod protocol;
+pub mod recovery;
 pub mod server;
 pub mod session_router;
 pub mod sessions;
