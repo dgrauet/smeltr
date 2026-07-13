@@ -39,6 +39,13 @@ pub struct RenderCtx {
     pub show_models: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayGauge {
+    pub playing: bool,
+    pub position_ns: u64,
+    pub duration_ns: u64,
+}
+
 /// App-level display overlays threaded to the renderer (kept out of the `Copy`
 /// `RenderCtx`). All `None` by default.
 #[derive(Debug, Default, Clone, Copy)]
@@ -46,6 +53,7 @@ pub struct RenderOverlay<'a> {
     pub status: Option<&'a str>,
     pub filter: Option<&'a str>,
     pub filtering: Option<&'a str>,
+    pub replay: Option<ReplayGauge>,
 }
 
 /// Case-insensitive substring match over a notice's kind + summary.
@@ -53,6 +61,29 @@ pub fn matches_filter(entry: &crate::state::LogEntry, query: &str) -> bool {
     format!("{} {}", entry.kind, entry.summary)
         .to_lowercase()
         .contains(&query.to_lowercase())
+}
+
+fn mmss(ns: u64) -> String {
+    let total = ns / 1_000_000_000;
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+/// One-line scrub gauge for the replay title, e.g. `▶ 01:05 / 02:10 [####----]`.
+pub fn format_gauge(g: ReplayGauge) -> String {
+    let icon = if g.playing { "▶" } else { "⏸" };
+    let bar_len = 16usize;
+    let filled = if g.duration_ns == 0 {
+        0
+    } else {
+        ((g.position_ns as f64 / g.duration_ns as f64) * bar_len as f64).round() as usize
+    }
+    .min(bar_len);
+    let bar: String = "#".repeat(filled) + &"-".repeat(bar_len - filled);
+    format!(
+        "{icon} {} / {} [{bar}]",
+        mmss(g.position_ns),
+        mmss(g.duration_ns)
+    )
 }
 
 pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, overlay: RenderOverlay) {
@@ -64,7 +95,7 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, overlay: Rende
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(1)])
             .split(area);
-        render_timeline(frame, outer[0], state, ctx, overlay.status);
+        render_timeline(frame, outer[0], state, ctx, overlay.status, overlay.replay);
         crate::models::render(frame, outer[1], state);
         return;
     }
@@ -93,7 +124,7 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, overlay: Rende
             .split(area)
     };
 
-    render_timeline(frame, outer[0], state, ctx, overlay.status);
+    render_timeline(frame, outer[0], state, ctx, overlay.status, overlay.replay);
 
     let mid_rows = Layout::default()
         .direction(Direction::Vertical)
@@ -152,6 +183,7 @@ fn render_timeline(
     state: &UiState,
     ctx: RenderCtx,
     status: Option<&str>,
+    replay: Option<ReplayGauge>,
 ) {
     let pause_tag = if ctx.paused { " [PAUSED]" } else { "" };
     let title = format!(
@@ -163,6 +195,10 @@ fn render_timeline(
     );
     let title = match status {
         Some(s) => format!("{title} \u{00b7} {s}"),
+        None => title,
+    };
+    let title = match replay {
+        Some(g) => format!("{title} — {}", format_gauge(g)),
         None => title,
     };
     let data: Vec<u64> = state
@@ -378,5 +414,33 @@ mod tests {
         assert!(super::matches_filter(&e, "metalerror")); // kind, lowercased
         assert!(super::matches_filter(&e, "BUFFER 7")); // spans within summary
         assert!(!super::matches_filter(&e, "softmax")); // no match
+    }
+
+    #[test]
+    fn format_gauge_shows_position_duration_and_state() {
+        let g = super::ReplayGauge {
+            playing: true,
+            position_ns: 65_000_000_000,
+            duration_ns: 130_000_000_000,
+        };
+        let s = super::format_gauge(g);
+        assert!(s.contains("01:05"), "got {s}");
+        assert!(s.contains("02:10"), "got {s}");
+        assert!(s.contains("▶"), "got {s}");
+        let p = super::format_gauge(super::ReplayGauge {
+            playing: false,
+            ..g
+        });
+        assert!(p.contains("⏸"), "got {p}");
+    }
+
+    #[test]
+    fn format_gauge_empty_session() {
+        let s = super::format_gauge(super::ReplayGauge {
+            playing: false,
+            position_ns: 0,
+            duration_ns: 0,
+        });
+        assert!(s.contains("00:00 / 00:00"), "got {s}");
     }
 }

@@ -134,6 +134,11 @@ impl App {
                     status: self.status.as_deref(),
                     filter: self.filter.as_deref(),
                     filtering: self.filtering.as_deref(),
+                    replay: self.scrub.as_ref().map(|s| crate::render::ReplayGauge {
+                        playing: !self.paused,
+                        position_ns: s.position_ns(),
+                        duration_ns: s.duration_ns(),
+                    }),
                 };
                 term.draw(|f| render(f, &self.state, ctx, overlay))?;
                 last_draw = Instant::now();
