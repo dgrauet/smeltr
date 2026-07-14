@@ -55,6 +55,16 @@ impl App {
         self.scrub = Some(scrub);
     }
 
+    /// Gauge state for the replay title; None in live mode.
+    fn replay_gauge(&self) -> Option<crate::render::ReplayGauge> {
+        self.scrub.as_ref().map(|s| crate::render::ReplayGauge {
+            playing: !self.paused,
+            at_end: s.at_end(),
+            position_ns: s.position_ns(),
+            duration_ns: s.duration_ns(),
+        })
+    }
+
     fn apply_seek(
         &mut self,
         f: impl FnOnce(&mut crate::scrub::ScrubState) -> crate::scrub::SeekOutcome,
@@ -143,11 +153,7 @@ impl App {
                     status: self.status.as_deref(),
                     filter: self.filter.as_deref(),
                     filtering: self.filtering.as_deref(),
-                    replay: self.scrub.as_ref().map(|s| crate::render::ReplayGauge {
-                        playing: !self.paused,
-                        position_ns: s.position_ns(),
-                        duration_ns: s.duration_ns(),
-                    }),
+                    replay: self.replay_gauge(),
                 };
                 term.draw(|f| render(f, &self.state, ctx, overlay))?;
                 last_draw = Instant::now();
@@ -285,6 +291,16 @@ mod tests {
         assert_eq!(app.state.log_feed.len(), 10);
         app.handle_key(KeyCode::Home, KeyModifiers::NONE);
         assert_eq!(app.scrub.as_ref().unwrap().position_ns(), 0);
+    }
+
+    #[test]
+    fn gauge_reports_end_state_after_end_key() {
+        let mut app = replay_app();
+        assert!(!app.replay_gauge().unwrap().at_end);
+        app.handle_key(KeyCode::End, KeyModifiers::NONE);
+        assert!(app.replay_gauge().unwrap().at_end, "End key must surface ■");
+        let live = App::new("live");
+        assert!(live.replay_gauge().is_none());
     }
 
     #[test]

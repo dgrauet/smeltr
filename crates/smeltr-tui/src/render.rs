@@ -42,6 +42,8 @@ pub struct RenderCtx {
 #[derive(Debug, Clone, Copy)]
 pub struct ReplayGauge {
     pub playing: bool,
+    /// Timeline fully played: shows `■` regardless of `playing`.
+    pub at_end: bool,
     pub position_ns: u64,
     pub duration_ns: u64,
 }
@@ -63,14 +65,27 @@ pub fn matches_filter(entry: &crate::state::LogEntry, query: &str) -> bool {
         .contains(&query.to_lowercase())
 }
 
+/// `mm:ss` under an hour, `h:mm:ss` from one hour up (smeltr sessions
+/// routinely exceed an hour — "90:00" reads as ambiguous).
 fn mmss(ns: u64) -> String {
     let total = ns / 1_000_000_000;
-    format!("{:02}:{:02}", total / 60, total % 60)
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
 }
 
 /// One-line scrub gauge for the replay title, e.g. `▶ 01:05 / 02:10 [####----]`.
 pub fn format_gauge(g: ReplayGauge) -> String {
-    let icon = if g.playing { "▶" } else { "⏸" };
+    let icon = if g.at_end {
+        "■"
+    } else if g.playing {
+        "▶"
+    } else {
+        "⏸"
+    };
     let bar_len = 16usize;
     let filled = if g.duration_ns == 0 {
         0
@@ -417,9 +432,33 @@ mod tests {
     }
 
     #[test]
+    fn mmss_rolls_over_to_hours() {
+        assert_eq!(super::mmss(0), "00:00");
+        assert_eq!(super::mmss(65_000_000_000), "01:05");
+        assert_eq!(super::mmss(3_599_000_000_000), "59:59");
+        assert_eq!(super::mmss(5_400_000_000_000), "1:30:00");
+        assert_eq!(super::mmss(7_325_000_000_000), "2:02:05");
+    }
+
+    #[test]
+    fn format_gauge_shows_stop_icon_at_end_regardless_of_playing() {
+        for playing in [true, false] {
+            let s = super::format_gauge(super::ReplayGauge {
+                playing,
+                at_end: true,
+                position_ns: 130_000_000_000,
+                duration_ns: 130_000_000_000,
+            });
+            assert!(s.contains('■'), "playing={playing}: got {s}");
+            assert!(!s.contains('▶') && !s.contains('⏸'), "got {s}");
+        }
+    }
+
+    #[test]
     fn format_gauge_shows_position_duration_and_state() {
         let g = super::ReplayGauge {
             playing: true,
+            at_end: false,
             position_ns: 65_000_000_000,
             duration_ns: 130_000_000_000,
         };
@@ -438,6 +477,7 @@ mod tests {
     fn format_gauge_empty_session() {
         let s = super::format_gauge(super::ReplayGauge {
             playing: false,
+            at_end: false,
             position_ns: 0,
             duration_ns: 0,
         });
