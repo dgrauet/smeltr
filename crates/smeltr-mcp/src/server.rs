@@ -98,23 +98,86 @@ pub fn list_session_resource_uris() -> Result<Vec<String>, ToolError> {
         .collect())
 }
 
-/// Reads a session resource URI `smeltr://session/<dir_name>` and returns
-/// `{ metadata, events }` as JSON.
+/// The URI templates advertised via `resources/templates/list`:
+/// `(uri_template, name, description)`. `{ref}` accepts a session directory
+/// name, an 8-hex short id, a full UUID, or a `SessionMetadata.name`.
+pub fn session_resource_templates() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            "smeltr://session/{ref}",
+            "session-full",
+            "Full session dump: { metadata, events }. Heavy — prefer the \
+             /metadata or /summary views for a quick look.",
+        ),
+        (
+            "smeltr://session/{ref}/metadata",
+            "session-metadata",
+            "Session metadata only (id, timestamps, argv, name, exit code).",
+        ),
+        (
+            "smeltr://session/{ref}/summary",
+            "session-summary",
+            "Analyzer report + event count — same content as the \
+             get_session_summary tool.",
+        ),
+    ]
+}
+
+/// Reads `smeltr://session/<ref>[/<view>]`. `<ref>` is tried as an exact
+/// session directory name first (backward compatibility with the concrete
+/// URIs from `list_resources`), then through `resolve_session` (short id,
+/// UUID, or name). Views: none → `{ metadata, events }`; `metadata`;
+/// `summary`.
 pub fn read_session_resource(uri: &str) -> Result<serde_json::Value, ToolError> {
-    let dir_name = uri
+    let rest = uri
         .strip_prefix("smeltr://session/")
         .ok_or_else(|| ToolError::BadArgs(format!("not a smeltr URI: {uri:?}")))?;
+    let (r#ref, view) = match rest.split_once('/') {
+        Some((r, v)) => (r, Some(v)),
+        None => (rest, None),
+    };
+    if r#ref.is_empty() {
+        return Err(ToolError::BadArgs(format!("empty session ref: {uri:?}")));
+    }
+
+    // Exact dir_name first, then the shared session resolver.
     let dirs = smeltr_core::reader::list_sessions()?;
-    let dir = dirs
+    let dir = match dirs
         .into_iter()
-        .find(|d| d.file_name().and_then(|n| n.to_str()) == Some(dir_name))
-        .ok_or_else(|| ToolError::NotFound(uri.to_string()))?;
-    let metadata = smeltr_core::reader::read_metadata(&dir).ok();
-    let events = smeltr_core::reader::read_events(&dir)?;
-    Ok(json!({
-        "metadata": metadata,
-        "events": events,
-    }))
+        .find(|d| d.file_name().and_then(|n| n.to_str()) == Some(r#ref))
+    {
+        Some(d) => d,
+        None => crate::types::resolve_session(r#ref)?,
+    };
+
+    match view {
+        None => {
+            let metadata = smeltr_core::reader::read_metadata(&dir).ok();
+            let events = smeltr_core::reader::read_events(&dir)?;
+            Ok(json!({ "metadata": metadata, "events": events }))
+        }
+        Some("metadata") => {
+            let metadata = smeltr_core::reader::read_metadata(&dir)?;
+            serde_json::to_value(metadata).map_err(|e| ToolError::BadArgs(e.to_string()))
+        }
+        Some("summary") => {
+            // resolve_session matches dir names via a `contains` suffix
+            // check, so re-entering the tool with the dir name we already
+            // resolved works even when `ref` was a short id.
+            let dir_name = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| ToolError::NotFound(uri.to_string()))?
+                .to_string();
+            let resp = crate::tools::session_summary::run(crate::tools::session_summary::Params {
+                session: dir_name,
+            })?;
+            serde_json::to_value(resp).map_err(|e| ToolError::BadArgs(e.to_string()))
+        }
+        Some(other) => Err(ToolError::BadArgs(format!(
+            "unknown session view {other:?}: expected \"metadata\" or \"summary\""
+        ))),
+    }
 }
 
 // -- rmcp wiring ------------------------------------------------------------
@@ -422,5 +485,92 @@ mod tests {
     #[test]
     fn subscribe_live_in_tool_list() {
         assert!(tool_list().iter().any(|t| t.name == "subscribe_live"));
+    }
+
+    #[test]
+    fn session_resource_templates_lists_three_ref_templates() {
+        let t = session_resource_templates();
+        assert_eq!(t.len(), 3);
+        let uris: Vec<&str> = t.iter().map(|(u, _, _)| *u).collect();
+        assert!(uris.contains(&"smeltr://session/{ref}"));
+        assert!(uris.contains(&"smeltr://session/{ref}/metadata"));
+        assert!(uris.contains(&"smeltr://session/{ref}/summary"));
+        for (u, name, desc) in &t {
+            assert!(u.contains("{ref}"), "{u}");
+            assert!(!name.is_empty() && !desc.is_empty());
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_resource_metadata_view_returns_metadata_only() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let w = SessionWriter::create(meta).unwrap();
+        let dir_name = w.dir().file_name().unwrap().to_string_lossy().to_string();
+        drop(w);
+        let v = read_session_resource(&format!("smeltr://session/{dir_name}/metadata")).unwrap();
+        assert!(
+            v.get("session_id").is_some(),
+            "metadata JSON expected, got {v}"
+        );
+        assert!(v.get("events").is_none(), "must NOT include events");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_resource_summary_view_returns_report_and_count() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let w = SessionWriter::create(meta).unwrap();
+        let dir_name = w.dir().file_name().unwrap().to_string_lossy().to_string();
+        drop(w);
+        let v = read_session_resource(&format!("smeltr://session/{dir_name}/summary")).unwrap();
+        assert!(v.get("report").is_some(), "got {v}");
+        assert!(v.get("event_count").is_some(), "got {v}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_resource_resolves_short_id_ref() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let w = SessionWriter::create(meta).unwrap();
+        drop(w);
+        let short = id.short();
+        let v = read_session_resource(&format!("smeltr://session/{short}/metadata")).unwrap();
+        assert!(
+            v.get("session_id").is_some(),
+            "short-id ref must resolve, got {v}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_resource_unknown_view_is_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let w = SessionWriter::create(meta).unwrap();
+        let dir_name = w.dir().file_name().unwrap().to_string_lossy().to_string();
+        drop(w);
+        let r = read_session_resource(&format!("smeltr://session/{dir_name}/nope"));
+        assert!(matches!(r, Err(ToolError::BadArgs(_))), "{r:?}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_resource_unknown_ref_is_not_found() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let r = read_session_resource("smeltr://session/deadbeef/metadata");
+        assert!(matches!(r, Err(ToolError::NotFound(_))), "{r:?}");
     }
 }
