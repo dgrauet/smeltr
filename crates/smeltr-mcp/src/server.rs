@@ -338,8 +338,8 @@ impl ServerHandler for SmeltrMcpServer {
              Resource templates: smeltr://session/{ref} (full dump), .../metadata, .../summary \
              — {ref} = dir name, 8-hex short id, UUID, or session name.\n\
              \n\
-             The server emits notifications/resources/list_changed when new sessions appear — \
-             subscribed clients need not poll list_sessions.",
+             The server emits notifications/resources/list_changed when the set of sessions \
+             changes — connected clients need not poll list_sessions.",
         )
     }
 
