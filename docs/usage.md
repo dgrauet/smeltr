@@ -509,6 +509,9 @@ MCP resources: sessions are exposed as `smeltr://session/{ref}` (full dump),
 plus lightweight `.../metadata` and `.../summary` views; `{ref}` accepts a
 directory name, 8-hex short id, full UUID, or session name.
 
+The MCP server declares resources.listChanged and notifies connected clients
+within ~2 s when a new session lands on disk.
+
 From any Claude session, you can then ask things like:
 - "List my smeltr sessions"
 - "Compare sessions A and B"

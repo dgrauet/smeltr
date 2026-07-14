@@ -336,7 +336,10 @@ impl ServerHandler for SmeltrMcpServer {
              `smeltr.scope(\"name\")` for semantic GPU-time attribution.\n\
              \n\
              Resource templates: smeltr://session/{ref} (full dump), .../metadata, .../summary \
-             — {ref} = dir name, 8-hex short id, UUID, or session name.",
+             — {ref} = dir name, 8-hex short id, UUID, or session name.\n\
+             \n\
+             The server emits notifications/resources/list_changed when new sessions appear — \
+             subscribed clients need not poll list_sessions.",
         )
     }
 
