@@ -3,6 +3,7 @@
 
 #include <fcntl.h>
 #include <mach/mach_time.h>
+#include <os/lock.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -20,10 +21,16 @@ struct smeltr_ring {
     uint64_t mask;
     smeltr_ring_header_t *hdr;
     uint8_t *data;
+    /* Serializes write_frame: the hook writes from app threads, Metal
+     * completion queues and alloc/free hooks concurrently; unsynchronized
+     * writers tear frames and poison the stream (#113). */
+    os_unfair_lock lock;
 };
 
 static inline _Atomic uint64_t *as_atomic64(void *p) { return (_Atomic uint64_t *)p; }
-static inline size_t round8(size_t n) { return (n + 7) & ~(size_t)7; }
+static inline size_t round_align(size_t n) {
+    return (n + (SMELTR_FRAME_ALIGN - 1)) & ~(size_t)(SMELTR_FRAME_ALIGN - 1);
+}
 
 smeltr_ring_t *smeltr_ring_open(const char *path) {
     int fd = open(path, O_RDWR);
@@ -45,6 +52,7 @@ smeltr_ring_t *smeltr_ring_open(const char *path) {
     r->mask = r->capacity - 1;
     r->hdr = hdr;
     r->data = r->map + sizeof(smeltr_ring_header_t);
+    r->lock = OS_UNFAIR_LOCK_INIT;
     return r;
 }
 
@@ -61,10 +69,9 @@ uint64_t smeltr_mono_ns(void) {
     return mach_absolute_time() * tb.numer / tb.denom;
 }
 
-static void write_frame(smeltr_ring_t *r, uint32_t kind, uint64_t ts,
-                        const uint8_t *payload, size_t payload_len) {
-    if (!r) return;
-    size_t frame_len = round8(sizeof(smeltr_frame_header_t) + payload_len);
+static void write_frame_locked(smeltr_ring_t *r, uint32_t kind, uint64_t ts,
+                               const uint8_t *payload, size_t payload_len) {
+    size_t frame_len = round_align(sizeof(smeltr_frame_header_t) + payload_len);
 
     _Atomic uint64_t *p_head    = as_atomic64(&r->hdr->head);
     _Atomic uint64_t *p_tail    = as_atomic64(&r->hdr->tail);
@@ -81,6 +88,9 @@ static void write_frame(smeltr_ring_t *r, uint32_t kind, uint64_t ts,
     size_t offset = (size_t)(head & r->mask);
     size_t to_end = (size_t)r->capacity - offset;
     if (frame_len > to_end) {
+        /* Unreachable with SMELTR_FRAME_ALIGN >= header size (offsets are
+         * align-multiples, so to_end >= SMELTR_FRAME_ALIGN here); kept as a
+         * defensive drop rather than writing a torn PAD header. */
         if (to_end < sizeof(smeltr_frame_header_t)) {
             atomic_fetch_add_explicit(p_dropped, 1, memory_order_relaxed);
             return;
@@ -88,7 +98,7 @@ static void write_frame(smeltr_ring_t *r, uint32_t kind, uint64_t ts,
         smeltr_frame_header_t pad = { (uint32_t)to_end, SMELTR_KIND_PAD, ts };
         memcpy(r->data + offset, &pad, sizeof(pad));
         atomic_store_explicit(p_head, head + (uint64_t)to_end, memory_order_release);
-        write_frame(r, kind, ts, payload, payload_len);
+        write_frame_locked(r, kind, ts, payload, payload_len);
         return;
     }
 
@@ -100,6 +110,14 @@ static void write_frame(smeltr_ring_t *r, uint32_t kind, uint64_t ts,
                frame_len - sizeof(hdr) - payload_len);
     }
     atomic_store_explicit(p_head, head + (uint64_t)frame_len, memory_order_release);
+}
+
+static void write_frame(smeltr_ring_t *r, uint32_t kind, uint64_t ts,
+                        const uint8_t *payload, size_t payload_len) {
+    if (!r) return;
+    os_unfair_lock_lock(&r->lock);
+    write_frame_locked(r, kind, ts, payload, payload_len);
+    os_unfair_lock_unlock(&r->lock);
 }
 
 #define BUF_PUSH(buf, off, val, sz) do { memcpy((buf) + (off), &(val), (sz)); (off) += (sz); } while (0)
