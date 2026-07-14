@@ -74,9 +74,8 @@ impl App {
         };
         match f(scrub) {
             crate::scrub::SeekOutcome::Forward(r) => {
-                for i in r {
-                    let ev = scrub.events()[i].clone();
-                    self.state.ingest(&ev);
+                for ev in &scrub.events()[r] {
+                    self.state.ingest(ev);
                 }
             }
             crate::scrub::SeekOutcome::Rewind(r) => {
@@ -123,9 +122,8 @@ impl App {
                 last_tick = Instant::now();
                 if !self.paused {
                     let r = scrub.advance(dt);
-                    for i in r {
-                        let ev = scrub.events()[i].clone();
-                        self.state.ingest(&ev);
+                    for ev in &scrub.events()[r] {
+                        self.state.ingest(ev);
                     }
                 }
             } else {

@@ -66,6 +66,20 @@ impl ScrubState {
         self.catch_up()
     }
 
+    /// Moves the clock forward to `target` and returns the crossed slice.
+    fn forward_to(&mut self, target: u64) -> Range<usize> {
+        self.virtual_ns = target;
+        self.catch_up()
+    }
+
+    /// Moves the clock backward to `target`; the returned range always
+    /// starts at 0 (the caller rebuilds state from scratch).
+    fn rewind_to(&mut self, target: u64) -> Range<usize> {
+        self.virtual_ns = target;
+        self.cursor = 0;
+        self.catch_up()
+    }
+
     pub fn seek_by_secs(&mut self, delta: i64) -> SeekOutcome {
         let target = if delta >= 0 {
             self.virtual_ns.saturating_add(delta as u64 * 1_000_000_000)
@@ -75,12 +89,9 @@ impl ScrubState {
         };
         let target = target.min(self.duration_ns());
         if delta < 0 {
-            // Backward seeks always rebuild from scratch
-            let old_pos = self.virtual_ns;
-            self.virtual_ns = target;
-            let r = if target < old_pos {
-                self.cursor = 0;
-                self.catch_up()
+            // Backward seeks always rebuild from scratch.
+            let r = if target < self.virtual_ns {
+                self.rewind_to(target)
             } else {
                 // Clamped to the same position (already at 0): rebuild 0..cursor,
                 // reproducing the current state exactly rather than wiping it.
@@ -88,21 +99,16 @@ impl ScrubState {
             };
             SeekOutcome::Rewind(r)
         } else {
-            self.virtual_ns = target;
-            SeekOutcome::Forward(self.catch_up())
+            SeekOutcome::Forward(self.forward_to(target))
         }
     }
 
     pub fn seek_to_ns(&mut self, ns: u64) -> SeekOutcome {
         let target = ns.min(self.duration_ns());
         if target >= self.virtual_ns {
-            self.virtual_ns = target;
-            SeekOutcome::Forward(self.catch_up())
+            SeekOutcome::Forward(self.forward_to(target))
         } else {
-            self.virtual_ns = target;
-            self.cursor = 0;
-            let r = self.catch_up();
-            SeekOutcome::Rewind(r)
+            SeekOutcome::Rewind(self.rewind_to(target))
         }
     }
 
@@ -117,7 +123,8 @@ impl ScrubState {
         }
     }
 
-    pub fn progress(&self) -> f64 {
+    #[cfg(test)]
+    fn progress(&self) -> f64 {
         let d = self.duration_ns();
         if d == 0 {
             return 0.0;

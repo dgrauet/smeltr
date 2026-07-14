@@ -46,13 +46,7 @@ impl FlightRecorder {
     /// Panic-safe snapshot: never blocks, never panics. Returns `None` only
     /// when another thread holds the lock; a poisoned lock is recovered.
     pub fn try_snapshot(&self) -> Option<Vec<Event>> {
-        match self.inner.try_lock() {
-            Ok(q) => Some(q.iter().cloned().collect()),
-            Err(std::sync::TryLockError::Poisoned(p)) => {
-                Some(p.into_inner().iter().cloned().collect())
-            }
-            Err(std::sync::TryLockError::WouldBlock) => None,
-        }
+        crate::sync_util::try_lock_recover(&self.inner).map(|q| q.iter().cloned().collect())
     }
 
     pub fn len(&self) -> usize {

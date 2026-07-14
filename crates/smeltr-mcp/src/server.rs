@@ -164,15 +164,10 @@ pub fn read_session_resource(uri: &str) -> Result<serde_json::Value, ToolError> 
         return Err(ToolError::BadArgs(format!("empty session ref: {uri:?}")));
     }
 
-    // Exact dir_name first, then the shared session resolver.
-    let dirs = smeltr_core::reader::list_sessions()?;
-    let dir = match dirs
-        .into_iter()
-        .find(|d| d.file_name().and_then(|n| n.to_str()) == Some(r#ref))
-    {
-        Some(d) => d,
-        None => crate::types::resolve_session(r#ref)?,
-    };
+    // The shared resolver covers concrete dir names too: dir names are
+    // fixed-width (`YYYY-MM-DD-HHMMSS-<8hex>`), so its substring match can
+    // only equal-match a full dir name — no separate exact-match pass needed.
+    let dir = crate::types::resolve_session(r#ref)?;
 
     match view {
         None => {
