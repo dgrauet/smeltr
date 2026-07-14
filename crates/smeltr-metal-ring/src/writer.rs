@@ -1,6 +1,7 @@
 use crate::error::RingError;
 use crate::wire::{
-    kind, FrameHeader, RingHeader, FRAME_HEADER_BYTES, RING_HEADER_BYTES, RING_MAGIC, RING_VERSION,
+    kind, FrameHeader, RingHeader, FRAME_ALIGN, FRAME_HEADER_BYTES, RING_HEADER_BYTES, RING_MAGIC,
+    RING_VERSION,
 };
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::OpenOptions;
@@ -68,7 +69,8 @@ impl RingWriter {
         ts_mono_ns: u64,
         payload: &[u8],
     ) -> Result<(), RingError> {
-        let frame_len = (FRAME_HEADER_BYTES + payload.len() + 7) & !7usize;
+        let frame_len =
+            (FRAME_HEADER_BYTES + payload.len() + (FRAME_ALIGN - 1)) & !(FRAME_ALIGN - 1);
         let frame_len64 = frame_len as u64;
 
         let tail = self.tail_atomic().load(Ordering::Acquire);
@@ -82,6 +84,9 @@ impl RingWriter {
         let offset = (head & self.mask) as usize;
         let to_end = self.capacity as usize - offset;
         if frame_len > to_end {
+            // Unreachable with FRAME_ALIGN >= FRAME_HEADER_BYTES (offsets are
+            // FRAME_ALIGN-multiples, so to_end >= FRAME_ALIGN here); kept as a
+            // defensive drop rather than writing a torn PAD header.
             if to_end < FRAME_HEADER_BYTES {
                 self.dropped_atomic().fetch_add(1, Ordering::Relaxed);
                 return Ok(());

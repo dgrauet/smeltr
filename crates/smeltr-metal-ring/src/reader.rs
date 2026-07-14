@@ -54,6 +54,14 @@ impl RingReader {
         unsafe { *(self.mmap.as_ptr() as *const RingHeader) }
     }
 
+    /// Pull the next decoded event, or `None` when caught up with the writer.
+    ///
+    /// Never wedges on corruption (torn frames were observed wedging the
+    /// reader forever on the same bytes, #113): a structurally implausible
+    /// frame resyncs the cursor to `head` (abandoning the unread tail), a
+    /// frame with a plausible length but an undecodable body is skipped.
+    /// Either way the error is returned once and the next call makes
+    /// progress.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<DecodedEvent>, RingError> {
         loop {
@@ -64,10 +72,16 @@ impl RingReader {
             }
             let offset = (tail & self.mask) as usize;
             if offset + FRAME_HEADER_BYTES > self.capacity as usize {
+                self.tail_atomic().store(head, Ordering::Release);
                 return Err(RingError::Truncated(tail));
             }
             let hdr = unsafe { *(self.data_ptr().add(offset) as *const FrameHeader) };
-            if hdr.len < FRAME_HEADER_BYTES as u32 {
+            let len = hdr.len as usize;
+            let plausible = len >= FRAME_HEADER_BYTES
+                && offset + len <= self.capacity as usize
+                && tail + hdr.len as u64 <= head;
+            if !plausible {
+                self.tail_atomic().store(head, Ordering::Release);
                 return Err(RingError::Truncated(tail));
             }
             if hdr.kind == kind::PAD {
@@ -75,21 +89,20 @@ impl RingReader {
                     .store(tail + hdr.len as u64, Ordering::Release);
                 continue;
             }
-            let payload_len = hdr.len as usize - FRAME_HEADER_BYTES;
+            let payload_len = len - FRAME_HEADER_BYTES;
             let payload_start = offset + FRAME_HEADER_BYTES;
-            if payload_start + payload_len > self.capacity as usize {
-                return Err(RingError::Truncated(tail));
-            }
             let payload = unsafe {
                 std::slice::from_raw_parts(self.data_ptr().add(payload_start), payload_len)
             };
-            let frame = decode_frame(hdr.kind, payload)?;
+            let decoded = decode_frame(hdr.kind, payload);
             self.tail_atomic()
                 .store(tail + hdr.len as u64, Ordering::Release);
-            return Ok(Some(DecodedEvent {
-                ts_mono_ns: hdr.ts_mono_ns,
-                frame,
-            }));
+            return decoded.map(|frame| {
+                Some(DecodedEvent {
+                    ts_mono_ns: hdr.ts_mono_ns,
+                    frame,
+                })
+            });
         }
     }
 }
