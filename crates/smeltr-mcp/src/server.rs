@@ -98,6 +98,16 @@ pub fn list_session_resource_uris() -> Result<Vec<String>, ToolError> {
         .collect())
 }
 
+/// Sorted set of session directory names — the watcher's change unit.
+/// Empty set when the sessions root does not exist yet.
+pub fn sessions_snapshot() -> std::collections::BTreeSet<String> {
+    smeltr_core::reader::list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|d| d.file_name().and_then(|n| n.to_str()).map(String::from))
+        .collect()
+}
+
 /// The URI templates advertised via `resources/templates/list`:
 /// `(uri_template, name, description)`. `{ref}` accepts a session directory
 /// name, an 8-hex short id, a full UUID, or a `SessionMetadata.name`.
@@ -302,6 +312,7 @@ impl ServerHandler for SmeltrMcpServer {
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_resources_list_changed()
                 .build(),
         )
         .with_server_info(Implementation::new("smeltr-mcp", env!("CARGO_PKG_VERSION")))
@@ -405,7 +416,27 @@ impl ServerHandler for SmeltrMcpServer {
         .with_mime_type("application/json")]))
     }
 
-    async fn on_initialized(&self, _context: NotificationContext<RoleServer>) {}
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        let peer = context.peer.clone();
+        tokio::spawn(async move {
+            let mut prev = sessions_snapshot();
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if peer.is_transport_closed() {
+                    break;
+                }
+                let next = sessions_snapshot();
+                if next != prev {
+                    prev = next;
+                    if peer.notify_resource_list_changed().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Runs the MCP server on stdio.
@@ -456,6 +487,29 @@ mod tests {
         let uris = list_session_resource_uris().unwrap();
         assert_eq!(uris.len(), 1);
         assert!(uris[0].starts_with("smeltr://session/"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn sessions_snapshot_reflects_dir_contents() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        assert!(sessions_snapshot().is_empty(), "no sessions root yet");
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let w = SessionWriter::create(meta).unwrap();
+        let dir_name = w.dir().file_name().unwrap().to_string_lossy().to_string();
+        drop(w);
+        let snap = sessions_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert!(snap.contains(&dir_name));
+    }
+
+    #[test]
+    fn capabilities_declare_resources_list_changed() {
+        let info = SmeltrMcpServer.get_info();
+        let res = info.capabilities.resources.expect("resources capability");
+        assert_eq!(res.list_changed, Some(true));
     }
 
     #[test]
