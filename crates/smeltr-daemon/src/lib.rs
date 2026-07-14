@@ -8,4 +8,5 @@ pub mod recovery;
 pub mod server;
 pub mod session_router;
 pub mod sessions;
+pub(crate) mod sync_util;
 pub mod triggers;

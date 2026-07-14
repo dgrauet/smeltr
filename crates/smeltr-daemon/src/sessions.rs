@@ -178,10 +178,8 @@ impl ActiveSession {
     /// the session lock is held by another thread (skipped); a poisoned lock
     /// is recovered. A finalized session reports Ok(true) (nothing to do).
     pub fn try_flush(&self) -> std::io::Result<bool> {
-        let mut guard = match self.inner.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+        let Some(mut guard) = crate::sync_util::try_lock_recover(&self.inner) else {
+            return Ok(false);
         };
         match guard.as_mut() {
             Some(inner) => inner.writer.flush().map(|_| true),

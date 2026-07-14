@@ -128,12 +128,7 @@ impl SessionRouter {
     /// Returns how many sessions were actually flushed.
     pub fn try_flush_all(&self) -> usize {
         let mut flushed = 0;
-        let guard = match self.by_pid.try_lock() {
-            Ok(g) => Some(g),
-            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-        };
-        if let Some(g) = guard {
+        if let Some(g) = crate::sync_util::try_lock_recover(&self.by_pid) {
             for s in g.values() {
                 if matches!(s.try_flush(), Ok(true)) {
                     flushed += 1;

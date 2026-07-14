@@ -19,16 +19,20 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use std::sync::Arc;
 
-/// Serves the MCP server on an already-bound listener (test seam: lets the
-/// integration test bind port 0). Runs until the task is cancelled.
-pub async fn serve_on(listener: tokio::net::TcpListener) -> std::io::Result<()> {
+/// The MCP-over-HTTP router: `StreamableHttpService` mounted at `/mcp`.
+fn build_router() -> axum::Router {
     let service = StreamableHttpService::new(
         || Ok(SmeltrMcpServer),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
-    let router = axum::Router::new().nest_service("/mcp", service);
-    axum::serve(listener, router).await
+    axum::Router::new().nest_service("/mcp", service)
+}
+
+/// Serves the MCP server on an already-bound listener (test seam: lets the
+/// integration test bind port 0). Runs until the task is cancelled.
+pub async fn serve_on(listener: tokio::net::TcpListener) -> std::io::Result<()> {
+    axum::serve(listener, build_router()).await
 }
 
 /// Binds `addr` (loopback only) and serves Streamable HTTP at /mcp, shutting
@@ -38,13 +42,7 @@ pub async fn run_http(addr: std::net::SocketAddr) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     // The one eprintln a server is allowed: tell the human where it lives.
     eprintln!("smeltr MCP (streamable HTTP) listening on http://{addr}/mcp");
-    let service = StreamableHttpService::new(
-        || Ok(SmeltrMcpServer),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
-    );
-    let router = axum::Router::new().nest_service("/mcp", service);
-    axum::serve(listener, router)
+    axum::serve(listener, build_router())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
