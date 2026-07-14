@@ -103,6 +103,11 @@ CBOR length-prefixed frames over a Unix socket. See
 - `SMELTR_HOOK_DISABLE=1` — kill switch for the metal-hook dylib.
 - `SMELTR_HOOK_FORCE_OS_MAJOR=<n>` — simulate a macOS major version
   (test override; on macOS < 14 the hook auto-skips).
+- `SMELTR_HOOK_SAMPLING_RETRY_MS=<n>` — backoff before retrying stage/dispatch
+  counter sampling after it auto-disabled on sustained sample-buffer alloc
+  failures (default 30000; the disable used to be permanent — #113).
+  `SMELTR_HOOK_TEST_STAGE_ALLOC_FAIL_N=<n>` (test override) forces the next
+  n sample-buffer allocs to fail to exercise that path.
 - `SMELTR_TEST_PANIC_MS=<n>` — test override: the daemon panics in a spawned
   task after n ms. Exercises the black-box panic hook (post-mortem
   `post-mortem-daemon-panic-*` session + `panic-report.txt` + abort);
