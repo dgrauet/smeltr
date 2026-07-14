@@ -40,6 +40,21 @@ static atomic_bool    g_enabled = false;
 static BOOL g_op_capture_enabled = YES;  // toggled by SMELTR_HOOK_NO_OPS
 
 static BOOL g_stage_sampling_enabled = NO;
+// Backoff retry for sampling disables (#113): after sustained sample-buffer
+// alloc failures we disable sampling but schedule a retry instead of losing
+// attribution for the rest of the session (a transient pressure spike at
+// t=36s once cost 60+ min of op timing). Interval override for tests:
+// SMELTR_HOOK_SAMPLING_RETRY_MS (default 30000).
+static uint64_t g_sampling_retry_ns = 30ull * 1000ull * 1000ull * 1000ull;
+static _Atomic uint64_t g_stage_retry_at_ns = 0;
+static _Atomic uint64_t g_dispatch_retry_at_ns = 0;
+static atomic_int  g_stage_alloc_failures = 0;
+static atomic_bool g_stage_alloc_logged = false;
+static atomic_int  g_disp_alloc_failures = 0;
+static atomic_bool g_disp_alloc_logged = false;
+// Test-only (SMELTR_HOOK_TEST_STAGE_ALLOC_FAIL_N): force the next N stage/
+// dispatch sample-buffer allocations to fail, to exercise the backoff path.
+static atomic_int  g_test_fail_sb_allocs = 0;
 // AtDispatchBoundary support (M3+ devices). Probed once at init; the
 // per-dispatch path is only used when the env var SMELTR_HOOK_DISPATCH_BOUNDARY=1
 // is also set. When enabled, replaces the encoder-level stage-boundary
@@ -404,22 +419,46 @@ static void smeltr_setComputePipelineState_swz(id self, SEL cmd, id pso) {
     if (orig) ((void (*)(id, SEL, id))orig)(self, cmd, pso);
 }
 
+/// One caller wins the right to re-enable sampling once the backoff retry
+/// deadline passed. Returns NO when no retry is pending or it is not due.
+static BOOL smeltr_sampling_retry_due(_Atomic uint64_t *retry_at) {
+    uint64_t at = atomic_load_explicit(retry_at, memory_order_relaxed);
+    if (at == 0 || smeltr_mono_ns() < at) return NO;
+    return atomic_compare_exchange_strong(retry_at, &at, 0);
+}
+
+/// Test-only forced alloc failure (SMELTR_HOOK_TEST_STAGE_ALLOC_FAIL_N):
+/// consume one forced failure if any remain.
+static BOOL smeltr_test_consume_forced_alloc_failure(void) {
+    int cur = atomic_load_explicit(&g_test_fail_sb_allocs, memory_order_relaxed);
+    while (cur > 0) {
+        if (atomic_compare_exchange_weak(&g_test_fail_sb_allocs, &cur, cur - 1))
+            return YES;
+    }
+    return NO;
+}
+
 /// Allocate a per-encoder MTLCounterSampleBuffer sized for dispatch-boundary
 /// sampling. Failure path mirrors stage-boundary: throttle the log and
 /// auto-disable g_dispatch_sampling_enabled after 16 consecutive failures
 /// (subsequent encoders fall back to stage-boundary timing).
 static void smeltr_attach_dispatch_sample_buffer(id enc, id<MTLCommandBuffer> cb) {
-    if (!g_dispatch_sampling_enabled) return;
+    if (!g_dispatch_sampling_enabled) {
+        if (!smeltr_sampling_retry_due(&g_dispatch_retry_at_ns)) return;
+        atomic_store(&g_disp_alloc_failures, 0);
+        atomic_store(&g_disp_alloc_logged, false);
+        g_dispatch_sampling_enabled = YES;
+        smeltr_emit_metal_hook_skipped("dispatch sampling re-enabled (backoff retry)");
+    }
     MTLCounterSampleBufferDescriptor *sbd = [MTLCounterSampleBufferDescriptor new];
     sbd.counterSet = g_timestamp_counter_set;
     sbd.storageMode = MTLStorageModeShared;
     sbd.sampleCount = kDispatchBoundarySampleCap;
     NSError *err = nil;
-    id<MTLCounterSampleBuffer> sb =
-        [[cb device] newCounterSampleBufferWithDescriptor:sbd error:&err];
+    id<MTLCounterSampleBuffer> sb = smeltr_test_consume_forced_alloc_failure()
+        ? nil
+        : [[cb device] newCounterSampleBufferWithDescriptor:sbd error:&err];
     if (!sb) {
-        static atomic_int g_disp_alloc_failures = 0;
-        static atomic_bool g_disp_alloc_logged = false;
         int n = atomic_fetch_add(&g_disp_alloc_failures, 1) + 1;
         if (!atomic_exchange(&g_disp_alloc_logged, true)) {
             smeltr_log("dispatch sample buffer alloc failed: %s "
@@ -430,13 +469,16 @@ static void smeltr_attach_dispatch_sample_buffer(id enc, id<MTLCommandBuffer> cb
             BOOL was_enabled = g_dispatch_sampling_enabled;
             g_dispatch_sampling_enabled = NO;
             if (was_enabled) {
+                atomic_store(&g_dispatch_retry_at_ns,
+                             smeltr_mono_ns() + g_sampling_retry_ns);
                 smeltr_emit_metal_hook_skipped(
                     "dispatch sampling disabled after sustained alloc failures "
-                    "(stage-boundary fallback)");
+                    "(stage-boundary fallback; backoff retry scheduled)");
             }
         }
         return;
     }
+    atomic_store(&g_disp_alloc_failures, 0);
     objc_setAssociatedObject(enc, kSmeltrEncoderSBKey, sb,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(enc, kSmeltrEncoderSBIdxKey, @(0u),
@@ -1052,6 +1094,14 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
     id enc;
     id<MTLCounterSampleBuffer> sb_for_this_encoder = nil;
 
+    if (g_op_capture_enabled && !g_stage_sampling_enabled
+        && smeltr_sampling_retry_due(&g_stage_retry_at_ns)) {
+        atomic_store(&g_stage_alloc_failures, 0);
+        atomic_store(&g_stage_alloc_logged, false);
+        g_stage_sampling_enabled = YES;
+        smeltr_emit_metal_hook_skipped("stage sampling re-enabled (backoff retry)");
+    }
+
     // Dispatch-boundary path (M3+, opt-in via SMELTR_HOOK_DISPATCH_BOUNDARY=1):
     // skip the stage-boundary descriptor substitution and attach a per-encoder
     // sample buffer explicitly. Dispatch swizzles will record per-dispatch
@@ -1071,8 +1121,11 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
         sbd.storageMode = MTLStorageModeShared;
         sbd.sampleCount = kStageBoundarySampleCount;
         NSError *err = nil;
-        sb_for_this_encoder = [[cb device] newCounterSampleBufferWithDescriptor:sbd error:&err];
+        sb_for_this_encoder = smeltr_test_consume_forced_alloc_failure()
+            ? nil
+            : [[cb device] newCounterSampleBufferWithDescriptor:sbd error:&err];
         if (sb_for_this_encoder) {
+            atomic_store(&g_stage_alloc_failures, 0);
             MTLComputePassSampleBufferAttachmentDescriptor *att =
                 desc.sampleBufferAttachments[0];
             att.sampleBuffer = sb_for_this_encoder;
@@ -1084,8 +1137,6 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
             // and after N consecutive failures disable stage sampling for the
             // rest of the session; from then on the analyzer falls back to
             // Phase 2.5a per-CB pro-rata attribution.
-            static atomic_int g_stage_alloc_failures = 0;
-            static atomic_bool g_stage_alloc_logged = false;
             int n = atomic_fetch_add(&g_stage_alloc_failures, 1) + 1;
             if (!atomic_exchange(&g_stage_alloc_logged, true)) {
                 smeltr_log("stage sample buffer alloc failed: %s (further failures silenced)",
@@ -1095,8 +1146,11 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                 BOOL was_enabled = g_stage_sampling_enabled;
                 g_stage_sampling_enabled = NO;
                 if (was_enabled) {
+                    atomic_store(&g_stage_retry_at_ns,
+                                 smeltr_mono_ns() + g_sampling_retry_ns);
                     smeltr_emit_metal_hook_skipped(
-                        "stage sampling disabled after sustained alloc failures (pro-rata fallback)");
+                        "stage sampling disabled after sustained alloc failures "
+                        "(pro-rata fallback; backoff retry scheduled)");
                 }
             }
         }
@@ -1391,6 +1445,25 @@ static void smeltr_swizzle_device_class(void) {
         }
     } else {
         smeltr_log("stage_sampling not supported on this device, using 2.5a pro-rata");
+    }
+
+    const char *retry_ms = getenv("SMELTR_HOOK_SAMPLING_RETRY_MS");
+    if (retry_ms) {
+        long v = strtol(retry_ms, NULL, 10);
+        if (v >= 1 && v <= 3600000) {
+            g_sampling_retry_ns = (uint64_t)v * 1000000ull;
+        } else {
+            smeltr_log("SMELTR_HOOK_SAMPLING_RETRY_MS=%s: ignored (out of range 1..3600000)",
+                       retry_ms);
+        }
+    }
+    const char *fail_n = getenv("SMELTR_HOOK_TEST_STAGE_ALLOC_FAIL_N");
+    if (fail_n) {
+        long v = strtol(fail_n, NULL, 10);
+        if (v > 0 && v <= 1000000) {
+            atomic_store(&g_test_fail_sb_allocs, (int)v);
+            smeltr_log("test override: forcing next %ld sample-buffer allocs to fail", v);
+        }
     }
 
     const char *no_ops = getenv("SMELTR_HOOK_NO_OPS");

@@ -54,6 +54,32 @@ fn main() {
     cb.commit();
     cb.wait_until_completed();
 
+    // Optional loop mode for e2e tests that need many encoders spread over
+    // time (e.g. the stage-sampling backoff-retry test). Each iteration goes
+    // through computeCommandEncoderWithDispatchType: — the path the hook
+    // substitutes for stage-boundary sampling.
+    let iters: u32 = std::env::var("SMELTR_HARNESS_ENCODERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let sleep_ms: u64 = std::env::var("SMELTR_HARNESS_SLEEP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    for _ in 0..iters {
+        let cb = queue.new_command_buffer();
+        let encoder = cb.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        encoder.set_compute_pipeline_state(&pso);
+        encoder.set_buffer(0, Some(&out_buf), 0);
+        encoder.dispatch_threads(MTLSize::new(16, 1, 1), MTLSize::new(16, 1, 1));
+        encoder.end_encoding();
+        cb.commit();
+        cb.wait_until_completed();
+        if sleep_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+        }
+    }
+
     // Let the hook flush completion handlers before exit.
     std::thread::sleep(std::time::Duration::from_millis(750));
     println!("harness done");
