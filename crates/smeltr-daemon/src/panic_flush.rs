@@ -10,6 +10,7 @@
 use crate::flight_recorder::FlightRecorder;
 use crate::session_router::SessionRouter;
 use crate::triggers::{self, TriggerReason};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Weak;
 
@@ -22,7 +23,6 @@ pub fn install_panic_hook(router: Weak<SessionRouter>, fr: Weak<FlightRecorder>)
         if PANICKING.swap(true, Ordering::SeqCst) {
             std::process::abort();
         }
-        default_hook(info); // default message + location to stderr
         let message = match info.location() {
             Some(loc) => format!(
                 "{} at {}:{}",
@@ -33,20 +33,29 @@ pub fn install_panic_hook(router: Weak<SessionRouter>, fr: Weak<FlightRecorder>)
             None => payload_message(info.payload()),
         };
         let backtrace = std::backtrace::Backtrace::force_capture().to_string();
-        handle_panic(&message, &backtrace, &router, &fr);
+        // Disk first, console last: a panic anywhere in the hook aborts the
+        // process before the flush (#111 — eprintln! double-panicked on a
+        // dead stderr under ENOSPC and the black box was lost). The default
+        // hook only writes to stderr, so it runs after the flush too.
+        handle_panic(&message, &backtrace, &router, &fr, &mut std::io::stderr());
+        default_hook(info); // default message + location to stderr
         std::process::abort();
     }));
 }
 
 /// Everything the hook does except the final abort (kept separate for tests).
+///
+/// Must never panic: writes to `out` are best-effort (stderr can be dead —
+/// EPIPE under launchd, ENOSPC on full disk) and all disk writes happen
+/// before any console output.
 fn handle_panic(
     message: &str,
     backtrace: &str,
     router: &Weak<SessionRouter>,
     fr: &Weak<FlightRecorder>,
+    out: &mut dyn Write,
 ) {
-    eprintln!("smeltrd panic: {message}");
-    tracing::error!(message, "daemon panic — flushing black box");
+    let mut post_mortem_note = String::new();
     if let Some(fr) = fr.upgrade() {
         let events = fr.try_snapshot().unwrap_or_default();
         let reason = TriggerReason::DaemonPanic {
@@ -55,21 +64,28 @@ fn handle_panic(
         match triggers::flush_post_mortem_events(events, &reason) {
             Ok(summary) => {
                 if let Err(e) = write_panic_report(&summary.session_dir, message, backtrace) {
-                    eprintln!("smeltrd panic: panic-report write failed: {e}");
+                    post_mortem_note = format!("panic-report write failed: {e}");
+                } else {
+                    post_mortem_note = format!(
+                        "black box saved to {} ({} events)",
+                        summary.session_dir.display(),
+                        summary.event_count
+                    );
                 }
-                eprintln!(
-                    "smeltrd panic: black box saved to {} ({} events)",
-                    summary.session_dir.display(),
-                    summary.event_count
-                );
             }
-            Err(e) => eprintln!("smeltrd panic: post-mortem write failed: {e}"),
+            Err(e) => post_mortem_note = format!("post-mortem write failed: {e}"),
         }
     }
-    if let Some(router) = router.upgrade() {
-        let flushed = router.try_flush_all();
-        eprintln!("smeltrd panic: flushed {flushed} session(s)");
+    let flushed = match router.upgrade() {
+        Some(router) => router.try_flush_all(),
+        None => 0,
+    };
+    // Console output only after every disk write is done.
+    let _ = writeln!(out, "smeltrd panic: {message}");
+    if !post_mortem_note.is_empty() {
+        let _ = writeln!(out, "smeltrd panic: {post_mortem_note}");
     }
+    let _ = writeln!(out, "smeltrd panic: flushed {flushed} session(s)");
 }
 
 fn payload_message(payload: &dyn std::any::Any) -> String {
@@ -118,6 +134,17 @@ mod tests {
         assert!(text.contains("bt-line-1"));
     }
 
+    /// Writer that fails every write, like a dead stderr (EPIPE/ENOSPC).
+    struct FailingWriter;
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+    }
+
     #[test]
     #[serial]
     fn handle_panic_writes_post_mortem_and_flushes() {
@@ -126,7 +153,15 @@ mod tests {
         let fr = Arc::new(FlightRecorder::new(std::time::Duration::from_secs(60)));
         let ambient = Arc::new(ActiveSession::open_new_full(Some(fr.clone()), None).unwrap());
         let router = Arc::new(SessionRouter::new(ambient.clone(), Some(fr.clone()), None));
-        handle_panic("boom", "bt", &Arc::downgrade(&router), &Arc::downgrade(&fr));
+        // #111 regression: a failing console writer must not panic nor
+        // prevent the post-mortem flush.
+        handle_panic(
+            "boom",
+            "bt",
+            &Arc::downgrade(&router),
+            &Arc::downgrade(&fr),
+            &mut FailingWriter,
+        );
         let sessions_root = home.path().join("sessions");
         let pm = std::fs::read_dir(&sessions_root)
             .unwrap()
