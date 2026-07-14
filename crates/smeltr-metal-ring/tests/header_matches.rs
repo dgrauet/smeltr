@@ -24,6 +24,14 @@ fn version_matches() {
 }
 
 #[test]
+fn frame_align_matches() {
+    assert!(header_contains(&format!(
+        "SMELTR_FRAME_ALIGN {}u",
+        FRAME_ALIGN
+    )));
+}
+
+#[test]
 fn kinds_match() {
     let pairs = [
         ("SMELTR_KIND_PAD", kind::PAD),

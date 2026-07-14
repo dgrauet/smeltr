@@ -29,6 +29,38 @@ fn count_recovered(home: &Path) -> usize {
         .count()
 }
 
+/// Regression for #111: with a dead stderr (EPIPE on every write), the hook
+/// must still write the post-mortem session + panic report. Before the fix,
+/// the hook's own `eprintln!` double-panicked and aborted before the flush.
+#[test]
+#[serial]
+fn panic_with_dead_stderr_still_saves_black_box() {
+    let home = tempfile::tempdir().unwrap();
+    let sock = home.path().join("smeltrd.sock");
+    let bin = env!("CARGO_BIN_EXE_smeltrd");
+
+    let mut child = std::process::Command::new(bin)
+        .env("SMELTR_HOME", home.path())
+        .env("SMELTR_SOCKET", &sock)
+        .env("SMELTR_TEST_PANIC_MS", "300")
+        // Silence tracing so the only stderr writers are the panic hook and
+        // the default hook — the exact path #111 broke.
+        .env("RUST_LOG", "off")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Drop the read end: every subsequent stderr write in the child fails
+    // with EPIPE (SIGPIPE is ignored in Rust processes).
+    drop(child.stderr.take());
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+
+    let pm = post_mortem_dir(home.path())
+        .expect("post-mortem session must be written even when stderr is dead");
+    let report = std::fs::read_to_string(pm.join("panic-report.txt")).unwrap();
+    assert!(report.contains("SMELTR_TEST_PANIC_MS fired"));
+}
+
 #[test]
 #[serial]
 fn panic_aborts_saves_black_box_and_next_boot_recovers() {

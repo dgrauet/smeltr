@@ -8,6 +8,12 @@
 #define SMELTR_RING_MAGIC   0x534D4C52u   /* "SMLR" */
 #define SMELTR_RING_VERSION 3u
 
+/* Frame lengths are rounded up to this alignment. MUST be >= the frame
+ * header size (16): with 8-byte alignment, head could land 8 bytes before
+ * the wrap boundary -- too small for a PAD header -- and the writer wedged
+ * permanently (#113). Mirrored by FRAME_ALIGN in wire.rs. */
+#define SMELTR_FRAME_ALIGN 16u
+
 #define SMELTR_KIND_PAD            0u
 #define SMELTR_KIND_CB_COMMITTED   1u
 #define SMELTR_KIND_CB_SCHEDULED   2u

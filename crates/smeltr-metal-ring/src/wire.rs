@@ -48,6 +48,15 @@ pub struct FrameHeader {
 pub const RING_HEADER_BYTES: usize = 40;
 pub const FRAME_HEADER_BYTES: usize = 16;
 
+/// Frame lengths are rounded up to this alignment. It must be >= the frame
+/// header size: with 8-byte alignment, `head` could land 8 bytes before the
+/// wrap boundary — too small for a PAD header — and the writer wedged
+/// permanently, dropping every subsequent frame (found on the 2026-07-14
+/// LTX-2 session, #113). Mirrored by SMELTR_FRAME_ALIGN in smeltr_ring.h.
+pub const FRAME_ALIGN: usize = 16;
+
+const _: () = assert!(FRAME_ALIGN >= FRAME_HEADER_BYTES);
+
 const _: () = {
     assert!(std::mem::size_of::<RingHeader>() == RING_HEADER_BYTES);
     assert!(std::mem::size_of::<FrameHeader>() == FRAME_HEADER_BYTES);
