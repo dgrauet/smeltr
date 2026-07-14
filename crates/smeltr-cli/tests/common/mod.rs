@@ -55,20 +55,52 @@ impl DaemonGuard {
     /// socket never appears, distinguishing a dead daemon (exit status in
     /// the message) from one that is merely too slow under load.
     pub fn spawn(home: &Path, sock: &Path) -> Self {
-        let child = Command::new(smeltrd_path())
-            .env("SMELTR_HOME", home)
-            .env("SMELTR_SOCKET", sock)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn smeltrd");
+        // DIAGNOSTIC (issue #101, local-only, not for CI): when
+        // SMELTR_TEST_DAEMON_LOG points at a directory, capture the daemon's
+        // stdout+stderr (tracing writes to stdout) at debug level, and on a
+        // socket-wait failure grab a `sample` stack snapshot of the still-
+        // alive daemon before the guard kills it.
+        let diag_dir = std::env::var("SMELTR_TEST_DAEMON_LOG").ok();
+        let mut cmd = Command::new(smeltrd_path());
+        cmd.env("SMELTR_HOME", home).env("SMELTR_SOCKET", sock);
+        match &diag_dir {
+            Some(dir) => {
+                let tag = format!(
+                    "{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                );
+                let out = std::fs::File::create(format!("{dir}/daemon-{tag}.out")).unwrap();
+                let err = std::fs::File::create(format!("{dir}/daemon-{tag}.err")).unwrap();
+                cmd.env("RUST_LOG", "debug")
+                    .stdout(Stdio::from(out))
+                    .stderr(Stdio::from(err));
+            }
+            None => {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
+        let child = cmd.spawn().expect("spawn smeltrd");
+        let pid = child.id();
         let mut guard = Self::new(child);
         if !wait_for_socket(sock) {
             let cause = match guard.child_mut().and_then(|c| c.try_wait().ok().flatten()) {
                 Some(status) => format!("daemon exited during startup: {status}"),
-                None => "daemon still alive but no socket after the deadline \
-                         (machine overloaded?)"
-                    .to_string(),
+                None => {
+                    if let Some(dir) = &diag_dir {
+                        // Stack snapshot of the hung daemon (2 s sampling).
+                        let _ = Command::new("sample")
+                            .args([&pid.to_string(), "2", "-file"])
+                            .arg(format!("{dir}/daemon-{pid}-hang.sample"))
+                            .output();
+                    }
+                    "daemon still alive but no socket after the deadline \
+                     (machine overloaded?)"
+                        .to_string()
+                }
             };
             panic!("daemon never created its socket — {cause}");
         }
