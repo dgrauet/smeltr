@@ -123,6 +123,20 @@ pub fn session_resource_templates() -> Vec<(&'static str, &'static str, &'static
     ]
 }
 
+/// Maps the pure template data into rmcp model values.
+fn rmcp_resource_templates() -> Vec<ResourceTemplate> {
+    use rmcp::model::AnnotateAble;
+    session_resource_templates()
+        .into_iter()
+        .map(|(uri, name, desc)| {
+            RawResourceTemplate::new(uri, name)
+                .with_description(desc)
+                .with_mime_type("application/json")
+                .no_annotation()
+        })
+        .collect()
+}
+
 /// Reads `smeltr://session/<ref>[/<view>]`. `<ref>` is tried as an exact
 /// session directory name first (backward compatibility with the concrete
 /// URIs from `list_resources`), then through `resolve_session` (short id,
@@ -187,8 +201,9 @@ use std::sync::Arc;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, ErrorData as McpError, Implementation,
-    JsonObject, ListResourcesResult, ListToolsResult, PaginatedRequestParams, RawResource,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    JsonObject, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, RawResource, RawResourceTemplate, ReadResourceRequestParams,
+    ReadResourceResult, Resource, ResourceContents, ResourceTemplate, ServerCapabilities,
     ServerInfo, Tool,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleServer};
@@ -307,7 +322,10 @@ impl ServerHandler for SmeltrMcpServer {
              \n\
              Session refs accept short id (8 hex), full UUID, or SessionMetadata.name. Sessions \
              are recorded via `smeltr record -- <cmd>`; the optional Python sidecar adds \
-             `smeltr.scope(\"name\")` for semantic GPU-time attribution.",
+             `smeltr.scope(\"name\")` for semantic GPU-time attribution.\n\
+             \n\
+             Resource templates: smeltr://session/{ref} (full dump), .../metadata, .../summary \
+             — {ref} = dir name, 8-hex short id, UUID, or session name.",
         )
     }
 
@@ -360,6 +378,16 @@ impl ServerHandler for SmeltrMcpServer {
             })
             .collect();
         Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        Ok(ListResourceTemplatesResult::with_all_items(
+            rmcp_resource_templates(),
+        ))
     }
 
     async fn read_resource(
@@ -498,6 +526,19 @@ mod tests {
         for (u, name, desc) in &t {
             assert!(u.contains("{ref}"), "{u}");
             assert!(!name.is_empty() && !desc.is_empty());
+        }
+    }
+
+    #[test]
+    fn resource_templates_convert_to_rmcp_model() {
+        let templates = rmcp_resource_templates();
+        assert_eq!(templates.len(), 3);
+        assert!(templates
+            .iter()
+            .any(|t| t.raw.uri_template == "smeltr://session/{ref}/summary"));
+        for t in &templates {
+            assert_eq!(t.raw.mime_type.as_deref(), Some("application/json"));
+            assert!(t.raw.description.is_some());
         }
     }
 
