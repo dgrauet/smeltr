@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0](https://github.com/dgrauet/smeltr/compare/v0.16.0...v0.17.0) (2026-07-14)
+
+
+### Features
+
+* **mcp:** resources/list_changed capability + per-connection session watcher ([e28afaf](https://github.com/dgrauet/smeltr/commit/e28afaf3a8058a5e25360ea60e700c57046d56bb))
+* **mcp:** resources/list_changed notifications ([b7c92c8](https://github.com/dgrauet/smeltr/commit/b7c92c83608f42ca5cdc8e9846b1f4323dc64d9e))
+
 ## [0.16.0](https://github.com/dgrauet/smeltr/compare/v0.15.0...v0.16.0) (2026-07-14)
 
 
