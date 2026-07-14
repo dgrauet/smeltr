@@ -1,0 +1,12 @@
+# cargo-deny configuration — dependency scanning (intendant rule RUST_SA002).
+# CI runs `cargo deny check advisories`; run locally with the same command.
+
+[advisories]
+version = 2
+ignore = [
+    # `paste` is unmaintained (informational). It reaches us only through
+    # metal-rs (metal v0.30) in the smeltr-metal-harness test crate; there is
+    # no maintained replacement path short of dropping metal-rs. Re-evaluate
+    # when metal-rs moves off it.
+    "RUSTSEC-2024-0436",
+]
