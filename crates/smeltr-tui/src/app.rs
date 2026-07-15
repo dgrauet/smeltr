@@ -27,6 +27,7 @@ pub struct App {
     pub filter: Option<String>,
     pub filtering: Option<String>,
     pub scrub: Option<crate::scrub::ScrubState>,
+    conn: Option<tokio::sync::watch::Receiver<smeltr_daemon::client::ConnState>>,
 }
 
 impl App {
@@ -43,7 +44,18 @@ impl App {
             filter: None,
             filtering: None,
             scrub: None,
+            conn: None,
         }
+    }
+
+    /// Live mode: watch the bus-client connection state; a persistent
+    /// banner is rendered while reconnecting (#114 — the TUI used to
+    /// freeze silently when the daemon died).
+    pub fn set_conn_watch(
+        &mut self,
+        rx: tokio::sync::watch::Receiver<smeltr_daemon::client::ConnState>,
+    ) {
+        self.conn = Some(rx);
     }
 
     /// Installs the replay timeline. If it starts fully played (--speed 0),
@@ -53,6 +65,16 @@ impl App {
             self.state = crate::state::UiState::rebuild(scrub.events());
         }
         self.scrub = Some(scrub);
+    }
+
+    /// Persistent connection banner; None when connected or in replay mode.
+    fn conn_banner(&self) -> Option<String> {
+        match self.conn.as_ref().map(|c| c.borrow().clone())? {
+            smeltr_daemon::client::ConnState::Connected => None,
+            smeltr_daemon::client::ConnState::Reconnecting { attempt } => Some(format!(
+                "daemon disconnected — reconnecting (attempt {attempt})…"
+            )),
+        }
     }
 
     /// Gauge state for the replay title; None in live mode.
@@ -147,11 +169,13 @@ impl App {
                     show_hot_kernels: self.show_hot_kernels,
                     show_models: self.show_models,
                 };
+                let conn_banner = self.conn_banner();
                 let overlay = RenderOverlay {
                     status: self.status.as_deref(),
                     filter: self.filter.as_deref(),
                     filtering: self.filtering.as_deref(),
                     replay: self.replay_gauge(),
+                    conn_banner: conn_banner.as_deref(),
                 };
                 term.draw(|f| render(f, &self.state, ctx, overlay))?;
                 last_draw = Instant::now();
@@ -492,5 +516,24 @@ mod tests {
         assert_eq!(app.state.events_total, 1);
         app.handle_key(KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(app.state.events_total, 0);
+    }
+
+    /// #114: while the daemon is down the banner is present (and not
+    /// dismissable like `status`); once reconnected it disappears.
+    #[test]
+    fn conn_banner_reflects_watch_state() {
+        let (tx, rx) =
+            tokio::sync::watch::channel(smeltr_daemon::client::ConnState::Reconnecting {
+                attempt: 3,
+            });
+        let mut app = App::new("live");
+        assert!(app.conn_banner().is_none(), "no watch -> no banner");
+        app.set_conn_watch(rx);
+        let banner = app.conn_banner().expect("banner while reconnecting");
+        assert!(banner.contains("reconnecting"), "{banner}");
+        assert!(banner.contains('3'), "{banner}");
+        tx.send(smeltr_daemon::client::ConnState::Connected)
+            .unwrap();
+        assert!(app.conn_banner().is_none(), "connected -> banner cleared");
     }
 }

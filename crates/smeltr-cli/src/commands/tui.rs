@@ -9,13 +9,16 @@ use tokio::sync::mpsc;
 pub async fn run_live() -> Result<()> {
     let sock = socket_path();
     let (tx, rx) = mpsc::channel(1024);
+    let (status_tx, status_rx) =
+        tokio::sync::watch::channel(smeltr_daemon::client::ConnState::Reconnecting { attempt: 0 });
     let sock_path = sock.clone();
     let live_task = tokio::spawn(async move {
-        if let Err(e) = smeltr_tui::live::spawn(&sock_path, tx).await {
+        if let Err(e) = smeltr_tui::live::spawn(&sock_path, tx, status_tx).await {
             eprintln!("live adapter ended: {e}");
         }
     });
-    let app = App::new("live");
+    let mut app = App::new("live");
+    app.set_conn_watch(status_rx);
     let r = app.run(rx).await;
     live_task.abort();
     r.context("tui live")

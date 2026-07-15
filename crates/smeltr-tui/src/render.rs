@@ -56,6 +56,9 @@ pub struct RenderOverlay<'a> {
     pub filter: Option<&'a str>,
     pub filtering: Option<&'a str>,
     pub replay: Option<ReplayGauge>,
+    /// Persistent daemon-connection banner (#114); shown until reconnected,
+    /// unlike `status` which any key dismisses.
+    pub conn_banner: Option<&'a str>,
 }
 
 /// Case-insensitive substring match over a notice's kind + summary.
@@ -110,7 +113,15 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, overlay: Rende
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(1)])
             .split(area);
-        render_timeline(frame, outer[0], state, ctx, overlay.status, overlay.replay);
+        render_timeline(
+            frame,
+            outer[0],
+            state,
+            ctx,
+            overlay.status,
+            overlay.replay,
+            overlay.conn_banner,
+        );
         crate::models::render(frame, outer[1], state);
         return;
     }
@@ -139,7 +150,15 @@ pub fn render(frame: &mut Frame, state: &UiState, ctx: RenderCtx, overlay: Rende
             .split(area)
     };
 
-    render_timeline(frame, outer[0], state, ctx, overlay.status, overlay.replay);
+    render_timeline(
+        frame,
+        outer[0],
+        state,
+        ctx,
+        overlay.status,
+        overlay.replay,
+        overlay.conn_banner,
+    );
 
     let mid_rows = Layout::default()
         .direction(Direction::Vertical)
@@ -192,6 +211,7 @@ fn block(title: String, focused: bool) -> Block<'static> {
         .border_style(style)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_timeline(
     frame: &mut Frame,
     area: Rect,
@@ -199,6 +219,7 @@ fn render_timeline(
     ctx: RenderCtx,
     status: Option<&str>,
     replay: Option<ReplayGauge>,
+    conn_banner: Option<&str>,
 ) {
     let pause_tag = if ctx.paused { " [PAUSED]" } else { "" };
     let title = format!(
@@ -208,6 +229,10 @@ fn render_timeline(
         state.events_total,
         pause_tag,
     );
+    let title = match conn_banner {
+        Some(b) => format!("{title} \u{00b7} \u{26a0} {b}"),
+        None => title,
+    };
     let title = match status {
         Some(s) => format!("{title} \u{00b7} {s}"),
         None => title,
