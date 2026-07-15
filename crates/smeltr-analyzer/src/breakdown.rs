@@ -161,19 +161,18 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         v
     };
 
-    // 2.5. Index MetalCbOps by cb_id.
-    let mut cb_ops_index: HashMap<u64, Vec<OpSample>> = HashMap::new();
-    let mut seen_any_cb_ops = false;
-    for ev in &events {
-        if let Payload::MetalCbOps { cb_id, ops } = &ev.payload {
-            seen_any_cb_ops = true;
-            cb_ops_index.insert(*cb_id, ops.clone());
-        }
-    }
-
-    // 3. Pair MetalCbCommitted/Completed by cb_id.
+    // 3. Pair MetalCbCommitted/Completed and attach each MetalCbOps to the
+    // completion it belongs to — chronologically, NOT via a session-wide
+    // cb_id index: cb_id is the CB *pointer* and Metal recycles CB
+    // allocations, so one id spans many lifetimes (#127 — the old index
+    // attributed the last lifetime's ops to every completion sharing the
+    // pointer, multiplying op time ~×29 on a real run). The hook emits
+    // CbOps immediately after the matching CbCompleted.
     let mut cb_commit_ts: HashMap<u64, u64> = HashMap::new();
-    let mut cb_completed: Vec<(u64, u64, u64)> = Vec::new(); // (cb_id, commit_ts, in_flight_ns)
+    // (cb_id, commit_ts, in_flight_ns, ops)
+    let mut cb_completed: Vec<(u64, u64, u64, Option<Vec<OpSample>>)> = Vec::new();
+    let mut last_completed_idx: HashMap<u64, usize> = HashMap::new();
+    let mut seen_any_cb_ops = false;
     for ev in &events {
         match &ev.payload {
             Payload::MetalCbCommitted { cb_id, .. } => {
@@ -185,7 +184,14 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 ..
             } => {
                 if let Some(commit_ts) = cb_commit_ts.remove(cb_id) {
-                    cb_completed.push((*cb_id, commit_ts, *in_flight_ns));
+                    last_completed_idx.insert(*cb_id, cb_completed.len());
+                    cb_completed.push((*cb_id, commit_ts, *in_flight_ns, None));
+                }
+            }
+            Payload::MetalCbOps { cb_id, ops } => {
+                seen_any_cb_ops = true;
+                if let Some(&i) = last_completed_idx.get(cb_id) {
+                    cb_completed[i].3 = Some(ops.clone());
                 }
             }
             _ => {}
@@ -201,11 +207,11 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         (0..eval_intervals.len()).map(|_| HashMap::new()).collect();
     let mut unscoped_ops: HashMap<String, OpAgg> = HashMap::new();
     let mut ops_cbs_without_samples: u64 = 0;
-    for (cb_id, commit_ts, ns) in &cb_completed {
+    for (_cb_id, commit_ts, ns, ops_for_cb) in &cb_completed {
         let idx = eval_intervals
             .iter()
             .position(|e| e.t_in <= *commit_ts && *commit_ts <= e.t_out);
-        let ops_for_cb = cb_ops_index.get(cb_id);
+        let ops_for_cb = ops_for_cb.as_ref();
         if seen_any_cb_ops && ops_for_cb.is_none() {
             ops_cbs_without_samples += 1;
         }
@@ -692,6 +698,118 @@ mod tests {
             gpu_ns,
             count,
         }
+    }
+
+    /// #127: Metal recycles CB allocations, so the same cb_id (pointer) is
+    /// reused by successive CBs. Each lifetime's MetalCbOps must be
+    /// attributed exactly once, to its own eval window — not the last
+    /// lifetime's ops to every completion sharing the pointer.
+    #[test]
+    fn recycled_cb_ids_attribute_each_lifetime_once() {
+        let mk_eval = |seq: u64, call_id: u64, t_in: u64, t_out: u64| {
+            vec![
+                ev(
+                    seq,
+                    t_in,
+                    Payload::MlxEvalEntered {
+                        call_id,
+                        array_count: 1,
+                        stream: "gpu".into(),
+                        module_stack: vec![1],
+                        stack_frames: vec![],
+                    },
+                    Source::PythonSidecar,
+                ),
+                ev(
+                    seq + 1,
+                    t_out,
+                    Payload::MlxEvalReturned {
+                        call_id,
+                        duration_ns: t_out - t_in,
+                        was_async: false,
+                    },
+                    Source::PythonSidecar,
+                ),
+            ]
+        };
+        let mk_cb = |seq: u64, ts: u64, cb_id: u64, op: &str, gpu_ns: u64| {
+            vec![
+                ev(
+                    seq,
+                    ts,
+                    Payload::MetalCbCommitted {
+                        cb_id,
+                        queue_id: 1,
+                        queue_depth: 1,
+                        label: None,
+                    },
+                    Source::MetalHook,
+                ),
+                ev(
+                    seq + 1,
+                    ts + 5,
+                    Payload::MetalCbCompleted {
+                        cb_id,
+                        queue_id: 1,
+                        status: 4,
+                        error_code: None,
+                        error_domain: None,
+                        in_flight_ns: 5,
+                    },
+                    Source::MetalHook,
+                ),
+                ev(
+                    seq + 2,
+                    ts + 6,
+                    Payload::MetalCbOps {
+                        cb_id,
+                        ops: vec![op_sample(op, gpu_ns, 1)],
+                    },
+                    Source::MetalHook,
+                ),
+            ]
+        };
+        let mut events = vec![ev(
+            1,
+            0,
+            Payload::ModuleEntered {
+                module_call_id: 1,
+                module_def_id: 1,
+                qualname: "m".into(),
+                class_name: "M".into(),
+                parent_call_id: None,
+                depth: 0,
+                fields: Default::default(),
+            },
+            Source::PythonSidecar,
+        )];
+        // Two eval windows; ONE cb_id (0x9) recycled across both, with
+        // different ops in each lifetime.
+        events.extend(mk_eval(10, 7, 100, 200));
+        events.extend(mk_cb(20, 110, 0x9, "OpFirst", 111));
+        events.extend(mk_eval(30, 8, 300, 400));
+        events.extend(mk_cb(40, 310, 0x9, "OpSecond", 222));
+        events.push(ev(
+            50,
+            500,
+            Payload::ModuleReturned { module_call_id: 1 },
+            Source::PythonSidecar,
+        ));
+
+        let root = compute(events).unwrap();
+        let m = find_child(&root, "m");
+        let first = m.ops.iter().find(|o| o.name == "OpFirst");
+        let second = m.ops.iter().find(|o| o.name == "OpSecond");
+        assert!(
+            first.is_some_and(|o| o.gpu_ns == 111 && o.count == 1),
+            "first lifetime's ops must be attributed once: {:?}",
+            m.ops
+        );
+        assert!(
+            second.is_some_and(|o| o.gpu_ns == 222 && o.count == 1),
+            "second lifetime's ops must be attributed once: {:?}",
+            m.ops
+        );
     }
 
     fn find_child<'a>(root: &'a ModuleBreakdown, qualname: &str) -> &'a ModuleBreakdown {
