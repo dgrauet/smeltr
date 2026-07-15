@@ -277,6 +277,22 @@ static void smeltr_dump_command_queue_methods(void) {
 
 static const void *kSmeltrQueueDepthKey = &kSmeltrQueueDepthKey;
 static const void *kSmeltrCbCommitTsKey = &kSmeltrCbCommitTsKey;
+// #112: two interception points can see the same commit — the concrete CB
+// class's `commit` swizzle (outer) and the queue-level private
+// `commitCommandBuffer:wake:` swizzle (called synchronously from inside the
+// original commit). Whichever runs first marks the CB; the other skips its
+// whole tracking block, so each commit emits exactly one
+// CB_COMMITTED/CB_COMPLETED/CB_OPS set and takes exactly one depth +1/-1.
+static const void *kSmeltrCbTrackedKey = &kSmeltrCbTrackedKey;
+
+/// Returns YES exactly once per CB (nested calls happen on one thread, so a
+/// plain associated-object check is race-free).
+static BOOL smeltr_cb_mark_tracked(id cb) {
+    if (objc_getAssociatedObject(cb, kSmeltrCbTrackedKey)) return NO;
+    objc_setAssociatedObject(cb, kSmeltrCbTrackedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
+}
 
 /* In-flight CB tracking for warning timer. Keys: NSNumber(cb_id). Values:
    NSNumber(commit_ts) — set to 0 when already warned (one-shot). Always
@@ -909,7 +925,8 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
 - (void)smeltr_commit {
     SMELTR_TRACE("swizzled_commit hit on class=%s cb=%p",
                  class_getName([self class]), self);
-    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring) {
+    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring
+        && smeltr_cb_mark_tracked(self)) {
         @try {
             id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
             id<MTLCommandQueue> q = [cb commandQueue];
@@ -1540,14 +1557,6 @@ static void smeltr_warn_init(void) {
 static id   (*orig_cmdBufferWithDescriptor)(id, SEL, id) = NULL;
 static void (*orig_commitCommandBufferWake)(id, SEL, id, BOOL) = NULL;
 
-static uint32_t smeltr_queue_depth(id queue) {
-    SEL sel = sel_registerName("numCommandBuffers");
-    if (![queue respondsToSelector:sel]) return 0;
-    NSUInteger (*impl)(id, SEL) =
-        (NSUInteger (*)(id, SEL))[queue methodForSelector:sel];
-    return (uint32_t)impl(queue, sel);
-}
-
 static id smeltr_swz_cmdBufferWithDescriptor(id self, SEL _cmd, id desc) {
     id cb = orig_cmdBufferWithDescriptor(self, _cmd, desc);
     SMELTR_TRACE("_MTLCommandQueue.commandBufferWithDescriptor: queue=%p cb=%p",
@@ -1561,12 +1570,18 @@ static id smeltr_swz_cmdBufferWithDescriptor(id self, SEL _cmd, id desc) {
 static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wake) {
     SMELTR_TRACE("_MTLCommandQueue.commitCommandBuffer:wake: queue=%p cb=%p wake=%d",
                  self, cb, (int)wake);
-    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring && cb) {
+    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring && cb
+        && smeltr_cb_mark_tracked(cb)) {
         @try {
             uint64_t cb_id = (uint64_t)(uintptr_t)cb;
             uint64_t q_id  = (uint64_t)(uintptr_t)self;
             uint64_t commit_ts = smeltr_mono_ns();
-            uint32_t depth = smeltr_queue_depth(self);
+            // Same in-flight counter as the CB-class commit path (+1 here,
+            // -1 in the completion handler) — NOT the queue's private
+            // numCommandBuffers, which is cumulative and inflated the
+            // queue-pressure analyzer to five-digit depths (#112).
+            uint32_t depth = (uint32_t)(atomic_fetch_add_explicit(
+                &queue_depth_of(self)->value, 1, memory_order_relaxed) + 1);
             // Stash commit timestamp on the CB so the completion callback can
             // compute in_flight_ns even when Apple's startTime is unavailable.
             objc_setAssociatedObject(cb, kSmeltrCbCommitTsKey,
@@ -1629,6 +1644,12 @@ static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wa
                             done_cb_id, q_id_capture, status,
                             err_present, err_code, domain, in_flight);
                         smeltr_emit_cb_ops_pso(done_cb, done_cb_id, in_flight);
+                        id<MTLCommandQueue> done_q = [done_cb commandQueue];
+                        if (done_q) {
+                            atomic_fetch_sub_explicit(
+                                &queue_depth_of(done_q)->value, 1,
+                                memory_order_relaxed);
+                        }
                         if (g_inflight_q) {
                             uint64_t cb_id_capture = done_cb_id;
                             dispatch_async(g_inflight_q, ^{
