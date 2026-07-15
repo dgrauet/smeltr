@@ -241,6 +241,20 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         if seen_any_cb_ops && ops_for_cb.is_none() {
             ops_cbs_without_samples += 1;
         }
+        // A CB's GPU contribution is the sum of its op times (exact
+        // stage-sampled, or queue-clamped pro-rata) — NOT its in_flight_ns:
+        // pipelined CBs overlap, so summing in_flight over-counts by
+        // ~queue-depth x (#136: 6402 s shown for a 330 s run). When op
+        // capture is on, a CB without ops (blit/host copies, empty CBs)
+        // contributes 0 — its overlapped in_flight is exactly the
+        // over-count (measured 11x on a real session) and it is already
+        // counted in ops_cbs_without_samples. in_flight is the fallback
+        // only when op capture is off for the whole session.
+        let ns = &match ops_for_cb {
+            Some(ops) => ops.iter().map(|o| o.gpu_ns).sum::<u64>(),
+            None if seen_any_cb_ops => 0,
+            None => *ns,
+        };
         match idx {
             Some(i) => {
                 per_eval_gpu_ns[i] += *ns;
@@ -1039,6 +1053,140 @@ mod tests {
             scope.eval_count, 1,
             "attribution went through the eval path"
         );
+    }
+
+    /// #136: a window's gpu_ns must be the sum of its CBs' op times (exact
+    /// since #124/#126), not of their in_flight_ns — overlapping pipelined
+    /// CBs each count the same wall seconds (6402 s shown for a 330 s run).
+    #[test]
+    fn window_gpu_ns_sums_op_times_not_overlapping_in_flight() {
+        let mut events = vec![
+            ev(
+                1,
+                50,
+                Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 1,
+                    qualname: "m".into(),
+                    class_name: "M".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields: Default::default(),
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                2,
+                100,
+                Payload::MlxEvalEntered {
+                    call_id: 7,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![1],
+                    stack_frames: vec![],
+                },
+                Source::PythonSidecar,
+            ),
+        ];
+        // Two deeply-pipelined CBs: in_flight 1000 each (overlapping), but
+        // actual op time 111 and 222.
+        for (i, (cb_id, op, gpu)) in [(0xa_u64, "OpA", 111_u64), (0xb, "OpB", 222)]
+            .into_iter()
+            .enumerate()
+        {
+            let seq = 10 + 10 * i as u64;
+            let ts = 110 + i as u64;
+            events.push(ev(
+                seq,
+                ts,
+                Payload::MetalCbCommitted {
+                    cb_id,
+                    queue_id: 1,
+                    queue_depth: 2,
+                    label: None,
+                },
+                Source::MetalHook,
+            ));
+            events.push(ev(
+                seq + 1,
+                ts + 1000,
+                Payload::MetalCbCompleted {
+                    cb_id,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 1000,
+                },
+                Source::MetalHook,
+            ));
+            events.push(ev(
+                seq + 2,
+                ts + 1001,
+                Payload::MetalCbOps {
+                    cb_id,
+                    ops: vec![op_sample(op, gpu, 1)],
+                },
+                Source::MetalHook,
+            ));
+        }
+        events.push(ev(
+            40,
+            2000,
+            Payload::MlxEvalReturned {
+                call_id: 7,
+                duration_ns: 1900,
+                was_async: false,
+            },
+            Source::PythonSidecar,
+        ));
+        events.push(ev(
+            41,
+            2100,
+            Payload::ModuleReturned { module_call_id: 1 },
+            Source::PythonSidecar,
+        ));
+
+        // A third CB with no CbOps (e.g. a blit) in the same window: its
+        // overlapped in_flight must not count either.
+        events.insert(
+            events.len() - 2,
+            ev(
+                30,
+                115,
+                Payload::MetalCbCommitted {
+                    cb_id: 0xc,
+                    queue_id: 1,
+                    queue_depth: 3,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+        );
+        events.insert(
+            events.len() - 2,
+            ev(
+                31,
+                1300,
+                Payload::MetalCbCompleted {
+                    cb_id: 0xc,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 1185,
+                },
+                Source::MetalHook,
+            ),
+        );
+
+        let root = compute(events).unwrap();
+        let m = find_child(&root, "m");
+        assert_eq!(
+            m.gpu_ns_self, 333,
+            "window gpu must sum op times (111+222), not in_flight"
+        );
+        assert_eq!(m.cb_count, 3);
     }
 
     fn cb_lifecycle(seq: u64, ts: u64, cb_id: u64, op: &str, gpu_ns: u64) -> Vec<Event> {
