@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0](https://github.com/dgrauet/smeltr/compare/v0.18.0...v0.19.0) (2026-07-15)
+
+
+### Features
+
+* **analyzer:** attribute CBs to scope windows when no eval window matches ([#134](https://github.com/dgrauet/smeltr/issues/134)) ([3bfb5a3](https://github.com/dgrauet/smeltr/commit/3bfb5a3f644153733a1115ad555cad4c05527d53)), closes [#131](https://github.com/dgrauet/smeltr/issues/131)
+
+
+### Bug Fixes
+
+* **analyzer:** window gpu_ns sums op times, not overlapping in_flight ([#137](https://github.com/dgrauet/smeltr/issues/137)) ([78235f6](https://github.com/dgrauet/smeltr/commit/78235f6d702ff781d8b59ebf3430eebfebf0f80a)), closes [#136](https://github.com/dgrauet/smeltr/issues/136)
+* **cli,daemon:** route markers to the newest recording, add mark --session ([#139](https://github.com/dgrauet/smeltr/issues/139)) ([e30231e](https://github.com/dgrauet/smeltr/commit/e30231e9b78e6a017ed5af9619d7caf32a6d7fb1)), closes [#133](https://github.com/dgrauet/smeltr/issues/133)
+* **mcp:** cap and rank find_correlations output; summarize elided kinds ([#138](https://github.com/dgrauet/smeltr/issues/138)) ([d433374](https://github.com/dgrauet/smeltr/commit/d43337490962a17b965c1f118f5f42377aaec461)), closes [#132](https://github.com/dgrauet/smeltr/issues/132)
+
 ## [0.18.0](https://github.com/dgrauet/smeltr/compare/v0.17.1...v0.18.0) (2026-07-15)
 
 
