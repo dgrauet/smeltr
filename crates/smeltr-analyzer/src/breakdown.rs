@@ -43,6 +43,10 @@ pub struct Diagnostics {
     pub malformed_returns: u64,
     #[serde(default)]
     pub ops_cbs_without_samples: u64,
+    /// CBs attributed via the #131 scope-window fallback (no eval window
+    /// contained their commit).
+    #[serde(default)]
+    pub cbs_scope_attributed: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,9 +86,19 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     }
 
     // 1. Index module calls; track unclosed Entered and orphan Returned.
+    // Also record each call's [entered, returned] wall window for the #131
+    // scope fallback below.
     let mut calls: HashMap<u64, CallNode> = HashMap::new();
     let mut open_calls: Vec<u64> = Vec::new();
     let mut malformed_returns: u64 = 0;
+    struct ModuleWindow {
+        t_in: u64,
+        t_out: u64,
+        call_id: u64,
+    }
+    let mut module_windows: Vec<ModuleWindow> = Vec::new();
+    let mut open_window_idx: HashMap<u64, usize> = HashMap::new();
+    let last_event_ts = events.last().map(|e| e.ts_mono_ns).unwrap_or(0);
     for ev in &events {
         match &ev.payload {
             Payload::ModuleEntered {
@@ -109,10 +123,21 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 }
                 calls.insert(*module_call_id, node);
                 open_calls.push(*module_call_id);
+                open_window_idx.insert(*module_call_id, module_windows.len());
+                module_windows.push(ModuleWindow {
+                    t_in: ev.ts_mono_ns,
+                    // Closed on ModuleReturned; a never-returned call (e.g.
+                    // aborted run) stays open until the end of the session.
+                    t_out: last_event_ts,
+                    call_id: *module_call_id,
+                });
             }
             Payload::ModuleReturned { module_call_id } => {
                 if let Some(pos) = open_calls.iter().rposition(|c| c == module_call_id) {
                     open_calls.remove(pos);
+                    if let Some(&i) = open_window_idx.get(module_call_id) {
+                        module_windows[i].t_out = ev.ts_mono_ns;
+                    }
                 } else if !calls.contains_key(module_call_id) {
                     malformed_returns += 1;
                 }
@@ -207,6 +232,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         (0..eval_intervals.len()).map(|_| HashMap::new()).collect();
     let mut unscoped_ops: HashMap<String, OpAgg> = HashMap::new();
     let mut ops_cbs_without_samples: u64 = 0;
+    let mut no_eval_window: Vec<(u64, u64, Option<&Vec<OpSample>>)> = Vec::new();
     for (_cb_id, commit_ts, ns, ops_for_cb) in &cb_completed {
         let idx = eval_intervals
             .iter()
@@ -233,7 +259,55 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 }
             }
             None => {
-                unscoped_gpu_ns += *ns;
+                no_eval_window.push((*commit_ts, *ns, ops_for_cb));
+            }
+        }
+    }
+
+    // 4.5. Scope fallback (#131): lazy workloads barely call mx.eval (ERNIE:
+    // 2 calls in a whole run), leaving almost every CB without an eval
+    // window — 99.8 % of GPU time used to land in <unscoped>. Attribute
+    // those CBs to the innermost scope/module window open at commit time
+    // (same ASYNC_GRACE tail as eval windows); only CBs outside every
+    // window stay unscoped. Sweep: windows sorted by t_in, CBs by commit
+    // ts, a stack of open windows (module calls nest on the Python side).
+    let mut fallback: HashMap<u64, (u64, u64, HashMap<String, OpAgg>)> = HashMap::new();
+    let mut cbs_scope_attributed: u64 = 0;
+    module_windows.sort_by_key(|w| w.t_in);
+    no_eval_window.sort_by_key(|(ts, _, _)| *ts);
+    let mut next_window = 0usize;
+    let mut stack: Vec<&ModuleWindow> = Vec::new();
+    for (commit_ts, ns, ops_for_cb) in no_eval_window {
+        while next_window < module_windows.len() && module_windows[next_window].t_in <= commit_ts {
+            stack.push(&module_windows[next_window]);
+            next_window += 1;
+        }
+        while let Some(top) = stack.last() {
+            if top.t_out.saturating_add(ASYNC_GRACE_NS) < commit_ts {
+                stack.pop();
+            } else {
+                break;
+            }
+        }
+        match stack.last() {
+            Some(win) => {
+                cbs_scope_attributed += 1;
+                let slot = fallback.entry(win.call_id).or_default();
+                slot.0 += ns;
+                slot.1 += 1;
+                if let Some(ops) = ops_for_cb {
+                    for op in ops {
+                        let e = slot.2.entry(op.name.clone()).or_insert((0, 0, None));
+                        e.0 += op.gpu_ns;
+                        e.1 += op.count as u64;
+                        if e.2.is_none() {
+                            e.2 = op.symbol.clone();
+                        }
+                    }
+                }
+            }
+            None => {
+                unscoped_gpu_ns += ns;
                 unmatched_cb_count += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
@@ -281,6 +355,25 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             if e.2.is_none() {
                 e.2 = sym;
             }
+        }
+    }
+
+    // 5.5. Merge the scope-fallback attributions (#131) into their nodes.
+    for (call_id, (gpu, cbs, ops)) in fallback {
+        if let Some(node) = calls.get_mut(&call_id) {
+            node.gpu_ns_self += gpu;
+            node.cb_count += cbs;
+            for (name, (ns, c, sym)) in ops {
+                let e = node.ops_buf.entry(name).or_insert((0, 0, None));
+                e.0 += ns;
+                e.1 += c;
+                if e.2.is_none() {
+                    e.2 = sym;
+                }
+            }
+        } else {
+            unscoped_gpu_ns += gpu;
+            unmatched_cb_count += cbs;
         }
     }
 
@@ -381,6 +474,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             unmatched_cb_count,
             malformed_returns,
             ops_cbs_without_samples,
+            cbs_scope_attributed,
         }),
         fields: Default::default(),
     })
@@ -810,6 +904,179 @@ mod tests {
             "second lifetime's ops must be attributed once: {:?}",
             m.ops
         );
+    }
+
+    /// #131: lazy workloads (ERNIE: 2 mx.eval calls in a whole run) have
+    /// almost no eval windows, so 99.8 % of GPU time fell to <unscoped>.
+    /// CBs whose commit matches no eval window must fall back to the
+    /// innermost open scope/module window instead.
+    #[test]
+    fn cb_without_eval_window_attributes_to_innermost_scope() {
+        let mut events = vec![
+            ev(
+                1,
+                10_000_000_000,
+                Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 1,
+                    qualname: "generate".into(),
+                    class_name: "scope".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields: Default::default(),
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                2,
+                20_000_000_000,
+                Payload::ModuleEntered {
+                    module_call_id: 2,
+                    module_def_id: 2,
+                    qualname: "DiT".into(),
+                    class_name: "M".into(),
+                    parent_call_id: Some(1),
+                    depth: 1,
+                    fields: Default::default(),
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                3,
+                21_000_000_000,
+                Payload::ModuleReturned { module_call_id: 2 },
+                Source::PythonSidecar,
+            ),
+        ];
+        // CB A commits inside the inner DiT window.
+        events.extend(cb_lifecycle(10, 20_500_000_000, 0xa, "OpInner", 111));
+        // CB B commits later, only the outer scope is open.
+        events.extend(cb_lifecycle(20, 50_000_000_000, 0xb, "OpOuter", 222));
+        events.push(ev(
+            30,
+            100_000_000_000,
+            Payload::ModuleReturned { module_call_id: 1 },
+            Source::PythonSidecar,
+        ));
+        // CB C commits after every window (+ grace): stays unscoped.
+        events.extend(cb_lifecycle(40, 200_000_000_000, 0xc, "OpNowhere", 333));
+
+        let root = compute(events).unwrap();
+        let scope = find_child(&root, "generate");
+        let dit = find_child(scope, "DiT");
+        assert!(
+            dit.ops
+                .iter()
+                .any(|o| o.name == "OpInner" && o.gpu_ns == 111),
+            "inner CB must land on the innermost window: {:?}",
+            dit.ops
+        );
+        assert!(
+            scope
+                .ops
+                .iter()
+                .any(|o| o.name == "OpOuter" && o.gpu_ns == 222),
+            "outer CB must land on the enclosing scope: {:?}",
+            scope.ops
+        );
+        let diag = root.diagnostics.as_ref().unwrap();
+        assert_eq!(diag.unmatched_cb_count, 1, "only CB C stays unscoped");
+    }
+
+    /// Eval windows keep priority: a CB inside both an eval window and a
+    /// scope window is attributed once, via the eval path.
+    #[test]
+    fn eval_window_takes_priority_over_scope_fallback() {
+        let mut events = vec![ev(
+            1,
+            10_000_000_000,
+            Payload::ModuleEntered {
+                module_call_id: 1,
+                module_def_id: 1,
+                qualname: "generate".into(),
+                class_name: "scope".into(),
+                parent_call_id: None,
+                depth: 0,
+                fields: Default::default(),
+            },
+            Source::PythonSidecar,
+        )];
+        events.push(ev(
+            2,
+            30_000_000_000,
+            Payload::MlxEvalEntered {
+                call_id: 7,
+                array_count: 1,
+                stream: "gpu".into(),
+                module_stack: vec![1],
+                stack_frames: vec![],
+            },
+            Source::PythonSidecar,
+        ));
+        events.extend(cb_lifecycle(10, 30_500_000_000, 0xa, "OpEval", 111));
+        events.push(ev(
+            20,
+            31_000_000_000,
+            Payload::MlxEvalReturned {
+                call_id: 7,
+                duration_ns: 1_000_000_000,
+                was_async: false,
+            },
+            Source::PythonSidecar,
+        ));
+        events.push(ev(
+            30,
+            100_000_000_000,
+            Payload::ModuleReturned { module_call_id: 1 },
+            Source::PythonSidecar,
+        ));
+
+        let root = compute(events).unwrap();
+        let scope = find_child(&root, "generate");
+        let total: u64 = scope.ops.iter().map(|o| o.gpu_ns).sum();
+        assert_eq!(total, 111, "attributed exactly once: {:?}", scope.ops);
+        assert_eq!(
+            scope.eval_count, 1,
+            "attribution went through the eval path"
+        );
+    }
+
+    fn cb_lifecycle(seq: u64, ts: u64, cb_id: u64, op: &str, gpu_ns: u64) -> Vec<Event> {
+        vec![
+            ev(
+                seq,
+                ts,
+                Payload::MetalCbCommitted {
+                    cb_id,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                seq + 1,
+                ts + 5,
+                Payload::MetalCbCompleted {
+                    cb_id,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 5,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                seq + 2,
+                ts + 6,
+                Payload::MetalCbOps {
+                    cb_id,
+                    ops: vec![op_sample(op, gpu_ns, 1)],
+                },
+                Source::MetalHook,
+            ),
+        ]
     }
 
     fn find_child<'a>(root: &'a ModuleBreakdown, qualname: &str) -> &'a ModuleBreakdown {
