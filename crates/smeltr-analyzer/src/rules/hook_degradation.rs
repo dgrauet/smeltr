@@ -20,30 +20,50 @@ impl Rule for HookDegradationRule {
     fn check(&self, events: &[Event]) -> Vec<Finding> {
         let mut out = Vec::new();
 
-        // Sampling disables (stage- or dispatch-boundary): one finding each,
-        // they are rare and each marks the start of a degraded span.
-        for ev in events {
-            if let Payload::MetalHookSkipped { reason } = &ev.payload {
-                if reason.contains("sampling disabled") {
-                    out.push(
-                        Finding::new(
-                            Severity::Warning,
-                            Category::ContributingFactor,
-                            format!("GPU op timing degraded: {reason}"),
-                        )
-                        .with_detail(
-                            "Per-op GPU attribution (origins/op-summary/breakdown) is \
-                             incomplete from this point until sampling is re-enabled."
-                                .to_string(),
-                        )
-                        .with_evidence(EvidenceRef {
-                            seq: ev.seq,
-                            ts_mono_ns: ev.ts_mono_ns,
-                            description: format!("MetalHookSkipped: {reason}"),
-                        }),
-                    );
+        // Sampling disables (stage- and dispatch-boundary separately): the
+        // backoff can cycle disable → re-enable many times in one session
+        // (a real 15-min run produced 18 cycles), so aggregate each kind
+        // into ONE finding with episode counts, first occurrence as evidence.
+        for kind in ["stage", "dispatch"] {
+            let disable_marker = format!("{kind} sampling disabled");
+            let reenable_marker = format!("{kind} sampling re-enabled");
+            let mut disables = 0usize;
+            let mut reenables = 0usize;
+            let mut first: Option<&Event> = None;
+            for ev in events {
+                if let Payload::MetalHookSkipped { reason } = &ev.payload {
+                    if reason.contains(&disable_marker) {
+                        disables += 1;
+                        first.get_or_insert(ev);
+                    } else if reason.contains(&reenable_marker) {
+                        reenables += 1;
+                    }
                 }
             }
+            let Some(first) = first else { continue };
+            let Payload::MetalHookSkipped { reason } = &first.payload else {
+                unreachable!()
+            };
+            out.push(
+                Finding::new(
+                    Severity::Warning,
+                    Category::ContributingFactor,
+                    format!(
+                        "GPU op timing degraded: {kind} sampling disabled {disables} time(s) \
+                         after sustained alloc failures"
+                    ),
+                )
+                .with_detail(format!(
+                    "Per-op GPU attribution (origins/op-summary/breakdown) is incomplete \
+                     during the disabled spans (re-enabled {reenables} time(s) by the \
+                     backoff retry)."
+                ))
+                .with_evidence(EvidenceRef {
+                    seq: first.seq,
+                    ts_mono_ns: first.ts_mono_ns,
+                    description: format!("first occurrence — MetalHookSkipped: {reason}"),
+                }),
+            );
         }
 
         // Ring corruption: aggregate into one finding (first occurrence as
@@ -133,6 +153,72 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warning);
         assert!(findings[0].title.contains("GPU op timing degraded"));
+    }
+
+    /// Backoff cycling (disable → re-enable → disable …) must aggregate into
+    /// ONE finding with episode counts, not one finding per episode — a real
+    /// 15-min run produced 18 disables and drowned the report.
+    #[test]
+    fn repeated_disable_reenable_cycles_aggregate_into_one_finding() {
+        let mut events = Vec::new();
+        for i in 0..18u64 {
+            events.push(ev(
+                i * 2_000_000_000,
+                Source::MetalHook,
+                Payload::MetalHookSkipped {
+                    reason: "stage sampling disabled after sustained alloc failures \
+                             (pro-rata fallback; backoff retry scheduled)"
+                        .to_string(),
+                },
+            ));
+            events.push(ev(
+                i * 2_000_000_000 + 1_000_000_000,
+                Source::MetalHook,
+                Payload::MetalHookSkipped {
+                    reason: "stage sampling re-enabled (backoff retry)".to_string(),
+                },
+            ));
+        }
+        let findings = HookDegradationRule.check(&events);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert!(
+            findings[0].title.contains("18"),
+            "title: {}",
+            findings[0].title
+        );
+        assert!(
+            findings[0].detail.contains("re-enabled 18"),
+            "detail: {}",
+            findings[0].detail
+        );
+    }
+
+    /// Stage- and dispatch-boundary disables are distinct degradations and
+    /// keep separate findings.
+    #[test]
+    fn stage_and_dispatch_disables_stay_separate() {
+        let events = vec![
+            ev(
+                1,
+                Source::MetalHook,
+                Payload::MetalHookSkipped {
+                    reason: "stage sampling disabled after sustained alloc failures \
+                             (pro-rata fallback; backoff retry scheduled)"
+                        .to_string(),
+                },
+            ),
+            ev(
+                2,
+                Source::MetalHook,
+                Payload::MetalHookSkipped {
+                    reason: "dispatch sampling disabled after sustained alloc failures \
+                             (stage-boundary fallback; backoff retry scheduled)"
+                        .to_string(),
+                },
+            ),
+        ];
+        let findings = HookDegradationRule.check(&events);
+        assert_eq!(findings.len(), 2, "got: {findings:#?}");
     }
 
     #[test]
