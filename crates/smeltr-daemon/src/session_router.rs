@@ -20,6 +20,9 @@ pub struct SessionRouter {
     by_token: Mutex<HashMap<String, Arc<ActiveSession>>>,
     flight_recorder: Option<Arc<FlightRecorder>>,
     bus: Option<Bus>,
+    /// PIDs of scoped sessions in attach order (newest last), for the
+    /// Source::Mark fallback.
+    attach_order: Mutex<Vec<u32>>,
 }
 
 impl SessionRouter {
@@ -32,6 +35,7 @@ impl SessionRouter {
             ambient,
             by_pid: Mutex::new(HashMap::new()),
             by_token: Mutex::new(HashMap::new()),
+            attach_order: Mutex::new(Vec::new()),
             flight_recorder,
             bus,
         }
@@ -44,11 +48,16 @@ impl SessionRouter {
         scope_token: Option<&str>,
         payload: Payload,
     ) -> std::io::Result<()> {
-        let target = self.route_for(scope_token, pid);
+        let target = self.route_for(source, scope_token, pid);
         target.append(source, pid, payload).map(|_| ())
     }
 
-    fn route_for(&self, token: Option<&str>, pid: Option<u32>) -> Arc<ActiveSession> {
+    fn route_for(
+        &self,
+        source: Source,
+        token: Option<&str>,
+        pid: Option<u32>,
+    ) -> Arc<ActiveSession> {
         if let Some(t) = token {
             if let Some(s) = self.by_token.lock().unwrap().get(t) {
                 return s.clone();
@@ -59,7 +68,24 @@ impl SessionRouter {
                 return s.clone();
             }
         }
+        // Markers annotate a recording: `smeltr mark` runs as its own
+        // process, so its PID never matches — before #133 the marker
+        // silently landed in the ambient session while the operator
+        // thought they were annotating their run. Fall back to the most
+        // recently attached scoped session when one exists.
+        if matches!(source, Source::Mark) {
+            if let Some(s) = self.newest_scoped() {
+                return s;
+            }
+        }
         self.ambient.clone()
+    }
+
+    /// Most recently attached scoped session, if any.
+    fn newest_scoped(&self) -> Option<Arc<ActiveSession>> {
+        let order = self.attach_order.lock().unwrap();
+        let by_pid = self.by_pid.lock().unwrap();
+        order.iter().rev().find_map(|p| by_pid.get(p).cloned())
     }
 
     pub fn attach_scoped(
@@ -83,6 +109,11 @@ impl SessionRouter {
             let mut guard = self.by_pid.lock().unwrap();
             guard.insert(pid, new.clone())
         };
+        {
+            let mut order = self.attach_order.lock().unwrap();
+            order.retain(|p| *p != pid);
+            order.push(pid);
+        }
         if let Some(t) = &scope_token {
             self.by_token.lock().unwrap().insert(t.clone(), new.clone());
         }
@@ -103,6 +134,7 @@ impl SessionRouter {
             let mut guard = self.by_pid.lock().unwrap();
             guard.remove(&pid)
         }?;
+        self.attach_order.lock().unwrap().retain(|p| *p != pid);
         let id = removed.id();
         if let Some(tok) = removed.scope_token() {
             self.by_token.lock().unwrap().remove(tok);
@@ -191,6 +223,93 @@ mod tests {
             &e.payload,
             Payload::Mark { label, .. } if label == "ambient"
         )));
+    }
+
+    /// #133: `smeltr mark` runs as its own process — its PID matches no
+    /// scoped session. Markers must fall back to the newest scoped session
+    /// (the recording being annotated), not the ambient one; non-Mark
+    /// sources keep the ambient fallback.
+    #[test]
+    #[serial]
+    fn foreign_pid_mark_routes_to_newest_scoped() {
+        let _h = temp_home();
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let r = SessionRouter::new(ambient.clone(), None, None);
+        let _old = r.attach_scoped(41, vec!["old".into()], None, None).unwrap();
+        let newest_id = r.attach_scoped(42, vec!["new".into()], None, None).unwrap();
+        // Marker from an unrelated PID (the `smeltr mark` process).
+        r.append(
+            Source::Mark,
+            Some(99999),
+            None,
+            Payload::Mark {
+                label: "annotation".into(),
+                fields: Default::default(),
+            },
+        )
+        .unwrap();
+        // Non-Mark event from the same foreign PID still goes ambient.
+        r.append(
+            Source::PythonSidecar,
+            Some(99999),
+            None,
+            Payload::MlxMemoryPoll {
+                active_bytes: 1,
+                peak_bytes: 1,
+                cache_bytes: 1,
+            },
+        )
+        .unwrap();
+        r.detach_scoped(41, Some(0));
+        r.detach_scoped(42, Some(0));
+        ambient.finalize(Some(0), "test").unwrap();
+
+        for d in &list_sessions().unwrap() {
+            let meta = read_metadata(d).unwrap();
+            let evs = read_events(d).unwrap();
+            let has_mark = evs.iter().any(
+                |e| matches!(&e.payload, Payload::Mark { label, .. } if label == "annotation"),
+            );
+            let has_poll = evs
+                .iter()
+                .any(|e| matches!(&e.payload, Payload::MlxMemoryPoll { .. }));
+            if meta.session_id == newest_id {
+                assert!(has_mark, "marker must land in the newest scoped session");
+                assert!(!has_poll);
+            } else {
+                assert!(!has_mark, "marker must not land in {:?}", d);
+            }
+            if meta.end_reason.as_deref() == Some("test") {
+                assert!(has_poll, "non-Mark foreign-pid event stays ambient");
+            }
+        }
+    }
+
+    /// Without any scoped session, a foreign-pid marker keeps landing in
+    /// the ambient session.
+    #[test]
+    #[serial]
+    fn foreign_pid_mark_without_scoped_goes_ambient() {
+        let _h = temp_home();
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let r = SessionRouter::new(ambient.clone(), None, None);
+        r.append(
+            Source::Mark,
+            Some(99999),
+            None,
+            Payload::Mark {
+                label: "solo".into(),
+                fields: Default::default(),
+            },
+        )
+        .unwrap();
+        ambient.finalize(Some(0), "test").unwrap();
+        let dirs = list_sessions().unwrap();
+        assert_eq!(dirs.len(), 1);
+        let evs = read_events(&dirs[0]).unwrap();
+        assert!(evs
+            .iter()
+            .any(|e| matches!(&e.payload, Payload::Mark { label, .. } if label == "solo")));
     }
 
     #[test]
