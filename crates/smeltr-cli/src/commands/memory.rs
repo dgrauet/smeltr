@@ -1,15 +1,14 @@
 //! `smeltr memory` subcommand: per-scope MTLDevice + heap memory.
 
-use anyhow::{anyhow, Context};
+use crate::session_resolver::resolve_arg;
+use anyhow::Context;
 use smeltr_analyzer::memory::{
     compute_heap_breakdown, compute_memory_breakdown, HeapMemory, ScopeMemory,
 };
 use smeltr_core::reader::read_events;
-use smeltr_mcp::types::resolve_session;
 
-pub fn run(session: &str, top: usize) -> anyhow::Result<()> {
-    let dir = resolve_session(session)
-        .map_err(|e| anyhow!("could not resolve session {session:?}: {e}"))?;
+pub fn run(session: Option<&str>, last: bool, top: usize) -> anyhow::Result<()> {
+    let dir = resolve_arg(session, last)?;
     let events = read_events(&dir).context("read session events")?;
     let scope_memory = compute_memory_breakdown(&events);
     let heap_memory = compute_heap_breakdown(&events);

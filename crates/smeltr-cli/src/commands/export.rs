@@ -1,15 +1,19 @@
 //! `smeltr export` subcommand: dump a session to chrome-trace or raw JSON.
 
+use crate::session_resolver::resolve_arg;
 use anyhow::{anyhow, Context};
 use smeltr_analyzer::export::{to_chrome_trace, to_json_raw};
 use smeltr_core::reader::{read_events, read_metadata};
-use smeltr_mcp::types::resolve_session;
 use std::io::Write;
 use std::path::PathBuf;
 
-pub fn run(session: &str, format: &str, output: Option<&str>) -> anyhow::Result<()> {
-    let dir = resolve_session(session)
-        .map_err(|e| anyhow!("could not resolve session {session:?}: {e}"))?;
+pub fn run(
+    session: Option<&str>,
+    last: bool,
+    format: &str,
+    output: Option<&str>,
+) -> anyhow::Result<()> {
+    let dir = resolve_arg(session, last)?;
     let meta = read_metadata(&dir).context("read session metadata")?;
     let events = read_events(&dir).context("read session events")?;
 
@@ -84,7 +88,13 @@ mod tests {
         let id = make_session_with_one_mark();
         let out = home.path().join("trace.json");
 
-        super::run(&id.short(), "chrome-trace", Some(out.to_str().unwrap())).unwrap();
+        super::run(
+            Some(&id.short()),
+            false,
+            "chrome-trace",
+            Some(out.to_str().unwrap()),
+        )
+        .unwrap();
 
         assert!(out.exists());
         let s = std::fs::read_to_string(&out).unwrap();
@@ -102,7 +112,13 @@ mod tests {
         let id = make_session_with_one_mark();
         let out = home.path().join("raw.json");
 
-        super::run(&id.short(), "json", Some(out.to_str().unwrap())).unwrap();
+        super::run(
+            Some(&id.short()),
+            false,
+            "json",
+            Some(out.to_str().unwrap()),
+        )
+        .unwrap();
 
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
@@ -119,7 +135,13 @@ mod tests {
         let id = make_session_with_one_mark();
         let out = home.path().join("trace.json");
 
-        let err = super::run(&id.short(), "bogus", Some(out.to_str().unwrap())).unwrap_err();
+        let err = super::run(
+            Some(&id.short()),
+            false,
+            "bogus",
+            Some(out.to_str().unwrap()),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unknown --format"));
     }
 
@@ -151,7 +173,13 @@ mod tests {
         std::env::remove_var("SMELTR_SESSION_NAME");
 
         let out = home.path().join("by-name.json");
-        super::run("ltx2-baseline", "chrome-trace", Some(out.to_str().unwrap())).unwrap();
+        super::run(
+            Some("ltx2-baseline"),
+            false,
+            "chrome-trace",
+            Some(out.to_str().unwrap()),
+        )
+        .unwrap();
         assert!(out.exists());
     }
 }

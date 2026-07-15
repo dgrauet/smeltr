@@ -86,7 +86,11 @@ enum Cmd {
         /// First session (baseline). Accepts short id, full UUID, or name.
         session_a: String,
         /// Second session (changed). Accepts short id, full UUID, or name.
-        session_b: String,
+        #[arg(required_unless_present = "last", conflicts_with = "last")]
+        session_b: Option<String>,
+        /// Use the most recent recording as the changed session.
+        #[arg(long)]
+        last: bool,
         /// Cap each section's row count.
         #[arg(long, default_value_t = 20)]
         top: usize,
@@ -97,7 +101,11 @@ enum Cmd {
         /// Session reference: 8-char short id, full UUID, or
         /// SessionMetadata.name. Same resolution rules as other smeltr
         /// commands (most-recent-wins on name collision).
-        session: String,
+        #[arg(required_unless_present = "last", conflicts_with = "last")]
+        session: Option<String>,
+        /// Use the most recent recording instead of naming one.
+        #[arg(long)]
+        last: bool,
         /// Output format. Default: `chrome-trace`.
         #[arg(long, default_value = "chrome-trace")]
         format: String,
@@ -108,7 +116,11 @@ enum Cmd {
     /// Per-scope MTLDevice memory peak/avg/end and per-scope live-heap peak.
     Memory {
         /// Session reference: short id, full UUID, or name.
-        session: String,
+        #[arg(required_unless_present = "last", conflicts_with = "last")]
+        session: Option<String>,
+        /// Use the most recent recording instead of naming one.
+        #[arg(long)]
+        last: bool,
         /// Cap each section's row count.
         #[arg(long, default_value_t = 20)]
         top: usize,
@@ -126,7 +138,7 @@ enum Cmd {
         /// Session reference: short id, full UUID, or name.
         #[arg(required_unless_present = "last", conflicts_with = "last")]
         session: Option<String>,
-        /// Use the most recently started session instead of naming one.
+        /// Use the most recent recording instead of naming one.
         #[arg(long)]
         last: bool,
         /// Cap row count.
@@ -209,14 +221,18 @@ fn main() -> anyhow::Result<()> {
             Cmd::Compare {
                 session_a,
                 session_b,
+                last,
                 top,
-            } => commands::compare::run(&session_a, &session_b, top),
+            } => commands::compare::run(&session_a, session_b.as_deref(), last, top),
             Cmd::Export {
                 session,
+                last,
                 format,
                 output,
-            } => commands::export::run(&session, &format, output.as_deref()),
-            Cmd::Memory { session, top } => commands::memory::run(&session, top),
+            } => commands::export::run(session.as_deref(), last, &format, output.as_deref()),
+            Cmd::Memory { session, last, top } => {
+                commands::memory::run(session.as_deref(), last, top)
+            }
             Cmd::Mcp { http } => commands::mcp::run(http).await,
             Cmd::Origins { session, last, top } => {
                 commands::origins::run(session.as_deref(), last, top)

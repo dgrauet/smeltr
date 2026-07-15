@@ -1,5 +1,6 @@
 //! `smeltr compare` subcommand: scope + op-kind deltas between two sessions.
 
+use crate::session_resolver::resolve_arg;
 use anyhow::{anyhow, Context};
 use smeltr_analyzer::diff::{
     diff_memory, diff_origins, diff_sessions, MemoryDelta, OpDelta, OriginDelta, ScopeAggregate,
@@ -8,11 +9,10 @@ use smeltr_analyzer::diff::{
 use smeltr_core::reader::read_events;
 use smeltr_mcp::types::resolve_session;
 
-pub fn run(session_a: &str, session_b: &str, top: usize) -> anyhow::Result<()> {
+pub fn run(session_a: &str, session_b: Option<&str>, last: bool, top: usize) -> anyhow::Result<()> {
     let dir_a = resolve_session(session_a)
         .map_err(|e| anyhow!("could not resolve session A {session_a:?}: {e}"))?;
-    let dir_b = resolve_session(session_b)
-        .map_err(|e| anyhow!("could not resolve session B {session_b:?}: {e}"))?;
+    let dir_b = resolve_arg(session_b, last)?;
     let a_events = read_events(&dir_a).context("read A events")?;
     let b_events = read_events(&dir_b).context("read B events")?;
     let diff = diff_sessions(&a_events, &b_events);
