@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0](https://github.com/dgrauet/smeltr/compare/v0.17.1...v0.18.0) (2026-07-15)
+
+
+### Features
+
+* **cli:** --last on memory/export/compare; unify session resolution ([#123](https://github.com/dgrauet/smeltr/issues/123)) ([55ba767](https://github.com/dgrauet/smeltr/commit/55ba767db4861aa84e588c3dc36a93dab573a85a)), closes [#116](https://github.com/dgrauet/smeltr/issues/116)
+* **cli,mcp:** smeltr origins --last targets the most recent recording ([#122](https://github.com/dgrauet/smeltr/issues/122)) ([9bef756](https://github.com/dgrauet/smeltr/commit/9bef7569c539ac9c4ded3670f494da11f621dbee))
+
+
+### Bug Fixes
+
+* **analyzer:** aggregate per-eval timings into one finding ([#129](https://github.com/dgrauet/smeltr/issues/129)) ([f03175a](https://github.com/dgrauet/smeltr/commit/f03175a9da7cbf69639ef1cbd2a72ddbf16d37ef)), closes [#115](https://github.com/dgrauet/smeltr/issues/115)
+* **analyzer:** aggregate sampling-disable cycles into one finding per kind ([#121](https://github.com/dgrauet/smeltr/issues/121)) ([6b17239](https://github.com/dgrauet/smeltr/commit/6b17239811aa776c09acffa6eb0a4f1d54e3a9d4))
+* **analyzer:** attach MetalCbOps to its own CB lifetime, not a session-wide cb_id index ([#128](https://github.com/dgrauet/smeltr/issues/128)) ([f8f7e21](https://github.com/dgrauet/smeltr/commit/f8f7e212aea91147898036444d1662bda1da2db5)), closes [#127](https://github.com/dgrauet/smeltr/issues/127)
+* **daemon:** panic hook flushes black box before any console output ([#117](https://github.com/dgrauet/smeltr/issues/117)) ([90d1003](https://github.com/dgrauet/smeltr/commit/90d1003d4ef7a432be1363ed31c94ff8f8ee8e3b)), closes [#111](https://github.com/dgrauet/smeltr/issues/111)
+* **metal-hook,analyzer:** sampling backoff retry + degradation findings ([#119](https://github.com/dgrauet/smeltr/issues/119)) ([0e5bcb9](https://github.com/dgrauet/smeltr/commit/0e5bcb98250ce39045ff06bc4fa2eba5586c1205)), closes [#113](https://github.com/dgrauet/smeltr/issues/113)
+* **metal-hook:** dedupe the two commit interception points ([#124](https://github.com/dgrauet/smeltr/issues/124)) ([c4c6eb0](https://github.com/dgrauet/smeltr/commit/c4c6eb0e878bd990541fb755a9227a902aa74964)), closes [#112](https://github.com/dgrauet/smeltr/issues/112)
+* **metal-hook:** pro-rata window excludes queue wait via per-queue serialization clamp ([#126](https://github.com/dgrauet/smeltr/issues/126)) ([ba65635](https://github.com/dgrauet/smeltr/commit/ba6563522eafab2cedde814cd4a43612907abe96)), closes [#125](https://github.com/dgrauet/smeltr/issues/125)
+* **metal-ring,probes:** serialize ring writes, 16-byte alignment, self-healing reader ([#118](https://github.com/dgrauet/smeltr/issues/118)) ([052c3ae](https://github.com/dgrauet/smeltr/commit/052c3aeed6003107a619b518785e206095b2c4fd)), closes [#113](https://github.com/dgrauet/smeltr/issues/113)
+* **tui,daemon:** reconnect to the daemon with a visible banner instead of freezing ([#130](https://github.com/dgrauet/smeltr/issues/130)) ([2ef6a29](https://github.com/dgrauet/smeltr/commit/2ef6a29e560733b8a69714f5e5370992c18e4245)), closes [#114](https://github.com/dgrauet/smeltr/issues/114)
+
 ## [0.17.1](https://github.com/dgrauet/smeltr/compare/v0.17.0...v0.17.1) (2026-07-14)
 
 
