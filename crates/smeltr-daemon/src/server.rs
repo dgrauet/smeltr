@@ -73,6 +73,17 @@ impl Server {
     }
 }
 
+/// Pids attached via this connection and not yet detached. The record
+/// client holds one connection for the whole recording, so a connection
+/// dying with leftovers means the client was killed (#143): the daemon
+/// auto-detaches, otherwise the scoped session stays open forever and
+/// shadows every later recording via `--last`.
+#[derive(Default)]
+struct ConnAttachments {
+    scoped: Vec<u32>,
+    hooks: Vec<u32>,
+}
+
 async fn handle_connection(
     mut stream: UnixStream,
     router: Arc<SessionRouter>,
@@ -80,10 +91,33 @@ async fn handle_connection(
     probe_runtime: Arc<ProbeRuntime>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) {
-    if let Err(e) =
-        handle_connection_inner(&mut stream, &router, &bus, &probe_runtime, &shutdown_tx).await
+    let mut attached = ConnAttachments::default();
+    if let Err(e) = handle_connection_inner(
+        &mut stream,
+        &router,
+        &bus,
+        &probe_runtime,
+        &shutdown_tx,
+        &mut attached,
+    )
+    .await
     {
         tracing::warn!(error = %e, "connection ended with error");
+    }
+    for pid in attached.hooks {
+        tracing::warn!(
+            pid,
+            "client disconnected without DetachMetalHook; auto-detaching"
+        );
+        probe_runtime.detach_metal_hook(pid).await;
+    }
+    for pid in attached.scoped {
+        tracing::warn!(
+            pid,
+            "client disconnected without DetachScopedProbes; finalizing scoped session"
+        );
+        probe_runtime.detach_scoped(pid).await;
+        let _ = router.detach_scoped(pid, None);
     }
 }
 
@@ -93,6 +127,7 @@ async fn handle_connection_inner(
     bus: &Bus,
     probe_runtime: &Arc<ProbeRuntime>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
+    attached: &mut ConnAttachments,
 ) -> std::io::Result<()> {
     loop {
         let msg = match read_msg::<ClientToDaemon>(stream).await? {
@@ -103,6 +138,13 @@ async fn handle_connection_inner(
             write_msg(stream, &DaemonToClient::Ack).await?;
             stream_events(stream, bus, shutdown_tx).await?;
             return Ok(());
+        }
+        match &msg {
+            ClientToDaemon::AttachScopedProbes { pid, .. } => attached.scoped.push(*pid),
+            ClientToDaemon::DetachScopedProbes { pid, .. } => attached.scoped.retain(|p| p != pid),
+            ClientToDaemon::AttachMetalHook { pid, .. } => attached.hooks.push(*pid),
+            ClientToDaemon::DetachMetalHook { pid } => attached.hooks.retain(|p| p != pid),
+            _ => {}
         }
         let resp = handle_msg(msg, router, bus, probe_runtime, shutdown_tx).await;
         write_msg(stream, &resp).await?;
