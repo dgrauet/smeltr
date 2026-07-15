@@ -277,6 +277,14 @@ static void smeltr_dump_command_queue_methods(void) {
 
 static const void *kSmeltrQueueDepthKey = &kSmeltrQueueDepthKey;
 static const void *kSmeltrCbCommitTsKey = &kSmeltrCbCommitTsKey;
+// Scheduled (GPU-start) timestamp, stashed by the scheduled handler. The
+// pro-rata op-time window must be scheduled->completed: commit->completed
+// includes time spent waiting in the queue behind other CBs, and under deep
+// pipelining that over-attributes op time by ~queue-depth x (#125 — 3597 s
+// of conv3d attributed on an 870 s run). CB_COMPLETED keeps commit-based
+// in_flight_ns (queue-pressure semantics unchanged).
+static const void *kSmeltrCbSchedTsKey = &kSmeltrCbSchedTsKey;
+
 // #112: two interception points can see the same commit — the concrete CB
 // class's `commit` swizzle (outer) and the queue-level private
 // `commitCommandBuffer:wake:` swizzle (called synchronously from inside the
@@ -314,6 +322,19 @@ static dispatch_source_t g_warn_timer = NULL;
 }
 @end
 
+
+static const void *kSmeltrQueueLastDoneKey = &kSmeltrQueueLastDoneKey;
+
+static SmeltrAtomicU64 *queue_last_done_of(id queue) {
+    SmeltrAtomicU64 *box = objc_getAssociatedObject(queue, kSmeltrQueueLastDoneKey);
+    if (!box) {
+        box = [SmeltrAtomicU64 withValue:0];
+        objc_setAssociatedObject(queue, kSmeltrQueueLastDoneKey, box,
+                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return box;
+}
+
 static SmeltrAtomicU64 *queue_depth_of(id queue) {
     SmeltrAtomicU64 *box = objc_getAssociatedObject(queue, kSmeltrQueueDepthKey);
     if (!box) {
@@ -323,6 +344,35 @@ static SmeltrAtomicU64 *queue_depth_of(id queue) {
     }
     return box;
 }
+
+/// Execution window for pro-rata attribution. Compute CBs on one queue
+/// execute serially, so a CB's GPU time is bounded by
+/// max(its scheduled ts, the previous CB's completion on the same queue)
+/// -> its own completion. Note "scheduled" on Metal only means dependencies
+/// resolved — every queued CB can be scheduled immediately — so the
+/// per-queue last-completion clamp is what actually removes queue wait.
+/// Falls back to the commit-based in_flight when nothing better is known.
+static uint64_t smeltr_cb_gpu_window(id done_cb, id queue, uint64_t done_ts,
+                                     uint64_t in_flight) {
+    uint64_t start = 0;
+    SmeltrAtomicU64 *sched = objc_getAssociatedObject(done_cb, kSmeltrCbSchedTsKey);
+    if (sched) {
+        start = atomic_load_explicit(&sched->value, memory_order_relaxed);
+    }
+    if (queue) {
+        SmeltrAtomicU64 *last = queue_last_done_of(queue);
+        uint64_t prev_done = atomic_load_explicit(&last->value, memory_order_relaxed);
+        if (prev_done > start) start = prev_done;
+        // Monotonic max — completion handlers usually fire in queue order,
+        // but do not rely on it.
+        uint64_t cur = prev_done;
+        while (cur < done_ts
+               && !atomic_compare_exchange_weak(&last->value, &cur, done_ts)) {}
+    }
+    if (start > 0 && done_ts > start) return done_ts - start;
+    return in_flight;
+}
+
 
 static int smeltr_log(const char *fmt, ...) {
     va_list ap;
@@ -951,10 +1001,13 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
             // become __block-stable copies).
             __block uint64_t captured_cb_id = cb_id;
             __block uint64_t captured_q_id  = q_id;
-            [cb addScheduledHandler:^(id<MTLCommandBuffer> _cb) {
-                (void)_cb;
+            [cb addScheduledHandler:^(id<MTLCommandBuffer> sched_cb) {
+                uint64_t sched_ts = smeltr_mono_ns();
+                objc_setAssociatedObject(sched_cb, kSmeltrCbSchedTsKey,
+                    [SmeltrAtomicU64 withValue:sched_ts],
+                    OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 if (g_ring) {
-                    smeltr_write_cb_scheduled(g_ring, smeltr_mono_ns(),
+                    smeltr_write_cb_scheduled(g_ring, sched_ts,
                         captured_cb_id, captured_q_id);
                 }
             }];
@@ -975,7 +1028,9 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
                 smeltr_write_cb_completed(g_ring, done_ts,
                     captured_cb_id, captured_q_id, status,
                     err_present, err_code, domain, in_flight);
-                smeltr_emit_cb_ops_pso(done_cb, captured_cb_id, in_flight);
+                smeltr_emit_cb_ops_pso(done_cb, captured_cb_id,
+                    smeltr_cb_gpu_window(done_cb, [done_cb commandQueue],
+                                         done_ts, in_flight));
                 smeltr_emit_device_mem_sample("cb_completed");
                 id<MTLCommandQueue> q2 = [done_cb commandQueue];
                 if (q2) {
@@ -1619,6 +1674,21 @@ static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wa
             // handlers up until commit. This catches CBs created via any
             // path (commandBufferWithDescriptor:, commandBuffer,
             // commandBufferWithUnretainedReferences, etc.).
+            SEL addSched = @selector(addScheduledHandler:);
+            if ([cb respondsToSelector:addSched]) {
+                uint64_t sched_cb_id = cb_id;
+                uint64_t sched_q_id = q_id;
+                [(id<MTLCommandBuffer>)cb addScheduledHandler:^(id<MTLCommandBuffer> sched_cb) {
+                    uint64_t sched_ts = smeltr_mono_ns();
+                    objc_setAssociatedObject(sched_cb, kSmeltrCbSchedTsKey,
+                        [SmeltrAtomicU64 withValue:sched_ts],
+                        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    if (g_ring) {
+                        smeltr_write_cb_scheduled(g_ring, sched_ts,
+                            sched_cb_id, sched_q_id);
+                    }
+                }];
+            }
             SEL addHandler = @selector(addCompletedHandler:);
             if ([cb respondsToSelector:addHandler]) {
                 uint64_t q_id_capture = q_id;
@@ -1643,7 +1713,9 @@ static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wa
                         smeltr_write_cb_completed(g_ring, done_ts,
                             done_cb_id, q_id_capture, status,
                             err_present, err_code, domain, in_flight);
-                        smeltr_emit_cb_ops_pso(done_cb, done_cb_id, in_flight);
+                        smeltr_emit_cb_ops_pso(done_cb, done_cb_id,
+                            smeltr_cb_gpu_window(done_cb, [done_cb commandQueue],
+                                                 done_ts, in_flight));
                         id<MTLCommandQueue> done_q = [done_cb commandQueue];
                         if (done_q) {
                             atomic_fetch_sub_explicit(
