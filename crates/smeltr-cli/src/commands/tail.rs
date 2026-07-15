@@ -110,6 +110,9 @@ pub async fn run(session: Option<String>) -> Result<()> {
         out.flush().ok();
     }
 
+    // The stream ended: daemon shutdown/crash (EOF) or transport error.
+    // Say so instead of exiting silently (#114).
+    eprintln!("smeltr tail: daemon connection closed");
     match conn.await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e)

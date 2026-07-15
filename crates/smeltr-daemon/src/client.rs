@@ -20,6 +20,15 @@ pub async fn subscribe_events(
     client: &str,
     tx: mpsc::Sender<Event>,
 ) -> std::io::Result<()> {
+    match connect_subscribed(sock_path, client).await? {
+        Some(stream) => forward_events(stream, &tx).await,
+        None => Ok(()),
+    }
+}
+
+/// Connect + Hello/SubscribeEvents handshake. `Ok(None)` when the daemon
+/// closed the connection mid-handshake.
+async fn connect_subscribed(sock_path: &Path, client: &str) -> std::io::Result<Option<UnixStream>> {
     let mut stream = UnixStream::connect(sock_path).await?;
 
     // Hello -> Welcome
@@ -36,7 +45,7 @@ pub async fn subscribe_events(
         .await?
         .is_none()
     {
-        return Ok(());
+        return Ok(None);
     }
 
     // SubscribeEvents -> Ack
@@ -48,10 +57,14 @@ pub async fn subscribe_events(
         .await?
         .is_none()
     {
-        return Ok(());
+        return Ok(None);
     }
+    Ok(Some(stream))
+}
 
-    // Stream EventNotification frames.
+/// Stream EventNotification frames into `tx` until EOF, error, or `tx`
+/// closed.
+async fn forward_events(mut stream: UnixStream, tx: &mpsc::Sender<Event>) -> std::io::Result<()> {
     loop {
         match crate::server::read_msg::<DaemonToClient>(&mut stream).await {
             Ok(Some(DaemonToClient::EventNotification { event })) => {
@@ -67,5 +80,47 @@ pub async fn subscribe_events(
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+/// Connection state reported by [`subscribe_events_reconnecting`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnState {
+    Connected,
+    /// Lost the daemon; sleeping before retry `attempt` (1-based).
+    Reconnecting {
+        attempt: u32,
+    },
+}
+
+/// Like [`subscribe_events`], but survives daemon restarts: on socket EOF or
+/// connect failure it retries with exponential backoff (500 ms doubling,
+/// capped at 5 s) and resubscribes, reporting each transition on `status`.
+/// Returns only when `tx` is closed (the consumer went away). #114: a TUI
+/// attached to a crashed daemon used to freeze silently forever.
+pub async fn subscribe_events_reconnecting(
+    sock_path: &Path,
+    client: &str,
+    tx: mpsc::Sender<Event>,
+    status: tokio::sync::watch::Sender<ConnState>,
+) -> std::io::Result<()> {
+    let mut attempt: u32 = 0;
+    loop {
+        match connect_subscribed(sock_path, client).await {
+            Ok(Some(stream)) => {
+                attempt = 0;
+                let _ = status.send(ConnState::Connected);
+                let _ = forward_events(stream, &tx).await;
+            }
+            Ok(None) => {}
+            Err(_) => {}
+        }
+        if tx.is_closed() {
+            return Ok(());
+        }
+        attempt += 1;
+        let _ = status.send(ConnState::Reconnecting { attempt });
+        let backoff = Duration::from_millis((500u64 << (attempt.min(4) - 1)).min(5_000));
+        tokio::time::sleep(backoff).await;
     }
 }
