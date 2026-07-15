@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smeltr"
-version = "0.19.0"
+version = "0.20.0"
 description = "Python sidecar for the smeltr Metal/MLX observability tool."
 readme = "README.md"
 requires-python = ">=3.10"
