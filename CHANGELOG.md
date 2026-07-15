@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0](https://github.com/dgrauet/smeltr/compare/v0.19.0...v0.20.0) (2026-07-15)
+
+
+### Features
+
+* **analyzer:** attribute origins CBs to scope windows when no eval window matches ([#141](https://github.com/dgrauet/smeltr/issues/141)) ([832c724](https://github.com/dgrauet/smeltr/commit/832c724ea7a0b905906dfc28a2ac58f4448fab39)), closes [#140](https://github.com/dgrauet/smeltr/issues/140)
+
+
+### Bug Fixes
+
+* **daemon:** finalize scoped sessions when the record client dies without detaching ([#144](https://github.com/dgrauet/smeltr/issues/144)) ([5602081](https://github.com/dgrauet/smeltr/commit/560208155fd2d707a56050f455d441729f2124aa)), closes [#143](https://github.com/dgrauet/smeltr/issues/143)
+
 ## [0.19.0](https://github.com/dgrauet/smeltr/compare/v0.18.0...v0.19.0) (2026-07-15)
 
 
