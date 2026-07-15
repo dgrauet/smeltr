@@ -19,7 +19,13 @@ enum Cmd {
         sub: commands::daemon::DaemonCmd,
     },
     /// Append a marker event to the active session.
-    Mark { label: String },
+    Mark {
+        label: String,
+        /// Target a specific recording (short id, full UUID, or name).
+        /// Default: the newest active recording, else the ambient session.
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Inspect sessions on disk.
     Sessions {
         #[command(subcommand)]
@@ -182,7 +188,7 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(async move {
         match args.cmd {
             Cmd::Daemon { sub } => commands::daemon::run(sub).await,
-            Cmd::Mark { label } => commands::mark::run(label).await,
+            Cmd::Mark { label, session } => commands::mark::run(label, session.as_deref()).await,
             Cmd::Sessions { sub } => commands::sessions::run(sub).await,
             Cmd::Doctor => commands::doctor::run(),
             Cmd::Tui => commands::tui::run_live().await,
