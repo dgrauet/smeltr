@@ -94,9 +94,14 @@ The TUI runs live via `smeltr tui`, or in replay mode via `smeltr sessions open 
 
 **Replay scrubbing** (replay mode only): `←`/`→` seek ±5 s, `Shift+←`/`Shift+→` ±30 s,
 `Home`/`End` jump to start/end, `Space` pauses the virtual clock. The title bar shows
-`▶ mm:ss / mm:ss` with a progress bar.
+`▶ mm:ss / mm:ss` (rolling over to `h:mm:ss` past an hour; `⏸` when paused, `■` at the end)
+with a progress bar.
 
 **Other controls** (both modes): press `K` to toggle a rolling top-5 hot-kernels panel, press `M` to toggle the Models view.
+
+**Daemon restarts** (live mode): the TUI reconnects automatically with backoff and
+shows a persistent `daemon disconnected — reconnecting (attempt N)` banner until
+the connection is back.
 
 ### Breakdown — recipe
 
@@ -132,10 +137,13 @@ Useful flags on `smeltr breakdown`:
 | `--flamegraph out.svg` | Folded-stack flamegraph SVG (via `inferno`). |
 | `--chrome-trace out.json` | Chrome Trace Event Format, open in Perfetto or Speedscope. |
 
-When a forward pass collapses into a single top-level MLX eval (common
-for autoregressive LLMs), all module attributions land under
-`<unscoped>` — but the op-level breakdown under `<unscoped>` still
-gives you the kernel-level decomposition for that bucket.
+When a forward pass collapses into a single top-level MLX eval — or the
+workload barely calls `mx.eval` at all (fully lazy pipelines) — command
+buffers with no eval window are attributed to the innermost
+`smeltr.scope(...)`/module window open at commit time, so the breakdown
+tree stays meaningful instead of dumping everything into `<unscoped>`.
+Only CBs outside every window remain `<unscoped>`; the op-level
+breakdown still decomposes that residual bucket by kernel signature.
 
 Kill switch: `SMELTR_HOOK_NO_OPS=1` disables op-level capture entirely
 (module-level breakdown stays active). See the
@@ -413,7 +421,7 @@ full top-down attribution from a user code line to GPU time.
 
 ```bash
 SMELTR_STACK_CAPTURE=1 smeltr record -- ./pipeline.py
-smeltr origins ltx2-baseline --top 10
+smeltr origins --last --top 10
 ```
 
 The `SMELTR_STACK_CAPTURE=1` env var is **opt-in** because the stack
@@ -432,6 +440,13 @@ The top non-smeltr Python frame is used for attribution; deeper
 frames are still recorded in the event log but not aggregated.
 File names are reduced to basename (`attention.py:127`) so moves
 keep grouping intact; renaming functions loses correlation.
+
+**Lazy workloads:** dispatches that fall outside every eval window
+(pipelines that barely call `mx.eval`) are attributed to the innermost
+open `smeltr.scope(...)`/module window instead and appear as
+`scope:<qualname>` rows — coarser than a file:line, but the GPU time
+is accounted for rather than dropped. Eval windows always win when
+both match.
 
 **Async-grace window:** the analyzer applies a 500 ms grace to
 `MlxEvalReturned.t_out` when `was_async=true`, so command buffers that
@@ -528,7 +543,7 @@ Every tool accepts a session ref as short id (8 hex), full UUID, or
 | `list_sessions` | Starting point: enumerate available sessions | short_id, full_id, name, started/ended, exit_code, event_count, root_cause_title |
 | `get_session_summary` | Quick overview of one session | counts, time range, root cause |
 | `query_events` | Raw event stream with filters | events filtered by source, kind, limit |
-| `find_correlations` | Deterministic analyzer findings | Correlated events around anomalies |
+| `find_correlations` | Events from other sources around a focal event | Capped (default 50, `max_events`), notable events first (errors, marks, crashes) then telemetry by proximity; dropped events summarized per kind in `elided` |
 | `get_crash_report` | Session had a crash | parsed crash dumps |
 | `get_metal_cb_history` | Inspect Metal command-buffer activity | CB committed/scheduled/completed events |
 | `get_inference_breakdown` | Per-scope GPU time tree | Hierarchical: scope → child scopes + ops |

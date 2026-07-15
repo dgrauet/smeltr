@@ -76,7 +76,7 @@ The `libmetal_hook.dylib` is built and **embedded into the `smeltr` binary** at 
 | `crash-reports` | parses `.ips` files dropped in `~/Library/Logs/DiagnosticReports/` |
 | `mach-exceptions` | attached only to children spawned by `smeltr record` (same-UID PIDs) |
 
-The Metal hook adds: `MetalCbCommitted`, `MetalCbScheduled`, `MetalCbCompleted` (with status, error code/domain, `in_flight_ns`), `MetalCbWarning` (CBs in-flight > 5s), `MetalHeapAlloc`/`Free`, `MetalBufferAlloc`/`Free`, `MetalTextureAlloc`/`Free`.
+The Metal hook adds: `MetalCbCommitted`, `MetalCbScheduled`, `MetalCbCompleted` (with status, error code/domain, `in_flight_ns`), `MetalCbWarning` (CBs in-flight > 5s), `MetalCbOps` (per-kernel GPU timing), `MetalDeviceMemSample`, `MetalHeapAlloc`/`Free`, `MetalBufferAlloc`/`Free`, `MetalTextureAlloc`/`Free`, plus `MetalHookSkipped`/`MetalHookDropped` diagnostics when capture degrades (ring corruption, sampling backoff).
 
 ## SIP / hardened binaries
 
@@ -93,22 +93,26 @@ stays on). Use when counter sampling overhead is undesirable.
 | Command | Purpose |
 |---|---|
 | `smeltr record [--name N] -- <cmd>` | Capture a run (optionally named) |
-| `smeltr mark <label> [--field k=v]` | Append a marker event to the active session |
-| `smeltr tui` | Live event feed / timeline |
+| `smeltr mark <label> [--field k=v] [--session <ref>]` | Append a marker; defaults to the newest active recording, `--session` targets one explicitly |
+| `smeltr tui` | Live event feed / timeline (auto-reconnects if the daemon restarts) |
+| `smeltr tail [--session <ref>]` | Stream the live event bus as NDJSON on stdout |
 | `smeltr sessions ls` | List sessions on disk (annotates ambient/scoped) |
 | `smeltr sessions show <id>` | Per-event-kind summary |
-| `smeltr analyze [<id>]` | Run analyzer rules → findings |
-| `smeltr breakdown [<id>] [--field k=v]` | Per-module GPU time breakdown (filterable by scope field) |
-| `smeltr memory [<id>]` | Per-scope MTLDevice memory peak/avg/end + heap |
-| `smeltr origins [<id>]` | Per-(kind, file:line) GPU attribution (needs `SMELTR_STACK_CAPTURE=1`) |
-| `smeltr compare <id-a> <id-b>` | A/B regression: scope + op-kind GPU deltas |
-| `smeltr export <id> --format chrome-trace\|json` | Dump to Perfetto / Speedscope / raw JSON |
+| `smeltr sessions open <id> [--speed N]` | Replay a session in the TUI |
+| `smeltr analyze <id> \| --last` | Run analyzer rules → findings |
+| `smeltr breakdown <id> \| --last [--field k=v]` | Per-module GPU time breakdown (filterable by scope field) |
+| `smeltr memory <id> \| --last` | Per-scope MTLDevice memory peak/avg/end + heap |
+| `smeltr origins <id> \| --last` | Per-(kind, file:line) GPU attribution (needs `SMELTR_STACK_CAPTURE=1`) |
+| `smeltr compare <id-a> <id-b> \| --last` | A/B regression: scope + op-kind GPU deltas (`--last` = newest recording as B) |
+| `smeltr export <id> \| --last --format chrome-trace\|json` | Dump to Perfetto / Speedscope / raw JSON |
 | `smeltr doctor` | Audit probe availability and permissions |
 | `smeltr mcp` | Stdio MCP server (Claude integration) |
 | `smeltr daemon install` | Install persistent LaunchAgent |
 
 Session refs accept the short id (last 8 hex), the full UUID, or the
 `--name` you passed to `record` (most-recent-wins on name collision).
+`--last` resolves to the most recent recording, skipping the daemon's
+ambient session.
 
 ### Session kinds
 
@@ -119,7 +123,9 @@ Session refs accept the short id (last 8 hex), the full UUID, or the
   unattributed crash reports, etc. One ambient session per daemon lifetime.
 - **Scoped** — opened by `smeltr record` for the child process it spawns.
   Every event tagged with that child's PID lands in this session. Closed
-  with an exit-code marker when the child terminates.
+  with an exit-code marker when the child terminates; if the `smeltr
+  record` process itself is killed, the daemon detects the dropped
+  connection and finalizes the session anyway (no immortal orphans).
 
 By default, `smeltr breakdown --last` and `smeltr analyze --last` pick the
 most-recent scoped session. Pass `--include-ambient` to revert to the
@@ -135,7 +141,8 @@ Per-module GPU time breakdown for an MLX inference session. Pure observation
 
 Flags:
 
-- `--last` - prefer the most-recent post-mortem session (otherwise newest).
+- `--last` - use the most recent recording (ambient sessions skipped;
+  `--include-ambient` reverts to newest of any kind).
 - `--top N` - limit the table to N rows (default 20).
 - `--depth N` - cut the tree at depth N (default 6).
 - `--field key=value` - keep only subtrees whose `ModuleEntered.fields`
@@ -153,23 +160,24 @@ by PSO signature.
 
 Under each module leaf, `smeltr breakdown` lists the top-N GPU kernels
 captured by tracking each dispatch's MTLComputePipelineState pointer
-and threadgroup dimensions. Names are synthetic — `K_<pso_hash>_<tg_w>x<tg_h>x<tg_d>` —
-because MLX 0.31 does not emit debug groups in its kernel encoding
-path. Same-named entries across CBs correspond to the same underlying
-kernel; threadgroup dimensions disambiguate when a single PSO is
-launched with different shapes.
+and threadgroup dimensions. Rows carry the MLX shader `symbol` (e.g.
+`gemm_t_n_bf16_…`) and a canonical `kind` (`Matmul`, `SDPA`, …) when
+resolvable; the synthetic `K_<pso_hash>_<tg_w>x<tg_h>x<tg_d>` fingerprint
+remains as fallback and disambiguates a single PSO launched with
+different shapes.
 
-Per-kernel GPU time is approximated by distributing the per-CB
-`in_flight_ns` pro-rata by dispatch count across the kernels that ran
-in that CB. This is an order-of-magnitude estimate: it assumes all
-dispatches within a CB cost the same. For typical workloads where one
-or two kernels dominate, the ranking is informative even if the
-absolute numbers per kernel are not exact.
+Per-kernel GPU time comes from Metal counter sampling at compute-stage
+boundaries, distributed pro-rata by dispatch count within each encoder —
+or measured exactly per dispatch on M3+ with
+`SMELTR_HOOK_DISPATCH_BOUNDARY=1`. Module/scope window totals are the
+sum of these per-op times (a CB's queue-wait time is never counted), so
+attributed GPU time stays ≤ wall clock.
 
-Useful when a forward pass collapses into a single top-level `mx.eval()`
-(typical for autoregressive LLMs): the module-level attribution shows
-100% under `<unscoped>`, but the op-level view decomposes that bucket
-by kernel signature.
+When a workload barely calls `mx.eval` (lazy pipelines, autoregressive
+LLMs), command buffers with no eval window fall back to the innermost
+`smeltr.scope(...)`/module window open at commit time — both in the
+breakdown tree and in `smeltr origins` (rows labeled
+`scope:<qualname>`). Only CBs outside every window stay `<unscoped>`.
 
 Flags:
 
