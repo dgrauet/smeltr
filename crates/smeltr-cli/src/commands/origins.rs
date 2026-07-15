@@ -3,11 +3,18 @@
 use anyhow::{anyhow, Context};
 use smeltr_analyzer::dispatch_origins::{compute_dispatch_origins, DispatchOrigin};
 use smeltr_core::reader::read_events;
-use smeltr_mcp::types::resolve_session;
+use smeltr_mcp::types::{latest_session, resolve_session};
 
-pub fn run(session: &str, top: usize) -> anyhow::Result<()> {
-    let dir = resolve_session(session)
-        .map_err(|e| anyhow!("could not resolve session {session:?}: {e}"))?;
+/// `session`/`last` exclusivity is enforced by clap (`--last` conflicts with
+/// the positional and one of the two is required).
+pub fn run(session: Option<&str>, last: bool, top: usize) -> anyhow::Result<()> {
+    let dir = if last {
+        latest_session().map_err(|e| anyhow!("no session found: {e}"))?
+    } else {
+        let session = session.unwrap_or_default();
+        resolve_session(session)
+            .map_err(|e| anyhow!("could not resolve session {session:?}: {e}"))?
+    };
     let events = read_events(&dir).context("read session events")?;
     let origins = compute_dispatch_origins(&events);
     print!("{}", render(&origins, top));

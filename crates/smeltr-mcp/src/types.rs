@@ -64,6 +64,29 @@ pub fn resolve_session(arg: &str) -> Result<std::path::PathBuf, ToolError> {
     Err(ToolError::NotFound(arg.to_string()))
 }
 
+/// Most recently started recording (directory names sort chronologically:
+/// `YYYY-MM-DD-HHMMSS-<short>`). Ambient sessions are skipped — the daemon
+/// reopens one at every boot, so right after a daemon restart the newest
+/// directory is an (empty) ambient session, not the run the user means by
+/// "last". Falls back to the newest session of any kind when no non-ambient
+/// session exists. `NotFound("<latest>")` when there is none at all. Used
+/// by CLI `--last` flags to skip the list-then-copy-paste dance.
+pub fn latest_session() -> Result<std::path::PathBuf, ToolError> {
+    let sessions = smeltr_core::reader::list_sessions()?;
+    for dir in sessions.iter().rev() {
+        let is_ambient = smeltr_core::reader::read_metadata(dir)
+            .map(|m| matches!(m.kind, smeltr_core::session::SessionKind::Ambient))
+            .unwrap_or(false);
+        if !is_ambient {
+            return Ok(dir.clone());
+        }
+    }
+    sessions
+        .into_iter()
+        .next_back()
+        .ok_or_else(|| ToolError::NotFound("<latest>".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +186,77 @@ mod tests {
             resolve_session("nonexistent-name"),
             Err(ToolError::NotFound(_))
         ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn latest_session_returns_most_recent() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+
+        let mut meta_old = SessionMetadata::now_starting(SessionId::new());
+        meta_old.started_rfc3339 = "2026-07-14T10:00:00Z".into();
+        drop(SessionWriter::create(meta_old).unwrap());
+
+        let mut meta_new = SessionMetadata::now_starting(SessionId::new());
+        meta_new.started_rfc3339 = "2026-07-15T09:30:00Z".into();
+        let w = SessionWriter::create(meta_new).unwrap();
+        let dir_new = w.dir().to_path_buf();
+        drop(w);
+
+        assert_eq!(latest_session().unwrap(), dir_new);
+    }
+
+    /// The daemon reopens an ambient session at every boot: right after a
+    /// restart the newest directory is that (empty) ambient session, not
+    /// the recording the user means by "last" — it must be skipped.
+    #[test]
+    #[serial_test::serial]
+    fn latest_session_skips_newer_ambient() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+
+        let mut meta_run = SessionMetadata::now_starting(SessionId::new());
+        meta_run.started_rfc3339 = "2026-07-15T09:30:00Z".into();
+        meta_run.kind = smeltr_core::session::SessionKind::Scoped {
+            pid: 1234,
+            argv: vec!["ltx".into()],
+        };
+        let w = SessionWriter::create(meta_run).unwrap();
+        let dir_run = w.dir().to_path_buf();
+        drop(w);
+
+        let mut meta_ambient = SessionMetadata::now_starting(SessionId::new());
+        meta_ambient.started_rfc3339 = "2026-07-15T09:58:00Z".into();
+        meta_ambient.kind = smeltr_core::session::SessionKind::Ambient;
+        drop(SessionWriter::create(meta_ambient).unwrap());
+
+        assert_eq!(latest_session().unwrap(), dir_run);
+    }
+
+    /// With only ambient sessions on disk, fall back to the newest one
+    /// rather than erroring.
+    #[test]
+    #[serial_test::serial]
+    fn latest_session_falls_back_to_ambient_when_alone() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.started_rfc3339 = "2026-07-15T09:58:00Z".into();
+        meta.kind = smeltr_core::session::SessionKind::Ambient;
+        let w = SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        drop(w);
+
+        assert_eq!(latest_session().unwrap(), dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn latest_session_not_found_when_empty() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        assert!(matches!(latest_session(), Err(ToolError::NotFound(_))));
     }
 }

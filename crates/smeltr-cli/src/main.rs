@@ -124,7 +124,11 @@ enum Cmd {
     /// recorded with SMELTR_STACK_CAPTURE=1.
     Origins {
         /// Session reference: short id, full UUID, or name.
-        session: String,
+        #[arg(required_unless_present = "last", conflicts_with = "last")]
+        session: Option<String>,
+        /// Use the most recently started session instead of naming one.
+        #[arg(long)]
+        last: bool,
         /// Cap row count.
         #[arg(long, default_value_t = 20)]
         top: usize,
@@ -214,7 +218,9 @@ fn main() -> anyhow::Result<()> {
             } => commands::export::run(&session, &format, output.as_deref()),
             Cmd::Memory { session, top } => commands::memory::run(&session, top),
             Cmd::Mcp { http } => commands::mcp::run(http).await,
-            Cmd::Origins { session, top } => commands::origins::run(&session, top),
+            Cmd::Origins { session, last, top } => {
+                commands::origins::run(session.as_deref(), last, top)
+            }
             Cmd::Tail { session } => commands::tail::run(session).await,
             Cmd::Record {
                 cmd,
