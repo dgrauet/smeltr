@@ -9,7 +9,9 @@ use std::path::PathBuf;
 /// Pick the session directory the user most likely means.
 ///
 /// Resolution order:
-/// 1. If `id` is given, find a dir whose name contains it (suffix or substring).
+/// 1. If `id` is given, resolve it like every other session arg
+///    (`smeltr_mcp::types::resolve_session`: short id, full UUID, or
+///    `SessionMetadata.name` — #116).
 /// 2. Else if `prefer_post_mortem` is true, look for a `post-mortem-` dir first.
 /// 3. Else if `include_ambient` is true, return the newest session of any kind.
 /// 4. Else return the newest Scoped session, falling back to newest overall.
@@ -18,22 +20,13 @@ pub fn resolve(
     prefer_post_mortem: bool,
     include_ambient: bool,
 ) -> Result<PathBuf> {
+    if let Some(id) = id {
+        return smeltr_mcp::types::resolve_session(&id)
+            .map_err(|e| anyhow!("could not resolve session {id:?}: {e}"));
+    }
     let sessions = list_sessions().context("listing sessions")?;
     if sessions.is_empty() {
         return Err(anyhow!("no sessions found under SMELTR_HOME"));
-    }
-    if let Some(id) = id {
-        for dir in sessions.iter().rev() {
-            if dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.ends_with(&id) || n.contains(&id))
-                .unwrap_or(false)
-            {
-                return Ok(dir.clone());
-            }
-        }
-        return Err(anyhow!("session {id} not found"));
     }
     if prefer_post_mortem {
         if let Some(pm) = sessions.iter().rev().find(|d| {
@@ -64,6 +57,16 @@ pub fn resolve(
         .last()
         .cloned()
         .ok_or_else(|| anyhow!("no sessions found"))
+}
+
+/// Common `<SESSION> | --last` resolution for subcommands where the two are
+/// mutually exclusive (enforced by clap at the arg level).
+pub fn resolve_arg(session: Option<&str>, last: bool) -> Result<PathBuf> {
+    if last {
+        resolve(None, false, false)
+    } else {
+        resolve(Some(session.unwrap_or_default().to_string()), false, false)
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +141,23 @@ mod tests {
         let short = &amb_name[amb_name.len() - 8..];
         let chosen = resolve(Some(short.to_string()), false, false).unwrap();
         assert_eq!(chosen, amb_dir);
+    }
+
+    /// #116: the id path must accept everything `resolve_session` accepts —
+    /// including a `SessionMetadata.name` — not just directory substrings.
+    #[test]
+    #[serial]
+    fn id_path_resolves_session_names() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.name = Some("ltx2-masterchouffe".into());
+        let w = SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let chosen = resolve(Some("ltx2-masterchouffe".into()), false, false).unwrap();
+        assert_eq!(chosen, dir);
     }
 
     #[test]
