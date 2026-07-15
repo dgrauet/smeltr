@@ -300,8 +300,9 @@ mod tests {
             .find(|s| s.qualname == "denoise.pass:cond")
             .expect("scope present");
         assert!(scope.delta_ns < 0, "B is faster than A");
-        assert_eq!(scope.a_gpu_ns, 1_000);
-        assert_eq!(scope.b_gpu_ns, 500);
+        // Window gpu = sum of op times (#136), not the CB's in_flight_ns.
+        assert_eq!(scope.a_gpu_ns, 800);
+        assert_eq!(scope.b_gpu_ns, 400);
     }
 
     #[test]
