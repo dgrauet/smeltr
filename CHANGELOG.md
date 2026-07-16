@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0](https://github.com/dgrauet/smeltr/compare/v0.20.1...v0.21.0) (2026-07-16)
+
+
+### Features
+
+* **analyzer,cli:** join late crash reports into analyze as ROOT CAUSE ([#156](https://github.com/dgrauet/smeltr/issues/156)) ([264763b](https://github.com/dgrauet/smeltr/commit/264763be422d1bc4f4a224e0a96a6382cc3542cc)), closes [#153](https://github.com/dgrauet/smeltr/issues/153)
+
+
+### Bug Fixes
+
+* **cli,probes:** surface the hardened-child mach-exceptions gap ([#157](https://github.com/dgrauet/smeltr/issues/157)) ([074762b](https://github.com/dgrauet/smeltr/commit/074762b4364f60643637ae345c296e55dc672604)), closes [#152](https://github.com/dgrauet/smeltr/issues/152)
+* **daemon,probes:** reap orphaned log stream children at boot ([#159](https://github.com/dgrauet/smeltr/issues/159)) ([e206b76](https://github.com/dgrauet/smeltr/commit/e206b7673d93d89d4ffb0d8f494b879f504f7e85)), closes [#158](https://github.com/dgrauet/smeltr/issues/158)
+* **probes:** parse pretty-printed multi-line .ips crash reports ([#154](https://github.com/dgrauet/smeltr/issues/154)) ([1450be5](https://github.com/dgrauet/smeltr/commit/1450be550bda9f7cb7e6c9c26cc031d754bc0088)), closes [#151](https://github.com/dgrauet/smeltr/issues/151)
+
 ## [0.20.1](https://github.com/dgrauet/smeltr/compare/v0.20.0...v0.20.1) (2026-07-16)
 
 
