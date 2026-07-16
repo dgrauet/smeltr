@@ -12,6 +12,7 @@ pub use breakdown::{
     OpFlatRow, OpGroupBy,
 };
 
+pub mod crash_join;
 pub mod diff;
 
 pub mod dispatch_origins;

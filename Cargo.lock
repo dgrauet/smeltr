@@ -2313,6 +2313,8 @@ dependencies = [
  "serde",
  "serde_json",
  "smeltr-core",
+ "smeltr-probes-crash-reports",
+ "tempfile",
  "thiserror 1.0.69",
  "uuid",
 ]
