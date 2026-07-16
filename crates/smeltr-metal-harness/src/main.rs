@@ -8,6 +8,15 @@ fn main() {
     let buf = device.new_buffer(4096, MTLResourceOptions::StorageModeShared);
     buf.set_label("smeltr-harness-buffer");
 
+    // Alloc + release probe: the drop below MUST reach the buffer's dealloc
+    // (BufferFree frame). Guards against the hook retaining app buffers —
+    // an ARC method-family mismatch in the new* swizzles once added one
+    // phantom retain per buffer, keeping every MLX-released buffer alive.
+    {
+        let free_probe = device.new_buffer(8192, MTLResourceOptions::StorageModeShared);
+        free_probe.set_label("smeltr-harness-free-probe");
+    }
+
     // No-op command buffer with a blit encoder.
     {
         let cb = queue.new_command_buffer();

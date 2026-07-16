@@ -946,13 +946,13 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
 @interface NSObject (SmeltrMetalHook)
 - (id<MTLCommandBuffer>)smeltr_commandBuffer;
 - (void)smeltr_commit;
-- (id<MTLCommandQueue>)smeltr_newCommandQueue;
+- (id<MTLCommandQueue>)smeltr_newCommandQueue NS_RETURNS_RETAINED;
 - (id<MTLComputePipelineState>)smeltr_newComputePipelineStateWithFunction:(id<MTLFunction>)function
-                                                                    error:(__autoreleasing NSError **)error;
+                                                                    error:(__autoreleasing NSError **)error NS_RETURNS_RETAINED;
 - (id<MTLComputePipelineState>)smeltr_newComputePipelineStateWithFunction:(id<MTLFunction>)function
                                                                   options:(MTLPipelineOption)options
                                                                reflection:(MTLAutoreleasedComputePipelineReflection * __nullable)reflection
-                                                                    error:(__autoreleasing NSError **)error;
+                                                                    error:(__autoreleasing NSError **)error NS_RETURNS_RETAINED;
 @end
 
 /* Forward decls for lazy-install fns */
@@ -1059,7 +1059,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
     [self smeltr_commit];
 }
 
-- (id<MTLCommandQueue>)smeltr_newCommandQueue {
+- (id<MTLCommandQueue>)smeltr_newCommandQueue NS_RETURNS_RETAINED {
     id<MTLCommandQueue> q = [self smeltr_newCommandQueue]; // original
     if (q && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
         // Install commandBuffer swizzle once on the concrete queue class.
@@ -1078,7 +1078,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
 }
 
 - (id<MTLComputePipelineState>)smeltr_newComputePipelineStateWithFunction:(id<MTLFunction>)function
-                                                                    error:(__autoreleasing NSError **)error {
+                                                                    error:(__autoreleasing NSError **)error NS_RETURNS_RETAINED {
     // Method-exchange: this call dispatches to the ORIGINAL implementation.
     id<MTLComputePipelineState> pso =
         [self smeltr_newComputePipelineStateWithFunction:function error:error];
@@ -1094,7 +1094,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
 - (id<MTLComputePipelineState>)smeltr_newComputePipelineStateWithFunction:(id<MTLFunction>)function
                                                                   options:(MTLPipelineOption)options
                                                                reflection:(MTLAutoreleasedComputePipelineReflection * __nullable)reflection
-                                                                    error:(__autoreleasing NSError **)error {
+                                                                    error:(__autoreleasing NSError **)error NS_RETURNS_RETAINED {
     id<MTLComputePipelineState> pso =
         [self smeltr_newComputePipelineStateWithFunction:function
                                                  options:options
@@ -1420,17 +1420,17 @@ static void smeltr_on_heap_alloc(id<MTLHeap> heap) {
 
 /* MTLDevice swizzles for newBufferWithLength:options: and newHeapWithDescriptor: */
 @interface NSObject (SmeltrDeviceAllocHook)
-- (id<MTLBuffer>)smeltr_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts;
-- (id<MTLHeap>)smeltr_newHeapWithDescriptor:(MTLHeapDescriptor *)desc;
+- (id<MTLBuffer>)smeltr_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts NS_RETURNS_RETAINED;
+- (id<MTLHeap>)smeltr_newHeapWithDescriptor:(MTLHeapDescriptor *)desc NS_RETURNS_RETAINED;
 @end
 
 @implementation NSObject (SmeltrDeviceAllocHook)
-- (id<MTLBuffer>)smeltr_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts {
+- (id<MTLBuffer>)smeltr_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts NS_RETURNS_RETAINED {
     id<MTLBuffer> b = [self smeltr_newBufferWithLength:length options:opts];
     if (b) smeltr_on_buffer_alloc(b, nil);
     return b;
 }
-- (id<MTLHeap>)smeltr_newHeapWithDescriptor:(MTLHeapDescriptor *)desc {
+- (id<MTLHeap>)smeltr_newHeapWithDescriptor:(MTLHeapDescriptor *)desc NS_RETURNS_RETAINED {
     id<MTLHeap> h = [self smeltr_newHeapWithDescriptor:desc];
     if (h) smeltr_on_heap_alloc(h);
     return h;
@@ -1440,17 +1440,17 @@ static void smeltr_on_heap_alloc(id<MTLHeap> heap) {
 /* MTLHeap swizzles for sub-allocations. Same selector names as on the device
    category, but they live on a different concrete class, which is fine. */
 @interface NSObject (SmeltrHeapAllocHook)
-- (id<MTLBuffer>)smeltr_heap_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts;
-- (id<MTLTexture>)smeltr_heap_newTextureWithDescriptor:(MTLTextureDescriptor *)desc;
+- (id<MTLBuffer>)smeltr_heap_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts NS_RETURNS_RETAINED;
+- (id<MTLTexture>)smeltr_heap_newTextureWithDescriptor:(MTLTextureDescriptor *)desc NS_RETURNS_RETAINED;
 @end
 
 @implementation NSObject (SmeltrHeapAllocHook)
-- (id<MTLBuffer>)smeltr_heap_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts {
+- (id<MTLBuffer>)smeltr_heap_newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)opts NS_RETURNS_RETAINED {
     id<MTLBuffer> b = [self smeltr_heap_newBufferWithLength:length options:opts]; // original
     if (b) smeltr_on_buffer_alloc(b, (id<MTLHeap>)self);
     return b;
 }
-- (id<MTLTexture>)smeltr_heap_newTextureWithDescriptor:(MTLTextureDescriptor *)desc {
+- (id<MTLTexture>)smeltr_heap_newTextureWithDescriptor:(MTLTextureDescriptor *)desc NS_RETURNS_RETAINED {
     id<MTLTexture> t = [self smeltr_heap_newTextureWithDescriptor:desc]; // original
     if (t) smeltr_on_texture_alloc(t, (id<MTLHeap>)self);
     return t;
