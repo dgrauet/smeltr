@@ -47,6 +47,10 @@ pub struct Diagnostics {
     /// contained their commit).
     #[serde(default)]
     pub cbs_scope_attributed: u64,
+    /// CBs whose op times were rescaled to their serialization-clamped
+    /// window (#146: pipelined encoders over-measure).
+    #[serde(default)]
+    pub cbs_op_time_clamped: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,10 +84,17 @@ struct EvalInterval {
 }
 
 pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdown, BreakdownError> {
-    let events: Vec<Event> = events.into_iter().collect();
+    let mut events: Vec<Event> = events.into_iter().collect();
     if events.is_empty() {
         return Err(BreakdownError::EmptySession);
     }
+
+    // #146: rescale op times whose sum exceeds their CB's
+    // serialization-clamped window before any attribution below.
+    let op_scales = crate::op_clamp::compute_op_time_scales(&events);
+    let cbs_op_time_clamped = op_scales.clamped_cb_count();
+    crate::op_clamp::apply_op_time_scales(&mut events, &op_scales);
+    let events = events;
 
     // 1. Index module calls; track unclosed Entered and orphan Returned.
     // Also record each call's [entered, returned] wall window for the #131
@@ -489,6 +500,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             malformed_returns,
             ops_cbs_without_samples,
             cbs_scope_attributed,
+            cbs_op_time_clamped,
         }),
         fields: Default::default(),
     })
@@ -559,10 +571,11 @@ pub fn render_table(
     }
     if let Some(d) = &root.diagnostics {
         out.push_str(&format!(
-            "\ndiagnostics: unscoped_gpu_us={:.3} unmatched_cb={} malformed_returns={}\n",
+            "\ndiagnostics: unscoped_gpu_us={:.3} unmatched_cb={} malformed_returns={} cbs_op_time_clamped={}\n",
             d.unscoped_gpu_ns as f64 / 1000.0,
             d.unmatched_cb_count,
             d.malformed_returns,
+            d.cbs_op_time_clamped,
         ));
     }
     out
@@ -1296,6 +1309,85 @@ mod tests {
         assert_eq!(r.diagnostics.as_ref().unwrap().unscoped_gpu_ns, 500);
         assert_eq!(unscoped.cb_count, 1);
         assert_eq!(unscoped.eval_count, 1);
+    }
+
+    #[test]
+    fn op_times_exceeding_cb_window_are_clamped() {
+        // Eval window [100, 400] contains one CB: scheduled t=110,
+        // completed t=210 -> serialization window = 100 ns. Its ops sum
+        // to 400 ns (pipelined-encoder over-measure, #146) and must be
+        // rescaled to the window.
+        let mut evs = vec![ev(
+            1,
+            100,
+            Payload::MlxEvalEntered {
+                call_id: 1,
+                array_count: 1,
+                stream: "gpu".into(),
+                module_stack: vec![],
+                stack_frames: vec![],
+            },
+            Source::PythonSidecar,
+        )];
+        evs.push(ev(
+            2,
+            105,
+            Payload::MetalCbCommitted {
+                cb_id: 9,
+                queue_id: 1,
+                queue_depth: 1,
+                label: None,
+            },
+            Source::MetalHook,
+        ));
+        evs.push(ev(
+            6,
+            110,
+            Payload::MetalCbScheduled {
+                cb_id: 9,
+                queue_id: 1,
+            },
+            Source::MetalHook,
+        ));
+        evs.push(ev(
+            3,
+            210,
+            Payload::MetalCbCompleted {
+                cb_id: 9,
+                queue_id: 1,
+                status: 4,
+                error_code: None,
+                error_domain: None,
+                in_flight_ns: 100,
+            },
+            Source::MetalHook,
+        ));
+        evs.push(ev(
+            4,
+            211,
+            Payload::MetalCbOps {
+                cb_id: 9,
+                ops: vec![op_sample("K_1", 300, 1), op_sample("K_2", 100, 1)],
+            },
+            Source::MetalHook,
+        ));
+        evs.push(ev(
+            5,
+            400,
+            Payload::MlxEvalReturned {
+                call_id: 1,
+                duration_ns: 300,
+                was_async: false,
+            },
+            Source::PythonSidecar,
+        ));
+        let r = compute(evs).unwrap();
+        let unscoped = find_child(&r, UNSCOPED);
+        // 400 raw -> clamped to the 100 ns window (75 + 25).
+        assert_eq!(unscoped.gpu_ns_self, 100);
+        let ops = &unscoped.ops;
+        assert_eq!(ops.iter().map(|o| o.gpu_ns).sum::<u64>(), 100);
+        assert_eq!(r.diagnostics.as_ref().unwrap().cbs_op_time_clamped, 1);
     }
 
     #[test]

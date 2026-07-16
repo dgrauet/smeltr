@@ -20,6 +20,7 @@ pub mod export;
 
 pub mod memory;
 
+pub mod op_clamp;
 pub mod op_kinds;
 pub use op_kinds::resolve_kind;
 

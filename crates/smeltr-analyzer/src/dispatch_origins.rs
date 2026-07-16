@@ -107,6 +107,10 @@ pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
     let mut next_scope = 0usize;
     let mut scope_stack: Vec<&ScopeWindow> = Vec::new();
 
+    // #146: op times whose sum exceeds their CB's serialization-clamped
+    // window are rescaled at read time (this consumer only borrows events).
+    let op_scales = crate::op_clamp::compute_op_time_scales(events);
+
     let mut agg: HashMap<(String, String), (u64, u64)> = HashMap::new();
     for ev in events {
         if let Payload::MetalCbOps { ops, .. } = &ev.payload {
@@ -134,7 +138,7 @@ pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
             for op in ops {
                 let kind = op_kind(op);
                 let entry = agg.entry((kind, file_line.clone())).or_insert((0, 0));
-                entry.0 += op.gpu_ns;
+                entry.0 += op_scales.scaled_gpu_ns(ev.seq, op.gpu_ns);
                 entry.1 += op.count as u64;
             }
         }
@@ -252,6 +256,42 @@ mod tests {
                 }],
             },
         )
+    }
+
+    #[test]
+    fn dispatch_origins_clamps_op_times_to_cb_window() {
+        // CB 9: scheduled t=12, completed t=14 -> window 2 ns; its op
+        // claims 100 ns (pipelined-encoder over-measure, #146).
+        let evs = vec![
+            enter(1, 10, 1, "/work/attention.py", 127),
+            ev(
+                2,
+                12,
+                Source::MetalHook,
+                Payload::MetalCbScheduled {
+                    cb_id: 9,
+                    queue_id: 1,
+                },
+            ),
+            ev(
+                3,
+                14,
+                Source::MetalHook,
+                Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 2,
+                },
+            ),
+            ops(4, 15, 9, "gemm_bf16", 100),
+            ret(5, 20, 1),
+        ];
+        let out = compute_dispatch_origins(&evs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].gpu_ns, 2);
     }
 
     #[test]
