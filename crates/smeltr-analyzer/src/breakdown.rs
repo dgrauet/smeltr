@@ -558,9 +558,10 @@ pub fn render_table(
         if show_ops && !n.ops.is_empty() {
             for op in n.ops.iter().take(top_ops) {
                 let op_indent = "  ".repeat((depth as usize) + 1);
+                let display = op.symbol.as_deref().unwrap_or(&op.name);
                 out.push_str(&format!(
                     "{:<48} {:>8} {:>14.3} {:>14} {:>5}\n",
-                    truncate(&format!("{op_indent}\u{2514} op:{}", op.name), 48),
+                    truncate(&format!("{op_indent}\u{2514} op:{display}"), 48),
                     op.count,
                     op.gpu_ns as f64 / 1000.0,
                     "",
@@ -783,9 +784,10 @@ pub fn render_ops_flat(root: &ModuleBreakdown, group_by: OpGroupBy, top: usize) 
     out.push('\n');
     for r in rows.iter().take(top) {
         let pct = (r.gpu_ns as f64 / total as f64) * 100.0;
+        let display = r.symbol.as_deref().unwrap_or(&r.key);
         out.push_str(&format!(
             "{:<32} {:>8} {:>14.3} {:>5.1}%\n",
-            r.key,
+            display,
             r.count,
             r.gpu_ns as f64 / 1000.0,
             pct,
@@ -2129,6 +2131,45 @@ mod tests {
         assert!(s.contains("Matmul"));
         assert!(s.contains("Softmax"));
         assert!(s.contains("op:"));
+    }
+
+    #[test]
+    fn render_table_prefers_symbol_over_fingerprint() {
+        let r = fixture_with_ops(vec![
+            OpAttribution {
+                name: "K_7300_0x0x0".into(),
+                gpu_ns: 1200,
+                count: 1,
+                symbol: Some("v_copyint32float32".into()),
+                kind: None,
+            },
+            OpAttribution {
+                name: "K_6400_32x129x1".into(),
+                gpu_ns: 300,
+                count: 1,
+                symbol: None,
+                kind: None,
+            },
+        ]);
+        let s = render_table(&r, 10, 6, 5, true);
+        assert!(s.contains("op:v_copyint32float32"));
+        assert!(!s.contains("op:K_7300_0x0x0"));
+        // Fingerprint stays as fallback when no symbol resolved.
+        assert!(s.contains("op:K_6400_32x129x1"));
+    }
+
+    #[test]
+    fn render_ops_flat_prefers_symbol_in_name_mode() {
+        let r = fixture_with_ops(vec![OpAttribution {
+            name: "K_7300_0x0x0".into(),
+            gpu_ns: 1200,
+            count: 1,
+            symbol: Some("v_copyint32float32".into()),
+            kind: None,
+        }]);
+        let s = render_ops_flat(&r, OpGroupBy::Name, 10);
+        assert!(s.contains("v_copyint32float32"));
+        assert!(!s.contains("K_7300_0x0x0"));
     }
 
     #[test]
