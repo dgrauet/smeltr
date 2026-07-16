@@ -37,11 +37,12 @@ struct Termination {
 }
 
 pub fn parse_ips(content: &str, path: &str) -> Option<Payload> {
-    let mut lines = content.lines();
-    let header_line = lines.next()?;
-    let body_line = lines.next()?;
+    // Line 1 is the single-line header JSON; the body JSON is everything
+    // after it — single-line on older macOS, pretty-printed across
+    // thousands of lines on macOS 15/26 (#151).
+    let (header_line, body_text) = content.split_once('\n')?;
     let _hdr: Header = serde_json::from_str(header_line).ok()?;
-    let body: Body = serde_json::from_str(body_line).ok()?;
+    let body: Body = serde_json::from_str(body_text).ok()?;
 
     let mut codes_out = Vec::new();
     let mut summary = String::new();
@@ -112,6 +113,33 @@ mod tests {
     #[test]
     fn empty_input_returns_none() {
         assert!(parse_ips("", "/x").is_none());
+    }
+
+    #[test]
+    fn parses_pretty_printed_multiline_body() {
+        // Real ReportCrash output on macOS 15/26: single-line header, then
+        // the body JSON pretty-printed across thousands of lines (#151).
+        let fixture = include_str!("../tests/fixtures/sample_multiline.ips");
+        let p = parse_ips(fixture, "/x/multi.ips").expect("parse failed");
+        let Payload::CrashReportEmitted {
+            crashed_pid,
+            signal,
+            summary,
+            ..
+        } = p
+        else {
+            panic!()
+        };
+        assert_eq!(crashed_pid, Some(11672));
+        assert_eq!(signal.as_deref(), Some("SIGABRT"));
+        assert!(summary.contains("EXC_CRASH"), "summary: {summary}");
+    }
+
+    #[test]
+    fn truncated_body_returns_none() {
+        // Partial read while ReportCrash is still writing.
+        let fixture = include_str!("../tests/fixtures/sample_multiline.ips");
+        assert!(parse_ips(&fixture[..fixture.len() / 2], "/x").is_none());
     }
 
     #[test]

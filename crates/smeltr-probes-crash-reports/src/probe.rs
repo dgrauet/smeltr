@@ -81,7 +81,15 @@ impl Probe for CrashReportsProbe {
                             Ok(c) => c,
                             Err(_) => continue,
                         };
-                        if let Some(payload) = parse_ips(&content, &p.to_string_lossy()) {
+                        let parsed = parse_ips(&content, &p.to_string_lossy());
+                        if parsed.is_none() {
+                            // A crash report we cannot parse is exactly the
+                            // moment observability must not be silent (#151).
+                            // Partial reads self-heal: ReportCrash keeps
+                            // writing and the next Modify event re-parses.
+                            tracing::warn!(path = %p.display(), "failed to parse .ips crash report (partial write or unknown format)");
+                        }
+                        if let Some(payload) = parsed {
                             if let Some(filter) = &pid_filter {
                                 if let smeltr_core::event::Payload::CrashReportEmitted {
                                     crashed_pid,
