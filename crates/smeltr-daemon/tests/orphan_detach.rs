@@ -87,8 +87,7 @@ fn client_death_without_detach_finalizes_scoped_session() {
         "scoped session was not finalized after client death:\n{meta}"
     );
 
-    let _ = daemon.kill();
-    let _ = daemon.wait();
+    terminate(&mut daemon);
 }
 
 #[test]
@@ -135,6 +134,25 @@ fn clean_detach_still_finalizes_with_exit_code() {
         "clean detach lost its exit code:\n{meta}"
     );
 
+    terminate(&mut daemon);
+}
+
+/// SIGTERM + bounded wait, then force-kill: lets the daemon reap its
+/// `log stream` child (#158) instead of orphaning it on every test run.
+fn terminate(daemon: &mut std::process::Child) {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &daemon.id().to_string()])
+        .output();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match daemon.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => break,
+        }
+    }
     let _ = daemon.kill();
     let _ = daemon.wait();
 }
