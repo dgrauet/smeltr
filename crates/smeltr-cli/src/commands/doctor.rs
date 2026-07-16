@@ -122,16 +122,44 @@ fn check_crash_reports() -> ProbeCheck {
 }
 
 fn check_mach_exc() -> ProbeCheck {
-    match smeltr_probes_mach_exceptions::port::install_for_pid(std::process::id()) {
-        Ok(_) => ProbeCheck {
-            name: "mach-exceptions",
-            status: Status::Ok,
-            detail: "task_for_pid(self) succeeded; only same-uid pids are observable".into(),
-        },
-        Err(e) => ProbeCheck {
+    use smeltr_probes_mach_exceptions::port;
+    if let Err(e) = port::install_for_pid(std::process::id()) {
+        return ProbeCheck {
             name: "mach-exceptions",
             status: Status::Failed,
             detail: e.to_string(),
+        };
+    }
+    // Self-observation always works; the realistic question is whether a
+    // spawned child is observable. Hardened-runtime binaries (system and
+    // Homebrew Python, all Apple platform binaries) refuse task_for_pid
+    // even same-uid (#152), so probe an actual hardened child.
+    match std::process::Command::new("/bin/sleep").arg("5").spawn() {
+        Ok(mut child) => {
+            let observable = port::can_observe_pid(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            match observable {
+                Ok(()) => ProbeCheck {
+                    name: "mach-exceptions",
+                    status: Status::Ok,
+                    detail: "task_for_pid works on spawned children; same-uid pids observable"
+                        .into(),
+                },
+                Err(_) => ProbeCheck {
+                    name: "mach-exceptions",
+                    status: Status::Degraded,
+                    detail: "task_for_pid(self) ok, but hardened children (system/Homebrew \
+                             Python) are not observable — crash signals for those come from \
+                             the crash-reports probe (.ips)"
+                        .into(),
+                },
+            }
+        }
+        Err(_) => ProbeCheck {
+            name: "mach-exceptions",
+            status: Status::Ok,
+            detail: "task_for_pid(self) succeeded; only same-uid pids are observable".into(),
         },
     }
 }

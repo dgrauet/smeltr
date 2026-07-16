@@ -189,6 +189,18 @@ pub async fn run(
         anyhow::bail!("daemon refused AttachScopedProbes: {resp:?}");
     }
 
+    // #152: hardened-runtime children (system/Homebrew Python) refuse
+    // task_for_pid even same-uid, so the daemon's mach-exceptions probe
+    // silently disables itself for this pid. Tell the user up front —
+    // like the SIP/DYLD fallback warning — that crash signals for this
+    // run will come from crash reports (.ips), not mach exceptions.
+    if smeltr_probes_mach_exceptions::port::can_observe_pid(pid).is_err() {
+        eprintln!(
+            "smeltr: mach-exceptions cannot observe pid {pid} (hardened runtime); \
+             crashes will be captured via crash reports (.ips) instead"
+        );
+    }
+
     // Attach metal hook probe if applicable.
     if let Some((_, ring_path)) = &hook_decision {
         let resp = client

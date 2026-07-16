@@ -210,6 +210,7 @@ mod imp {
     extern "C" {
         fn mach_task_self() -> MachPortT;
         fn task_for_pid(target_tport: MachPortT, pid: i32, t: *mut MachPortT) -> KernReturnT;
+        fn mach_port_deallocate(task: MachPortT, name: MachPortT) -> KernReturnT;
         fn mach_port_allocate(task: MachPortT, right: i32, name: *mut MachPortT) -> KernReturnT;
         fn mach_port_insert_right(
             task: MachPortT,
@@ -257,6 +258,26 @@ mod imp {
     struct ExceptionMsg {
         header: MachMsgHeader,
         body: [u8; 256],
+    }
+
+    /// Check whether this process may observe `pid` via `task_for_pid`,
+    /// WITHOUT installing any exception port (#152). Hardened-runtime
+    /// targets (system/Homebrew Python) refuse with kr=5 even same-uid,
+    /// so `install_for_pid` on a real recorded child usually fails while
+    /// a self-check succeeds.
+    pub fn can_observe_pid(pid: u32) -> std::io::Result<()> {
+        unsafe {
+            let me = mach_task_self();
+            let mut target: MachPortT = 0;
+            let kr = task_for_pid(me, pid as i32, &mut target);
+            if kr != KERN_SUCCESS {
+                return Err(std::io::Error::other(format!(
+                    "task_for_pid({pid}): {kr} (need same uid / entitlement)"
+                )));
+            }
+            let _ = mach_port_deallocate(me, target);
+            Ok(())
+        }
     }
 
     pub fn install_for_pid(pid: u32) -> std::io::Result<ExceptionReceiver> {
@@ -353,6 +374,12 @@ pub mod stub {
             "mach exceptions require macOS",
         ))
     }
+    pub fn can_observe_pid(_pid: u32) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "mach exceptions require macOS",
+        ))
+    }
     impl ExceptionReceiver {
         pub fn next(&self, _timeout: Duration) -> Option<DecodedException> {
             None
@@ -382,5 +409,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn can_observe_pid_self_succeeds() {
+        assert!(can_observe_pid(std::process::id()).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn can_observe_pid_launchd_fails() {
+        // pid 1 is root-owned launchd: task_for_pid must refuse.
+        let err = can_observe_pid(1).unwrap_err();
+        assert!(err.to_string().contains("task_for_pid(1)"), "{err}");
     }
 }
