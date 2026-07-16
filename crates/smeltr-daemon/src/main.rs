@@ -36,6 +36,17 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = smeltr_daemon::recovery::claim_pid_file(&pid_path) {
         anyhow::bail!("another smeltrd is starting up (pid file claim failed: {e})");
     }
+    // #158: a SIGKILLed daemon (launchctl kickstart -k, force-killed test
+    // daemons, panic-hook abort) orphans its oslog `log stream` child —
+    // they accumulate forever and pin diagnosticd. Reap them at boot.
+    let reaped = smeltr_probes_oslog::reaper::reap_orphaned_streams();
+    if reaped > 0 {
+        tracing::info!(
+            reaped,
+            "killed orphaned `log stream` processes from previous daemons"
+        );
+    }
+
     match smeltr_daemon::recovery::recover_orphaned_sessions() {
         Ok(0) => {}
         Ok(n) => tracing::info!(
