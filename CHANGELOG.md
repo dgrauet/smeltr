@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1](https://github.com/dgrauet/smeltr/compare/v0.20.0...v0.20.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* **analyzer:** clamp op GPU times to their CB serialization window ([#149](https://github.com/dgrauet/smeltr/issues/149)) ([e524f19](https://github.com/dgrauet/smeltr/commit/e524f19c0c0e2f01fa4299e2d18a81d731d15991)), closes [#146](https://github.com/dgrauet/smeltr/issues/146)
+* **analyzer:** render resolved kernel symbols in breakdown tables ([#148](https://github.com/dgrauet/smeltr/issues/148)) ([bad256c](https://github.com/dgrauet/smeltr/commit/bad256cbec3f8185a4141ac5cf2bbdf5ec762bb5)), closes [#147](https://github.com/dgrauet/smeltr/issues/147)
+
 ## [0.20.0](https://github.com/dgrauet/smeltr/compare/v0.19.0...v0.20.0) (2026-07-15)
 
 
