@@ -84,6 +84,13 @@ pub fn run(
         print!("{}", lazy_gap_notice(&gap));
     }
 
+    // #178: Metal capture but zero sidecar events — the tree will be 100%
+    // <unscoped> and the #163 notice cannot fire (no eval windows at all);
+    // point at the missing `smeltr` package in the target environment.
+    if let Some(absent) = smeltr_analyzer::rules::sidecar_absent::detect(&events) {
+        print!("{}", sidecar_absent_notice(&absent));
+    }
+
     // Parse --field key=value flags.
     let field_filter: BTreeMap<String, FieldValue> = field_filter_raw
         .iter()
@@ -141,6 +148,12 @@ fn prune_by_field_filter(
 
     let self_matches = filter.iter().all(|(k, v)| node.fields.get(k) == Some(v));
     self_matches || any_child_matches
+}
+
+/// #178: renders the "Python sidecar never attached" notice printed above
+/// the tree when the session has Metal CBs but no sidecar event.
+fn sidecar_absent_notice(absent: &smeltr_analyzer::rules::sidecar_absent::SidecarAbsent) -> String {
+    format!("ℹ no Python sidecar: {}\n\n", absent.advice())
 }
 
 /// #163: renders the lazy-eval attribution-gap notice printed above the tree.
@@ -218,6 +231,21 @@ mod tests {
         assert!(n.contains("99%"), "{n}");
         assert!(n.contains("smeltr.scope"), "{n}");
         assert!(n.contains("smeltr origins"), "{n}");
+        assert!(n.ends_with("\n\n"), "{n:?}");
+    }
+
+    /// #178: metal-only sessions must get an explicit sidecar-absent notice.
+    #[test]
+    fn sidecar_absent_notice_mentions_install() {
+        let absent = smeltr_analyzer::rules::sidecar_absent::SidecarAbsent {
+            metal_cb_count: 42,
+            first_seq: 1,
+            first_ts_mono_ns: 1,
+        };
+        let n = sidecar_absent_notice(&absent);
+        assert!(n.starts_with("ℹ no Python sidecar"), "{n}");
+        assert!(n.contains("42 command buffer(s)"), "{n}");
+        assert!(n.contains("pip install"), "{n}");
         assert!(n.ends_with("\n\n"), "{n:?}");
     }
 

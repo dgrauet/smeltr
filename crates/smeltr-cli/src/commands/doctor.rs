@@ -164,6 +164,36 @@ fn check_mach_exc() -> ProbeCheck {
     }
 }
 
+/// #178: whether the Python sidecar is importable. Checks the PATH
+/// `python3` as a proxy; target venvs each need the package too, so the
+/// detail says so either way.
+fn check_python_sidecar() -> ProbeCheck {
+    match Command::new("python3")
+        .args(["-c", "import smeltr"])
+        .output()
+    {
+        Ok(o) if o.status.success() => ProbeCheck {
+            name: "python-sidecar",
+            status: Status::Ok,
+            detail: "python3 on PATH can import smeltr (each target venv still needs the package)"
+                .into(),
+        },
+        Ok(_) => ProbeCheck {
+            name: "python-sidecar",
+            status: Status::Degraded,
+            detail: "`import smeltr` fails for python3 on PATH — install with `pip install -e \
+                     python/` (from the smeltr repo) in each target environment to get \
+                     module/scope attribution under `smeltr record`"
+                .into(),
+        },
+        Err(_) => ProbeCheck {
+            name: "python-sidecar",
+            status: Status::Degraded,
+            detail: "no python3 on PATH — sidecar n/a (pure-Metal targets unaffected)".into(),
+        },
+    }
+}
+
 pub fn run() -> anyhow::Result<()> {
     let checks = [
         check_vm(),
@@ -173,6 +203,7 @@ pub fn run() -> anyhow::Result<()> {
         check_ioreport(),
         check_crash_reports(),
         check_mach_exc(),
+        check_python_sidecar(),
     ];
     println!("smeltr doctor — probe availability\n");
     for c in &checks {
