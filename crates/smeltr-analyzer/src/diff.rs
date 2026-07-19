@@ -48,6 +48,24 @@ pub struct ScopeAggregate {
     pub gpu_ns: u64,
 }
 
+/// Number of stage/dispatch sampling-disable episodes in a session. Non-zero
+/// means per-op GPU attribution (origins/op-summary/breakdown/compare) is
+/// incomplete during the disabled spans — surface it wherever those numbers
+/// are shown (#165).
+pub fn sampling_disable_episodes(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|ev| {
+            matches!(
+                &ev.payload,
+                smeltr_core::event::Payload::MetalHookSkipped { reason }
+                    if reason.contains("stage sampling disabled")
+                        || reason.contains("dispatch sampling disabled")
+            )
+        })
+        .count()
+}
+
 /// Diff two sessions and produce scope + op deltas plus
 /// only-in-A / only-in-B scope lists.
 ///
@@ -652,5 +670,42 @@ mod tests {
         assert_eq!(d[0].file_line, "attention.py:127");
         assert_eq!(d[0].delta_ns, -1_000_000_000);
         assert_eq!(d[0].delta_pct, Some(-50.0));
+    }
+}
+
+#[cfg(test)]
+mod sampling_degradation_tests {
+    use super::*;
+    use smeltr_core::event::{Payload, Source};
+    use uuid::Uuid;
+
+    fn skipped(seq: u64, reason: &str) -> Event {
+        Event {
+            ts_mono_ns: seq,
+            ts_wall_ns: seq,
+            session_id: Uuid::nil(),
+            source: Source::MetalHook,
+            pid: None,
+            seq,
+            payload: Payload::MetalHookSkipped {
+                reason: reason.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn counts_stage_and_dispatch_disables_only() {
+        // #165: compare must know when op-level numbers are partial.
+        let events = vec![
+            skipped(1, "stage sampling disabled after sustained alloc failures"),
+            skipped(2, "stage sampling re-enabled"),
+            skipped(
+                3,
+                "dispatch sampling disabled after sustained alloc failures",
+            ),
+            skipped(4, "ring frame skipped: corrupt"),
+        ];
+        assert_eq!(sampling_disable_episodes(&events), 2);
+        assert_eq!(sampling_disable_episodes(&[]), 0);
     }
 }
