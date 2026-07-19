@@ -10,8 +10,14 @@ use std::path::PathBuf;
 
 pub fn run(arg_last: bool, session_id: Option<String>, include_ambient: bool) -> Result<()> {
     let dir = crate::session_resolver::resolve(session_id, arg_last, include_ambient)?;
+    let report = build_report(&dir)?;
+    println!("{}", report.render());
+    Ok(())
+}
+
+fn build_report(dir: &std::path::Path) -> Result<smeltr_analyzer::report::Report> {
     let events =
-        read_events(&dir).with_context(|| format!("reading events from {}", dir.display()))?;
+        read_events(dir).with_context(|| format!("reading events from {}", dir.display()))?;
     let mut report = analyze(&events);
 
     // #153: ReportCrash writes the .ips seconds AFTER the crashed child
@@ -24,7 +30,10 @@ pub fn run(arg_last: bool, session_id: Option<String>, include_ambient: bool) ->
     // the monotonic clock, which stops during system sleep — a run that
     // slept mid-recording has event wall times behind reality by the
     // whole sleep duration.
-    if let Ok(meta) = read_metadata(&dir) {
+    if let Ok(meta) = read_metadata(dir) {
+        // #170: post-mortem sessions carry events stamped with the ambient
+        // session that ingested them — name the session actually analyzed.
+        report.session_short = Some(meta.session_id.short());
         if let SessionKind::Scoped { pid, .. } = &meta.kind {
             if meta.exit_code != Some(0) {
                 if let (Some(start_ns), Some(end_ns), Some(reports_dir)) = (
@@ -46,8 +55,7 @@ pub fn run(arg_last: bool, session_id: Option<String>, include_ambient: bool) ->
         }
     }
 
-    println!("{}", report.render());
-    Ok(())
+    Ok(report)
 }
 
 fn rfc3339_unix_ns(s: &str) -> Option<u64> {
@@ -63,4 +71,44 @@ fn diagnostic_reports_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(over));
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Logs/DiagnosticReports"))
+}
+
+#[cfg(test)]
+mod tests {
+    use serial_test::serial;
+    use smeltr_core::event::{Event, Payload, Source};
+    use smeltr_core::session::{SessionId, SessionMetadata};
+    use smeltr_core::writer::SessionWriter;
+
+    #[test]
+    #[serial]
+    fn report_header_uses_metadata_id_not_event_stamps() {
+        // #170: post-mortem sessions carry events stamped with the ambient
+        // session that ingested them; the header must name the session that
+        // was actually analyzed (the directory's metadata).
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let meta_id = SessionId::new();
+        let foreign_id = SessionId::new();
+        let meta = SessionMetadata::now_starting(meta_id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        w.write_event(&Event {
+            ts_mono_ns: 1,
+            ts_wall_ns: 1,
+            session_id: foreign_id.0,
+            source: Source::System,
+            pid: None,
+            seq: 1,
+            payload: Payload::SessionStarted { wall_unix_ns: 1 },
+        })
+        .unwrap();
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let report = super::build_report(&dir).unwrap();
+        assert_eq!(
+            report.session_short.as_deref(),
+            Some(meta_id.short().as_str()),
+        );
+    }
 }
