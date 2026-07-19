@@ -99,7 +99,9 @@ CBOR length-prefixed frames over a Unix socket. See
 ## Env vars
 
 - `SMELTR_HOME` — sessions root (default `~/.smeltr`).
-- `SMELTR_SOCKET` — daemon socket path (default `$XDG_RUNTIME_DIR/smeltr.sock`).
+- `SMELTR_SOCKET` — daemon socket path (default: `$XDG_RUNTIME_DIR` →
+  `$TMPDIR` → `/tmp`, + `/smeltr.sock`; on macOS `XDG_RUNTIME_DIR` is unset
+  so `$TMPDIR` wins).
 - `SMELTR_RING_PATH` — metal-hook mmap ring file (set by `smeltr record`).
 - `SMELTR_DYLIB` — override path to `libmetal_hook.dylib` (dev override; smeltr ships an embedded copy by default).
 - `SMELTR_HOOK_DISABLE=1` — kill switch for the metal-hook dylib.
