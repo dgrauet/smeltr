@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0](https://github.com/dgrauet/smeltr/compare/v0.22.0...v0.23.0) (2026-07-19)
+
+
+### Features
+
+* **analyzer,cli,mcp:** flag Metal-only sessions where the sidecar never attached ([#178](https://github.com/dgrauet/smeltr/issues/178)) ([#179](https://github.com/dgrauet/smeltr/issues/179)) ([51cc8ca](https://github.com/dgrauet/smeltr/commit/51cc8ca9b1dae34f7751a4e2862a1fa18fd27683))
+
 ## [0.22.0](https://github.com/dgrauet/smeltr/compare/v0.21.4...v0.22.0) (2026-07-19)
 
 
