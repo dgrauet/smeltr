@@ -77,6 +77,13 @@ pub fn run(
         print!("{notice}");
     }
 
+    // #163: fully-lazy pipelines (single pipeline-level mx.eval per step)
+    // dump ~100% of GPU time into <unscoped>; say so instead of letting the
+    // tree be misread as a smeltr bug.
+    if let Some(gap) = smeltr_analyzer::rules::lazy_eval_attribution::detect(&events) {
+        print!("{}", lazy_gap_notice(&gap));
+    }
+
     // Parse --field key=value flags.
     let field_filter: BTreeMap<String, FieldValue> = field_filter_raw
         .iter()
@@ -136,6 +143,11 @@ fn prune_by_field_filter(
     self_matches || any_child_matches
 }
 
+/// #163: renders the lazy-eval attribution-gap notice printed above the tree.
+fn lazy_gap_notice(gap: &smeltr_analyzer::rules::lazy_eval_attribution::LazyEvalGap) -> String {
+    format!("⚠ module attribution gap: {}\n\n", gap.advice())
+}
+
 fn write_flamegraph(path: &Path, root: &ModuleBreakdown) -> Result<()> {
     let mut lines: Vec<String> = Vec::new();
     fn walk(n: &ModuleBreakdown, prefix: &str, out: &mut Vec<String>) {
@@ -187,6 +199,26 @@ mod tests {
             parse_field_kv("name=ltx2").unwrap(),
             ("name".to_string(), FieldValue::String("ltx2".into()))
         );
+    }
+
+    /// #163: fully-lazy pipelines must get an explicit notice instead of a
+    /// silent 100% <unscoped> tree.
+    #[test]
+    fn lazy_gap_notice_mentions_scope_and_origins() {
+        let gap = smeltr_analyzer::rules::lazy_eval_attribution::LazyEvalGap {
+            gap_gpu_ns: 99,
+            total_gpu_ns: 100,
+            module_call_count: 3,
+            lazy_eval_count: 2,
+            first_seq: 1,
+            first_ts_mono_ns: 1,
+        };
+        let n = lazy_gap_notice(&gap);
+        assert!(n.starts_with("⚠ module attribution gap"), "{n}");
+        assert!(n.contains("99%"), "{n}");
+        assert!(n.contains("smeltr.scope"), "{n}");
+        assert!(n.contains("smeltr origins"), "{n}");
+        assert!(n.ends_with("\n\n"), "{n:?}");
     }
 
     #[test]

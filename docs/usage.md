@@ -145,6 +145,23 @@ tree stays meaningful instead of dumping everything into `<unscoped>`.
 Only CBs outside every window remain `<unscoped>`; the op-level
 breakdown still decomposes that residual bucket by kernel signature.
 
+**Known limitation — fully-lazy pipelines (#163):** when the whole step
+graph is built under module forwards but evaluated by a *single*
+pipeline-level `mx.eval(...)` (i.e. the eval runs outside any module
+call, with an empty `module_stack`), the GPU work lands inside that
+eval's window and is attributed to `<unscoped>` — the scope fallback
+above never applies because the CBs *do* have an eval window.
+Attribution through the lazy graph itself would require MLX-side node
+tagging that does not exist. `smeltr breakdown`, `smeltr analyze` and
+`get_inference_breakdown` detect this pattern (≥50 % of GPU time in
+empty-module-stack eval windows) and print an explicit
+`module attribution gap` notice. Remedies:
+
+- wrap pipeline stages in `smeltr.scope("...")` **containing their
+  eval** (see "Profiling scopes" below), or
+- record with `SMELTR_STACK_CAPTURE=1` and use `smeltr origins` for
+  file:line attribution (it will point at the `mx.eval` call site).
+
 Kill switch: `SMELTR_HOOK_NO_OPS=1` disables op-level capture entirely
 (module-level breakdown stays active). See the
 [ADR](adr/0002-op-attribution-pso-signature.md) for the design

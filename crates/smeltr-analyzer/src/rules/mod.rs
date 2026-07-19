@@ -1,5 +1,6 @@
 pub mod duplicate_model_load;
 pub mod hook_degradation;
+pub mod lazy_eval_attribution;
 pub mod memory_pressure;
 pub mod metal_error;
 pub mod mlx_timing;
