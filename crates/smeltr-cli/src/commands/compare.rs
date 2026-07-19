@@ -3,8 +3,8 @@
 use crate::session_resolver::resolve_arg;
 use anyhow::{anyhow, Context};
 use smeltr_analyzer::diff::{
-    diff_memory, diff_origins, diff_sessions, MemoryDelta, OpDelta, OriginDelta, ScopeAggregate,
-    ScopeDelta, SessionDiff,
+    diff_memory, diff_origins, diff_sessions, sampling_disable_episodes, MemoryDelta, OpDelta,
+    OriginDelta, ScopeAggregate, ScopeDelta, SessionDiff,
 };
 use smeltr_core::reader::read_events;
 use smeltr_mcp::types::resolve_session;
@@ -18,8 +18,33 @@ pub fn run(session_a: &str, session_b: Option<&str>, last: bool, top: usize) -> 
     let diff = diff_sessions(&a_events, &b_events);
     let memory_deltas = diff_memory(&a_events, &b_events);
     let origin_deltas = diff_origins(&a_events, &b_events);
-    print!("{}", render(&diff, &memory_deltas, &origin_deltas, top));
+    let degraded = (
+        sampling_disable_episodes(&a_events),
+        sampling_disable_episodes(&b_events),
+    );
+    print!(
+        "{}",
+        render(&diff, &memory_deltas, &origin_deltas, top, degraded)
+    );
     Ok(())
+}
+
+/// #165: when stage/dispatch sampling auto-disabled in either session, the
+/// op-level deltas below are partial — banner it instead of letting phantom
+/// deltas from the degraded spans pass as real regressions.
+fn render_degraded_banner(out: &mut String, (a, b): (usize, usize)) {
+    if a == 0 && b == 0 {
+        return;
+    }
+    out.push_str("⚠ op-level numbers partial (GPU op timing degraded):\n");
+    for (label, n) in [("A", a), ("B", b)] {
+        if n > 0 {
+            out.push_str(&format!(
+                "  {label}: sampling disabled {n} time(s) after sustained alloc failures\n"
+            ));
+        }
+    }
+    out.push('\n');
 }
 
 pub(crate) fn render(
@@ -27,8 +52,10 @@ pub(crate) fn render(
     memory_deltas: &[MemoryDelta],
     origin_deltas: &[OriginDelta],
     top: usize,
+    degraded: (usize, usize),
 ) -> String {
     let mut out = String::new();
+    render_degraded_banner(&mut out, degraded);
     render_scope_deltas(&mut out, &diff.scope_deltas, top);
     out.push('\n');
     render_op_deltas(&mut out, &diff.op_deltas, top);
@@ -244,7 +271,7 @@ mod tests {
 
     #[test]
     fn render_empty_diff_shows_section_titles() {
-        let s = render(&empty_diff(), &[], &[], 20);
+        let s = render(&empty_diff(), &[], &[], 20, (0, 0));
         assert!(s.contains("SCOPE DELTAS"));
         assert!(s.contains("OP KIND DELTAS"));
         assert!(s.contains("SCOPES ONLY IN A"));
@@ -265,7 +292,7 @@ mod tests {
                 delta_pct: Some(0.1),
             })
             .collect();
-        let s = render(&diff, &[], &[], 5);
+        let s = render(&diff, &[], &[], 5, (0, 0));
         assert!(s.contains("showing top 5 of 50"));
     }
 
@@ -279,7 +306,7 @@ mod tests {
             delta_ns: -1_000_000_000,
             delta_pct: Some(-50.0),
         }];
-        let s = render(&diff, &[], &[], 20);
+        let s = render(&diff, &[], &[], 20, (0, 0));
         assert!(s.contains("2.000s"));
         assert!(s.contains("1.000s"));
         assert!(s.contains("-1.000s"));
@@ -295,7 +322,7 @@ mod tests {
             delta_bytes: -1_000_000_000,
             delta_pct: Some(-50.0),
         }];
-        let s = render(&empty_diff(), &memory, &[], 20);
+        let s = render(&empty_diff(), &memory, &[], 20, (0, 0));
         assert!(s.contains("MEMORY DELTAS"));
         assert!(s.contains("1.86 GB"));
         assert!(s.contains("953.67 MB"));
@@ -304,7 +331,7 @@ mod tests {
 
     #[test]
     fn render_empty_memory_shows_placeholder() {
-        let s = render(&empty_diff(), &[], &[], 20);
+        let s = render(&empty_diff(), &[], &[], 20, (0, 0));
         assert!(s.contains("no memory deltas"));
     }
 
@@ -318,11 +345,42 @@ mod tests {
             delta_ns: -390_000_000,
             delta_pct: Some(-9.0),
         }];
-        let s = render(&empty_diff(), &[], &origins, 20);
+        let s = render(&empty_diff(), &[], &origins, 20, (0, 0));
         assert!(s.contains("ORIGIN DELTAS"));
         assert!(s.contains("attention.py:127"));
         assert!(s.contains("4.310s"));
         assert!(s.contains("3.920s"));
         assert!(s.contains("-9.0%"));
+    }
+}
+
+#[cfg(test)]
+mod degraded_banner_tests {
+    use super::*;
+
+    fn empty_diff() -> SessionDiff {
+        SessionDiff {
+            scope_deltas: vec![],
+            op_deltas: vec![],
+            scopes_only_in_a: vec![],
+            scopes_only_in_b: vec![],
+        }
+    }
+
+    #[test]
+    fn banner_shown_when_either_session_degraded() {
+        // #165: op-level deltas are partial when stage/dispatch sampling was
+        // disabled in either session — say so instead of letting phantom
+        // deltas send the reader ghost-hunting.
+        let s = render(&empty_diff(), &[], &[], 20, (0, 2));
+        assert!(s.contains("op-level numbers partial"), "got:\n{s}");
+        assert!(s.contains("B: sampling disabled 2 time(s)"), "got:\n{s}");
+        assert!(!s.contains("A: sampling disabled"), "got:\n{s}");
+    }
+
+    #[test]
+    fn no_banner_when_clean() {
+        let s = render(&empty_diff(), &[], &[], 20, (0, 0));
+        assert!(!s.contains("partial"), "got:\n{s}");
     }
 }

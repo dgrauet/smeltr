@@ -71,6 +71,12 @@ pub fn run(
         return Ok(());
     }
 
+    // #165: flag partial op-level numbers when sampling auto-disabled.
+    let degraded = smeltr_analyzer::diff::sampling_disable_episodes(&events);
+    if let Some(notice) = crate::degraded::single_session_notice(degraded) {
+        print!("{notice}");
+    }
+
     // Parse --field key=value flags.
     let field_filter: BTreeMap<String, FieldValue> = field_filter_raw
         .iter()

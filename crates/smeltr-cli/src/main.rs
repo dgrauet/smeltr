@@ -1,5 +1,6 @@
 mod client;
 mod commands;
+mod degraded;
 mod session_resolver;
 
 use clap::{Parser, Subcommand};

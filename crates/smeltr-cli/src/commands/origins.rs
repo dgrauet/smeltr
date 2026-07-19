@@ -11,12 +11,16 @@ pub fn run(session: Option<&str>, last: bool, top: usize) -> anyhow::Result<()> 
     let dir = resolve_arg(session, last)?;
     let events = read_events(&dir).context("read session events")?;
     let origins = compute_dispatch_origins(&events);
-    print!("{}", render(&origins, top));
+    let degraded = smeltr_analyzer::diff::sampling_disable_episodes(&events);
+    print!("{}", render(&origins, top, degraded));
     Ok(())
 }
 
-pub(crate) fn render(rows: &[DispatchOrigin], top: usize) -> String {
+pub(crate) fn render(rows: &[DispatchOrigin], top: usize, degraded: usize) -> String {
     let mut out = String::new();
+    if let Some(notice) = crate::degraded::single_session_notice(degraded) {
+        out.push_str(&notice);
+    }
     out.push_str(&format!(
         "{:<32} {:<40} {:>12} {:>12}\n",
         "KIND", "FILE:LINE", "GPU_TIME", "DISPATCHES"
@@ -61,7 +65,7 @@ mod tests {
 
     #[test]
     fn render_empty_origins_shows_placeholder() {
-        let s = render(&[], 20);
+        let s = render(&[], 20, 0);
         assert!(s.contains("KIND"));
         assert!(s.contains("SMELTR_STACK_CAPTURE=1"));
     }
@@ -76,7 +80,7 @@ mod tests {
                 dispatch_count: 1,
             })
             .collect();
-        let s = render(&rows, 5);
+        let s = render(&rows, 5, 0);
         assert!(s.contains("showing top 5 of 50"));
     }
 
@@ -88,10 +92,25 @@ mod tests {
             gpu_ns: 4_310_000_000,
             dispatch_count: 1240,
         }];
-        let s = render(&rows, 20);
+        let s = render(&rows, 20, 0);
         assert!(s.contains("Matmul"));
         assert!(s.contains("attention.py:127"));
         assert!(s.contains("4.310s"));
         assert!(s.contains("1240"));
+    }
+}
+
+#[cfg(test)]
+mod degraded_banner_tests {
+    use super::*;
+
+    #[test]
+    fn banner_shown_when_session_degraded() {
+        // #165: same partial-data notice as compare.
+        let s = render(&[], 20, 3);
+        assert!(s.contains("op-level numbers partial"), "got:\n{s}");
+        assert!(s.contains("3 time(s)"), "got:\n{s}");
+        let clean = render(&[], 20, 0);
+        assert!(!clean.contains("partial"), "got:\n{clean}");
     }
 }
