@@ -57,6 +57,11 @@ impl Default for Params {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub root: ModuleBreakdown,
+    /// #163: set when most GPU time ran under mx.eval() calls made outside
+    /// any module forward (fully-lazy pipeline) and therefore shows up as
+    /// `<unscoped>` — explains the gap and how to instrument around it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_gap: Option<String>,
 }
 
 /// Recursively prunes nodes whose own fields don't match the filter
@@ -98,6 +103,8 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
 
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
+    let attribution_gap =
+        smeltr_analyzer::rules::lazy_eval_attribution::detect(&events).map(|gap| gap.advice());
     let mut root =
         compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
@@ -155,7 +162,10 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     }
     shape_ops(&mut root, include_ops, top_ops_per_leaf);
 
-    Ok(Response { root })
+    Ok(Response {
+        root,
+        attribution_gap,
+    })
 }
 
 #[cfg(test)]
@@ -278,6 +288,10 @@ mod tests {
         })
         .unwrap();
         assert!(resp.root.children.iter().any(|c| c.qualname == "A"));
+        assert!(
+            resp.attribution_gap.is_none(),
+            "module-stacked eval must not report a gap"
+        );
     }
 
     #[test]
@@ -786,6 +800,108 @@ mod tests {
             op.symbol.is_none(),
             "symbol should be None after kind grouping"
         );
+    }
+
+    /// #163: a fully-lazy session (single pipeline-level eval with empty
+    /// module_stack containing all CBs) must surface `attribution_gap`.
+    #[test]
+    #[serial_test::serial]
+    fn lazy_session_surfaces_attribution_gap() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        let mk = |ts: u64, seq: u64, source: Source, payload: Payload| Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: ts,
+            session_id: Uuid::nil(),
+            source,
+            pid: None,
+            seq,
+            payload,
+        };
+        let evs: Vec<Event> = vec![
+            mk(
+                100,
+                1,
+                Source::PythonSidecar,
+                Payload::ModuleEntered {
+                    module_call_id: 1,
+                    module_def_id: 1,
+                    qualname: "A".into(),
+                    class_name: "A".into(),
+                    parent_call_id: None,
+                    depth: 0,
+                    fields: Default::default(),
+                },
+            ),
+            mk(
+                200,
+                2,
+                Source::PythonSidecar,
+                Payload::ModuleReturned { module_call_id: 1 },
+            ),
+            // Pipeline-level eval, outside any module forward.
+            mk(
+                1_000_000_000,
+                3,
+                Source::PythonSidecar,
+                Payload::MlxEvalEntered {
+                    call_id: 7,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![],
+                    stack_frames: vec![],
+                },
+            ),
+            mk(
+                2_000_000_000,
+                4,
+                Source::MetalHook,
+                Payload::MetalCbCommitted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+            ),
+            mk(
+                3_000_000_000,
+                5,
+                Source::MetalHook,
+                Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 90_000,
+                },
+            ),
+            mk(
+                4_000_000_000,
+                6,
+                Source::PythonSidecar,
+                Payload::MlxEvalReturned {
+                    call_id: 7,
+                    duration_ns: 30,
+                    was_async: false,
+                },
+            ),
+        ];
+        for e in &evs {
+            w.write_event(e).unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        let gap = resp.attribution_gap.expect("gap should be surfaced");
+        assert!(gap.contains("smeltr.scope"), "{gap}");
     }
 
     #[test]
