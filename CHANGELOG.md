@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0](https://github.com/dgrauet/smeltr/compare/v0.21.4...v0.22.0) (2026-07-19)
+
+
+### Features
+
+* **analyzer,cli,mcp:** surface the lazy-eval module attribution gap ([#163](https://github.com/dgrauet/smeltr/issues/163)) ([#175](https://github.com/dgrauet/smeltr/issues/175)) ([17707f7](https://github.com/dgrauet/smeltr/commit/17707f78006e6fd850dd439b8a58d88b445b0e83))
+
 ## [0.21.4](https://github.com/dgrauet/smeltr/compare/v0.21.3...v0.21.4) (2026-07-19)
 
 
