@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.3](https://github.com/dgrauet/smeltr/compare/v0.21.2...v0.21.3) (2026-07-19)
+
+
+### Bug Fixes
+
+* **cli:** analyze header names the analyzed session, not the event stamps ([#170](https://github.com/dgrauet/smeltr/issues/170)) ([#172](https://github.com/dgrauet/smeltr/issues/172)) ([2c20ab2](https://github.com/dgrauet/smeltr/commit/2c20ab29688d9223c7b0cb904d7f62d4e518cce4))
+* **cli:** stale post-mortem no longer shadows a fresher scoped session ([#166](https://github.com/dgrauet/smeltr/issues/166)) ([#169](https://github.com/dgrauet/smeltr/issues/169)) ([d4923c8](https://github.com/dgrauet/smeltr/commit/d4923c8f94cdb828f8f43741054369a46310e9bd))
+
 ## [0.21.2](https://github.com/dgrauet/smeltr/compare/v0.21.1...v0.21.2) (2026-07-19)
 
 
