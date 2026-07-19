@@ -57,9 +57,11 @@ impl Default for Params {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub root: ModuleBreakdown,
-    /// #163: set when most GPU time ran under mx.eval() calls made outside
-    /// any module forward (fully-lazy pipeline) and therefore shows up as
-    /// `<unscoped>` — explains the gap and how to instrument around it.
+    /// Explains a mostly-`<unscoped>` tree and how to instrument around it.
+    /// Set when most GPU time ran under mx.eval() calls made outside any
+    /// module forward (fully-lazy pipeline, #163), or when the session has
+    /// Metal CBs but the Python sidecar never attached (#178). The two are
+    /// mutually exclusive (the latter implies no eval windows at all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution_gap: Option<String>,
 }
@@ -103,8 +105,9 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
 
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
-    let attribution_gap =
-        smeltr_analyzer::rules::lazy_eval_attribution::detect(&events).map(|gap| gap.advice());
+    let attribution_gap = smeltr_analyzer::rules::lazy_eval_attribution::detect(&events)
+        .map(|gap| gap.advice())
+        .or_else(|| smeltr_analyzer::rules::sidecar_absent::detect(&events).map(|a| a.advice()));
     let mut root =
         compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
@@ -902,6 +905,65 @@ mod tests {
         .unwrap();
         let gap = resp.attribution_gap.expect("gap should be surfaced");
         assert!(gap.contains("smeltr.scope"), "{gap}");
+    }
+
+    /// #178: a session with Metal CBs but zero sidecar events must surface
+    /// the sidecar-absent advice in `attribution_gap`.
+    #[test]
+    #[serial_test::serial]
+    fn metal_only_session_surfaces_sidecar_absent() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        let evs: Vec<Event> = vec![
+            Event {
+                ts_mono_ns: 20,
+                ts_wall_ns: 20,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 1,
+                payload: Payload::MetalCbCommitted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+            },
+            Event {
+                ts_mono_ns: 30,
+                ts_wall_ns: 30,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq: 2,
+                payload: Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 90_000,
+                },
+            },
+        ];
+        for e in &evs {
+            w.write_event(e).unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        let gap = resp
+            .attribution_gap
+            .expect("sidecar-absent advice expected");
+        assert!(gap.contains("sidecar never attached"), "{gap}");
+        assert!(gap.contains("pip install"), "{gap}");
     }
 
     #[test]
