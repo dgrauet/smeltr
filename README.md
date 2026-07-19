@@ -25,6 +25,8 @@ See **[`docs/usage.md`](docs/usage.md)** for the user-facing guide (architecture
 
 - macOS 14+ on Apple Silicon (M1/M2/M3/…).
 - Rust 1.88+ (pinned via `rust-toolchain.toml`).
+- Xcode Command Line Tools (`xcode-select --install`) — the `metal-hook`
+  ObjC++ dylib is compiled via `make`/clang during `cargo build`.
 - Python 3.10+ if you want the optional MLX sidecar (`pip install -e 'python/[mlx,dev]'`).
 
 ## Quick start
@@ -52,6 +54,11 @@ smeltr tui
 
 For semantic GPU-time attribution from MLX code, the optional Python sidecar
 adds `smeltr.scope("name", **fields)` and `smeltr.mark("label", **fields)`.
+Install it **in each target environment** (`pip install -e python/` from this
+repo — it is not on PyPI); `smeltr record` then auto-attaches it via a
+`.pth` hook gated on `SMELTR_AUTOLOAD=1`, no code change required. Without
+the package in the target venv, capture is Metal-level only and the
+breakdown tree is entirely `<unscoped>`.
 It also auto-tracks every `safetensors.safe_open` / `mlx.core.load` call as
 a `ModelLoad` event — surfaces "model loaded twice" bugs in the TUI (key `M`),
 in `smeltr analyze` (rule `duplicate-model-load`), in chrome-trace

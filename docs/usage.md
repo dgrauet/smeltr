@@ -54,6 +54,12 @@ smeltr record python my_inference.py
 
 The session lands in `~/.smeltr/sessions/<timestamp>-<id>/`.
 
+> **MLX workloads:** for module/scope attribution the target environment
+> needs the Python sidecar installed — see
+> [Python sidecar — installation & auto-attach](#python-sidecar--installation--auto-attach).
+> Without it, only Metal-level (CB/kernel) capture is available and the
+> breakdown tree is entirely `<unscoped>`.
+
 ### 2. Always-on — persistent daemon via LaunchAgent
 
 Best for: regular dogfooding, multiple back-to-back runs, leaving the TUI or MCP server attached across sessions.
@@ -82,7 +88,7 @@ smeltr daemon uninstall
 | Tool | When | What |
 |---|---|---|
 | `smeltr tui` | During or after a run | Live UI: event feed, timeline, queue depth, MLX memory; press `K` to toggle a rolling top-5 hot-kernels panel |
-| `smeltr sessions list` | After | List sessions on disk |
+| `smeltr sessions ls` | After | List sessions on disk |
 | `smeltr sessions show <id>` | After | One-line per event-kind summary |
 | `smeltr analyze <id>` | After | Run analyzer rules → findings (queue pressure, crash correlation, etc.) |
 | `smeltr breakdown [--last] [<id>]` | After | Per-module + per-op GPU time breakdown for an MLX inference session |
@@ -519,6 +525,34 @@ ln -sf $(pwd)/target/release/smeltrd ~/.local/bin/smeltrd
 
 `~/.local/bin` is already on the PATH on most setups. The symlinks follow the build target, so `cargo build --release` automatically updates them.
 
+## Python sidecar — installation & auto-attach
+
+The Metal hook gives CB- and kernel-level capture on any target. Everything
+**semantic** — the module tree in `breakdown`, `smeltr.scope(...)`, eval
+windows, `smeltr origins`, model-load tracking — comes from the Python
+sidecar, and the sidecar must be installed **in the target process's own
+environment** (each venv separately). It is not published on PyPI; install
+it from the smeltr clone:
+
+```bash
+# inside the environment your workload runs in
+pip install -e /path/to/smeltr/python/           # or '.../python/[mlx]'
+```
+
+**How auto-attach works:** installing the package drops a
+`smeltr-autoload.pth` into `site-packages`. At interpreter startup it
+imports `smeltr._autoload`, which attaches only when `SMELTR_AUTOLOAD=1`
+is present in the environment — and `smeltr record` sets exactly that
+variable in the child it spawns. Any other Python invocation (pytest,
+notebooks, unrelated tools) is untouched. No code change is needed in the
+target program; calling `smeltr.attach()` manually is only for processes
+*not* launched via `smeltr record` (always-on mode).
+
+**Verify it attached:** `smeltr sessions show <ref>` should list
+`PythonSidecarHello`, `ModuleEntered` and `MlxEvalEntered` events. A
+session with Metal CBs but none of those means the target environment is
+missing the package — `smeltr breakdown` will be 100 % `<unscoped>`.
+
 ## MCP integration (Claude Code / Claude Desktop)
 
 Add to `~/.claude.json` (under `mcpServers`):
@@ -591,7 +625,7 @@ For "find the bottleneck in a 30-step CFG denoising loop":
 | `~/.smeltr/sessions/<id>/metadata.toml` | Session metadata (argv, start/end times, …) |
 | `~/.smeltr/smeltrd.log` | Daemon logs (managed by LaunchAgent) |
 | `~/.smeltr/smeltrd.pid` | Current daemon PID |
-| `$TMPDIR/smeltr.sock` | UNIX socket the daemon listens on |
+| `$TMPDIR/smeltr.sock` | UNIX socket the daemon listens on (resolution order: `$SMELTR_SOCKET` → `$XDG_RUNTIME_DIR` → `$TMPDIR` → `/tmp`; on macOS `XDG_RUNTIME_DIR` is unset, so `$TMPDIR` wins) |
 | `~/Library/LaunchAgents/com.smeltr.daemon.plist` | LaunchAgent definition |
 
 ## Common pitfalls
