@@ -29,13 +29,31 @@ pub fn resolve(
         return Err(anyhow!("no sessions found under SMELTR_HOME"));
     }
     if prefer_post_mortem {
-        if let Some(pm) = sessions.iter().rev().find(|d| {
+        let is_pm = |d: &PathBuf| {
             d.file_name()
                 .and_then(|n| n.to_str())
                 .map(|n| n.starts_with("post-mortem-"))
                 .unwrap_or(false)
-        }) {
-            return Ok(pm.clone());
+        };
+        if let Some(pm) = sessions.iter().rev().find(|d| is_pm(d)) {
+            // #166: a stale post-mortem must not shadow a scoped session
+            // recorded after it — prefer it only when it is still the most
+            // recent thing that happened. RFC3339 strings compare
+            // chronologically.
+            let pm_started = read_metadata(pm).ok().map(|m| m.started_rfc3339);
+            let newest_scoped_started = sessions.iter().rev().filter(|d| !is_pm(d)).find_map(|d| {
+                read_metadata(d)
+                    .ok()
+                    .filter(|m| matches!(m.kind, SessionKind::Scoped { .. }))
+                    .map(|m| m.started_rfc3339)
+            });
+            let stale = matches!(
+                (&pm_started, &newest_scoped_started),
+                (Some(p), Some(s)) if p < s
+            );
+            if !stale {
+                return Ok(pm.clone());
+            }
         }
     }
     if include_ambient {
@@ -168,5 +186,75 @@ mod tests {
         let amb_dir = make_session(home.path(), SessionKind::Ambient);
         let chosen = resolve(None, false, false).unwrap();
         assert_eq!(chosen, amb_dir);
+    }
+}
+
+#[cfg(test)]
+mod post_mortem_recency_tests {
+    use super::*;
+    use serial_test::serial;
+    use smeltr_core::session::{SessionId, SessionKind, SessionMetadata};
+    use smeltr_core::writer::SessionWriter;
+
+    fn make_session_at(started: &str, kind: SessionKind) -> PathBuf {
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.started_rfc3339 = started.to_string();
+        meta.kind = kind;
+        let w = SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), "x".into()).unwrap();
+        dir
+    }
+
+    fn into_post_mortem(dir: PathBuf, label: &str) -> PathBuf {
+        let pm = dir.parent().unwrap().join(label);
+        std::fs::rename(&dir, &pm).unwrap();
+        pm
+    }
+
+    #[test]
+    #[serial]
+    fn stale_post_mortem_does_not_shadow_fresh_scoped() {
+        // #166: a days-old crash post-mortem must not shadow the scoped
+        // session the user just recorded.
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let pm_src = make_session_at("2026-07-01T00:00:00Z", SessionKind::Ambient);
+        let _pm = into_post_mortem(
+            pm_src,
+            "post-mortem-crash-report-2026-07-01-000000-deadbeef",
+        );
+        let sc_dir = make_session_at(
+            "2026-07-02T00:00:00Z",
+            SessionKind::Scoped {
+                pid: 1,
+                argv: vec![],
+            },
+        );
+        let chosen = resolve(None, true, false).unwrap();
+        assert_eq!(chosen, sc_dir);
+    }
+
+    #[test]
+    #[serial]
+    fn fresh_post_mortem_still_preferred_after_crash() {
+        // The #153 crash flow: the post-mortem written seconds after the
+        // crash postdates the crashed scoped session and must win.
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let _sc_dir = make_session_at(
+            "2026-07-01T00:00:00Z",
+            SessionKind::Scoped {
+                pid: 1,
+                argv: vec![],
+            },
+        );
+        let pm_src = make_session_at("2026-07-01T00:05:00Z", SessionKind::Ambient);
+        let pm = into_post_mortem(
+            pm_src,
+            "post-mortem-crash-report-2026-07-01-000500-deadbeef",
+        );
+        let chosen = resolve(None, true, false).unwrap();
+        assert_eq!(chosen, pm);
     }
 }
