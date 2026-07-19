@@ -1,7 +1,6 @@
 //! `smeltr tui` and `smeltr sessions open` commands.
 
 use anyhow::{anyhow, Context, Result};
-use smeltr_core::reader::list_sessions;
 use smeltr_tui::App;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -47,19 +46,31 @@ fn socket_path() -> PathBuf {
 }
 
 fn resolve_session(arg: &str) -> Result<PathBuf> {
-    let sessions = list_sessions().context("listing sessions")?;
-    if sessions.is_empty() {
-        return Err(anyhow!("no sessions under SMELTR_HOME"));
+    // Same resolution as every other session arg (dir name, short id, full
+    // UUID, or SessionMetadata.name — #164).
+    smeltr_mcp::types::resolve_session(arg)
+        .map_err(|e| anyhow!("session matching {arg:?} not found: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use serial_test::serial;
+    use smeltr_core::session::{SessionId, SessionMetadata};
+    use smeltr_core::writer::SessionWriter;
+
+    #[test]
+    #[serial]
+    fn resolve_session_accepts_session_name() {
+        // `sessions open` must resolve names like every other session arg (#164).
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.name = Some("my-replay-run".into());
+        let w = SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), "test".into()).unwrap();
+
+        let resolved = super::resolve_session("my-replay-run").unwrap();
+        assert_eq!(resolved, dir);
     }
-    for dir in sessions.iter().rev() {
-        if dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.contains(arg))
-            .unwrap_or(false)
-        {
-            return Ok(dir.clone());
-        }
-    }
-    Err(anyhow!("session matching {arg:?} not found"))
 }

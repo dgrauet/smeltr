@@ -99,19 +99,11 @@ fn resolve_id(s: &str) -> anyhow::Result<SessionId> {
     if let Ok(sid) = s.parse::<SessionId>() {
         return Ok(sid);
     }
-    // Allow 8-char short id by listing and matching.
-    let s = s.to_lowercase();
-    for p in list_sessions()? {
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if name.ends_with(&s) {
-            let meta = read_metadata(&p)?;
-            return Ok(meta.session_id);
-        }
-    }
-    anyhow::bail!("could not resolve session id `{s}`")
+    // Same resolution as every other session arg (short id, full UUID, or
+    // SessionMetadata.name — #164).
+    let dir = smeltr_mcp::types::resolve_session(s)
+        .map_err(|e| anyhow::anyhow!("could not resolve session id `{s}`: {e}"))?;
+    Ok(read_metadata(&dir)?.session_id)
 }
 
 fn print_session(
@@ -338,6 +330,23 @@ mod tests {
     use serial_test::serial;
     use smeltr_core::session::{SessionId, SessionKind, SessionMetadata};
     use smeltr_core::writer::SessionWriter;
+
+    #[test]
+    #[serial]
+    fn resolve_id_accepts_session_name() {
+        // `sessions show` must resolve names like every other subcommand
+        // (analyze/breakdown/origins go through resolve_session — #164).
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.name = Some("my-named-run".into());
+        let w = SessionWriter::create(meta).unwrap();
+        w.finalize(Some(0), "test".into()).unwrap();
+
+        let resolved = super::resolve_id("my-named-run").unwrap();
+        assert_eq!(resolved, id);
+    }
 
     #[test]
     #[serial]
