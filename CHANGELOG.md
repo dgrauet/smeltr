@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.2](https://github.com/dgrauet/smeltr/compare/v0.24.1...v0.24.2) (2026-07-21)
+
+
+### Bug Fixes
+
+* **analyzer,mcp:** modernize op-kind resolution and align symbol fallbacks ([#194](https://github.com/dgrauet/smeltr/issues/194)) ([54ee8a8](https://github.com/dgrauet/smeltr/commit/54ee8a8dd6fba9675de250ebf6ff15bbc1e4e182)), closes [#193](https://github.com/dgrauet/smeltr/issues/193)
+* **analyzer,mcp:** rebase model-load payload clocks to session timestamps ([#192](https://github.com/dgrauet/smeltr/issues/192)) ([0066428](https://github.com/dgrauet/smeltr/commit/00664288fa9d03f7a0eb8366970c1d7d7c9343e8)), closes [#191](https://github.com/dgrauet/smeltr/issues/191)
+* **cli:** doctor no longer reports oslog failed on macOS 26 ([#196](https://github.com/dgrauet/smeltr/issues/196)) ([2c40957](https://github.com/dgrauet/smeltr/commit/2c4095753e56b83f19c6bc559c8ecdaa286a0b3b)), closes [#195](https://github.com/dgrauet/smeltr/issues/195)
+
 ## [0.24.1](https://github.com/dgrauet/smeltr/compare/v0.24.0...v0.24.1) (2026-07-21)
 
 
