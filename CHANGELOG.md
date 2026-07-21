@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.1](https://github.com/dgrauet/smeltr/compare/v0.24.0...v0.24.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **record,daemon,core:** honor SMELTR_SESSION_INDEX on the record client ([#188](https://github.com/dgrauet/smeltr/issues/188)) ([#189](https://github.com/dgrauet/smeltr/issues/189)) ([002b7f4](https://github.com/dgrauet/smeltr/commit/002b7f482bf85904686d6b9a375c71b63d53171f))
+
 ## [0.24.0](https://github.com/dgrauet/smeltr/compare/v0.23.0...v0.24.0) (2026-07-21)
 
 
