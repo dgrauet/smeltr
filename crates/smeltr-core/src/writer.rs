@@ -35,8 +35,18 @@ pub struct SessionWriter {
 
 impl SessionWriter {
     pub fn create(metadata: SessionMetadata) -> std::io::Result<Self> {
-        // Check env var opt-in for chunked mode.
-        if std::env::var("SMELTR_SESSION_INDEX").as_deref() == Ok("1") {
+        Self::create_with_format(metadata, false)
+    }
+
+    /// `chunked_requested` is the per-session opt-in forwarded by the record
+    /// client (#188 — SMELTR_SESSION_INDEX set on the client used to be
+    /// silently ignored because only the daemon's env was consulted). The
+    /// daemon-side env remains the global default: chunked = request OR env.
+    pub fn create_with_format(
+        metadata: SessionMetadata,
+        chunked_requested: bool,
+    ) -> std::io::Result<Self> {
+        if chunked_requested || std::env::var("SMELTR_SESSION_INDEX").as_deref() == Ok("1") {
             return Self::create_with_chunk_config(metadata, Some(ChunkConfig::default()));
         }
         // Legacy: append-mode streaming zstd directly to file.
@@ -507,6 +517,48 @@ mod tests {
         assert!(
             raw < 1200,
             "compressed size {raw} too large for 50 redundant events"
+        );
+    }
+}
+
+#[cfg(test)]
+mod format_request_tests {
+    use super::*;
+    use crate::session::{SessionId, SessionMetadata};
+
+    /// #188: the per-session request must win even when the daemon env is
+    /// unset — that's the record-client path.
+    #[test]
+    #[serial_test::serial]
+    fn requested_chunked_without_env_writes_chunked() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_INDEX");
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let w = SessionWriter::create_with_format(meta, true).unwrap();
+        w.finalize(Some(0), "x".into()).unwrap();
+        let path = crate::reader::list_sessions().unwrap().pop().unwrap();
+        let bytes = std::fs::read(path.join("events.cbor.zst")).unwrap();
+        assert!(
+            bytes.starts_with(&crate::chunked::HEAD_MAGIC),
+            "chunked head magic expected"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn no_request_no_env_stays_legacy() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_INDEX");
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let w = SessionWriter::create_with_format(meta, false).unwrap();
+        w.finalize(Some(0), "x".into()).unwrap();
+        let path = crate::reader::list_sessions().unwrap().pop().unwrap();
+        let bytes = std::fs::read(path.join("events.cbor.zst")).unwrap();
+        assert!(
+            !bytes.starts_with(&crate::chunked::HEAD_MAGIC),
+            "legacy zstd stream expected"
         );
     }
 }

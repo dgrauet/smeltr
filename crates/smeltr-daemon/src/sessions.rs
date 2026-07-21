@@ -74,6 +74,8 @@ impl ActiveSession {
         name: Option<String>,
         flight_recorder: Option<Arc<FlightRecorder>>,
         bus: Option<Bus>,
+
+        chunked: bool,
     ) -> std::io::Result<Self> {
         let id = SessionId::new();
         let mut meta = SessionMetadata::now_starting(id);
@@ -82,7 +84,7 @@ impl ActiveSession {
         if let Some(n) = name {
             meta.name = Some(n);
         }
-        let writer = SessionWriter::create(meta)?;
+        let writer = SessionWriter::create_with_format(meta, chunked)?;
         let clock = MonoClock::new();
         let wall_epoch_ns = now_unix_ns();
         let s = Self {
@@ -240,6 +242,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         s.finalize(Some(0), "test").unwrap();
@@ -321,6 +324,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(s.scope_token(), Some("tok-XYZ"));
@@ -336,7 +340,8 @@ mod tests {
     #[serial]
     fn open_scoped_without_token_is_none() {
         let _h = temp_home();
-        let s = ActiveSession::open_scoped(7, vec!["x".into()], None, None, None, None).unwrap();
+        let s =
+            ActiveSession::open_scoped(7, vec!["x".into()], None, None, None, None, false).unwrap();
         assert!(s.scope_token().is_none());
     }
 
@@ -352,6 +357,7 @@ mod tests {
             Some("my-run".into()),
             None,
             None,
+            false,
         )
         .unwrap();
         s.finalize(Some(0), "test").unwrap();
@@ -366,8 +372,9 @@ mod tests {
     fn open_scoped_without_name_falls_back_to_env() {
         let _h = temp_home();
         std::env::set_var("SMELTR_SESSION_NAME", "from-env");
-        let s = ActiveSession::open_scoped(4242, vec!["python".into()], None, None, None, None)
-            .unwrap();
+        let s =
+            ActiveSession::open_scoped(4242, vec!["python".into()], None, None, None, None, false)
+                .unwrap();
         s.finalize(Some(0), "test").unwrap();
         std::env::remove_var("SMELTR_SESSION_NAME");
 

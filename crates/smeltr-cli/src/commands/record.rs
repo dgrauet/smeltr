@@ -178,6 +178,10 @@ pub async fn run(
             argv,
             scope_token: Some(scope_token.clone()),
             name: resolved_name.clone(),
+            // #188: per-session chunked opt-in — read from the CLIENT env
+            // (the daemon's own env used to be the only switch, silently
+            // ignoring this natural invocation).
+            chunked: std::env::var("SMELTR_SESSION_INDEX").as_deref() == Ok("1"),
         })
         .await?;
     if !matches!(resp, DaemonToClient::Ack) {

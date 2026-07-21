@@ -30,6 +30,7 @@ fn named_scoped_session_is_persisted_and_resolvable() {
             vec!["uv".into(), "run".into()],
             Some("TOK".into()),
             Some("my-named-run".into()),
+            false,
         )
         .unwrap();
     router.detach_scoped(1000, Some(0));
