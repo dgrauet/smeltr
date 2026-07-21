@@ -8,7 +8,7 @@
 
 use crate::finding::{Category, EvidenceRef, Finding, Severity};
 use crate::rule::Rule;
-use smeltr_core::event::{Event, Payload};
+use smeltr_core::event::Event;
 
 const WARN_RATIO: f64 = 0.90;
 
@@ -20,78 +20,80 @@ impl Rule for MemoryPressureRule {
     }
 
     fn check(&self, events: &[Event]) -> Vec<Finding> {
-        // Track the enclosing Python scope so the finding can name it.
-        let mut scope: Vec<String> = Vec::new();
-        // Keep only the single worst (highest-ratio) sample to avoid one
-        // finding per command-buffer boundary.
-        let mut worst: Option<(f64, u64, u64, u64, u64, String)> = None; // ratio, seq, ts, alloc, recmax, scope
-        for ev in events {
-            match &ev.payload {
-                Payload::ModuleEntered { qualname, .. } => scope.push(qualname.clone()),
-                Payload::ModuleReturned { .. } => {
-                    scope.pop();
-                }
-                Payload::MetalDeviceMemSample {
-                    allocated_bytes,
-                    recommended_max_bytes,
-                    ..
-                } => {
-                    if *recommended_max_bytes == 0 {
-                        continue;
-                    }
-                    let ratio = *allocated_bytes as f64 / *recommended_max_bytes as f64;
-                    if ratio < WARN_RATIO {
-                        continue;
-                    }
-                    if worst.as_ref().map(|w| ratio > w.0).unwrap_or(true) {
-                        let q = scope
-                            .last()
-                            .cloned()
-                            .unwrap_or_else(|| "<unscoped>".to_string());
-                        worst = Some((
-                            ratio,
-                            ev.seq,
-                            ev.ts_mono_ns,
-                            *allocated_bytes,
-                            *recommended_max_bytes,
-                            q,
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
+        // Segment the over-threshold samples into distinct windows (#183):
+        // one aggregated percentage hid that VOID's "115%" was two unrelated
+        // windows (transition + decode) — a fix to one left the number
+        // unchanged and looked like a failure.
+        const MERGE_GAP_NS: u64 = 5_000_000_000;
+        let windows = crate::memory::over_budget_windows(events, WARN_RATIO, MERGE_GAP_NS);
+        let Some(worst) = windows
+            .iter()
+            .max_by(|a, b| {
+                a.peak_ratio()
+                    .partial_cmp(&b.peak_ratio())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+        else {
+            return Vec::new();
+        };
 
-        let mut out = Vec::new();
-        if let Some((ratio, seq, ts, alloc, recmax, q)) = worst {
-            let severity = if ratio > 1.0 {
-                Severity::Critical
-            } else {
-                Severity::Warning
-            };
-            let pct = (ratio * 100.0).round() as u64;
-            let title = if ratio > 1.0 {
+        let t0 = events.first().map(|e| e.ts_mono_ns).unwrap_or(0);
+        let rel_s = |ts: u64| ts.saturating_sub(t0) / 1_000_000_000;
+
+        let ratio = worst.peak_ratio();
+        let severity = if ratio > 1.0 {
+            Severity::Critical
+        } else {
+            Severity::Warning
+        };
+        let pct = (ratio * 100.0).round() as u64;
+        let q = &worst.peak_scope;
+        let title = if ratio > 1.0 {
+            format!(
+                "GPU memory over the recommended working-set budget ({pct}%) in scope `{q}` — elevated eviction risk"
+            )
+        } else {
+            format!("GPU memory near the recommended working-set budget ({pct}%) in scope `{q}`")
+        };
+
+        let mut lines: Vec<String> = windows
+            .iter()
+            .map(|w| {
                 format!(
-                    "GPU memory over the recommended working-set budget ({pct}%) in scope `{q}` — elevated eviction risk"
+                    "  t+{}s..t+{}s peak {} bytes ({}%) in scope `{}`",
+                    rel_s(w.start_ts_mono_ns),
+                    rel_s(w.end_ts_mono_ns),
+                    w.peak_bytes,
+                    (w.peak_ratio() * 100.0).round() as u64,
+                    w.peak_scope,
                 )
-            } else {
-                format!(
-                    "GPU memory near the recommended working-set budget ({pct}%) in scope `{q}`"
-                )
-            };
-            out.push(
-                Finding::new(severity, Category::ContributingFactor, title)
-                    .with_detail(format!(
-                        "peak allocated {alloc} bytes vs recommendedMaxWorkingSetSize {recmax} bytes"
-                    ))
-                    .with_evidence(EvidenceRef {
-                        seq,
-                        ts_mono_ns: ts,
-                        description: "MetalDeviceMemSample".to_string(),
-                    }),
-            );
+            })
+            .collect();
+        const MAX_LINES: usize = 8;
+        if lines.len() > MAX_LINES {
+            let dropped = lines.len() - MAX_LINES;
+            lines.truncate(MAX_LINES);
+            lines.push(format!("  ... {dropped} more window(s) elided"));
         }
-        out
+        let detail = format!(
+            "peak allocated {} bytes vs recommendedMaxWorkingSetSize {} bytes; {} over-budget window(s):\n{}",
+            worst.peak_bytes,
+            worst.recommended_max_bytes,
+            windows.len(),
+            lines.join("\n"),
+        );
+
+        vec![Finding::new(severity, Category::ContributingFactor, title)
+            .with_detail(detail)
+            .with_evidence(EvidenceRef {
+                seq: worst.peak_seq,
+                ts_mono_ns: worst.peak_ts_mono_ns,
+                description: format!(
+                    "MetalDeviceMemSample — worst window's peak at t+{}s",
+                    rel_s(worst.peak_ts_mono_ns)
+                ),
+            })]
     }
 }
 
@@ -189,5 +191,91 @@ mod tests {
         let f = MemoryPressureRule.check(&evs);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].severity, Severity::Critical); // the 1200/1000 sample wins
+    }
+}
+
+#[cfg(test)]
+mod window_reporting_tests {
+    use super::*;
+    use smeltr_core::event::{Payload, Source};
+    use uuid::Uuid;
+
+    const S: u64 = 1_000_000_000;
+
+    fn ev(ts: u64, payload: Payload) -> Event {
+        Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::MetalHook,
+            pid: None,
+            seq: ts,
+            payload,
+        }
+    }
+
+    fn sample(ts: u64, allocated: u64) -> Event {
+        ev(
+            ts,
+            Payload::MetalDeviceMemSample {
+                allocated_bytes: allocated,
+                recommended_max_bytes: 1000,
+                at_event: "cb_committed".into(),
+            },
+        )
+    }
+
+    /// #183 — the VOID confusion: one aggregated % hid that the peak was two
+    /// unrelated windows. The detail must list each window with its
+    /// session-relative time span and its own peak.
+    #[test]
+    fn detail_lists_each_window_with_relative_times() {
+        let evs = vec![
+            ev(
+                0,
+                Payload::MetalHookSkipped {
+                    reason: "t0 anchor".into(),
+                },
+            ),
+            sample(236 * S, 1080),
+            sample(241 * S, 1030),
+            sample(300 * S, 100),
+            sample(488 * S, 1150),
+            sample(490 * S, 1100),
+        ];
+        let f = MemoryPressureRule.check(&evs);
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].severity, Severity::Critical);
+        let d = &f[0].detail;
+        assert!(d.contains("2 over-budget window(s)"), "{d}");
+        assert!(d.contains("t+236s..t+241s"), "{d}");
+        assert!(d.contains("108%"), "{d}");
+        assert!(d.contains("t+488s..t+490s"), "{d}");
+        assert!(d.contains("115%"), "{d}");
+        // Evidence anchors the WORST window's peak sample.
+        assert_eq!(f[0].evidence[0].ts_mono_ns, 488 * S);
+        assert!(f[0].evidence[0].description.contains("t+488s"));
+    }
+
+    #[test]
+    fn single_window_keeps_previous_title_shape() {
+        let evs = vec![
+            ev(
+                0,
+                Payload::MetalHookSkipped {
+                    reason: "t0".into(),
+                },
+            ),
+            sample(10 * S, 1100),
+        ];
+        let f = MemoryPressureRule.check(&evs);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].title.contains("110%"), "{}", f[0].title);
+        assert!(
+            f[0].detail.contains("1 over-budget window(s)"),
+            "{}",
+            f[0].detail
+        );
+        assert!(f[0].detail.contains("t+10s"), "{}", f[0].detail);
     }
 }
