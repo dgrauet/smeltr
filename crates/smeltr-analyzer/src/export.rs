@@ -15,11 +15,17 @@ use std::collections::{BTreeMap, HashMap};
 type OpenModule = (f64, String, String, u16, BTreeMap<String, FieldValue>);
 
 /// Collected ModelLoad event fields for post-loop emission.
-/// (path, size_bytes, t_start_ns, t_end_ns, sha8, framework)
+/// (path, size_bytes, ingest_ts_ns, dur_ns, sha8, framework)
+///
+/// The payload's `t_start_ns`/`t_end_ns` are client `time.monotonic_ns()`
+/// values (machine-uptime base), while `Event.ts_mono_ns` is session-relative
+/// — mixing the two bases put the Model Loads lane days away from the rest of
+/// the trace. Only the duration is taken from the payload; the load end is
+/// anchored at the event's ingest timestamp.
 type ModelLoadEntry = (String, u64, u64, u64, Option<String>, Option<String>);
 
 /// Collected ModelUnload event fields for post-loop instant emission.
-/// (path, t_ns, sha8)
+/// (path, ingest_ts_ns, sha8) — payload `t_ns` is uptime-based, see above.
 type ModelUnloadEntry = (String, u64, Option<String>);
 
 /// Pretty-printed JSON dump of all events plus session metadata.
@@ -63,7 +69,7 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
     }
 
     // Collect ModelLoad events for swim-lane and counter emission after
-    // the main event loop (counters need global sort by t_end_ns).
+    // the main event loop (counters need a global sort by ingest ts).
     let mut model_loads: Vec<ModelLoadEntry> = Vec::new();
     // Collect ModelUnload events for instant emission.
     let mut model_unloads: Vec<ModelUnloadEntry> = Vec::new();
@@ -241,14 +247,18 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                 model_loads.push((
                     path.clone(),
                     *size_bytes,
-                    *t_start_ns,
-                    *t_end_ns,
+                    ev.ts_mono_ns,
+                    t_end_ns.saturating_sub(*t_start_ns),
                     sha8.clone(),
                     framework.clone(),
                 ));
             }
-            Payload::ModelUnload { path, t_ns, sha8 } => {
-                model_unloads.push((path.clone(), *t_ns, sha8.clone()));
+            Payload::ModelUnload {
+                path,
+                t_ns: _,
+                sha8,
+            } => {
+                model_unloads.push((path.clone(), ev.ts_mono_ns, sha8.clone()));
             }
             Payload::MetalDeviceMemSample {
                 allocated_bytes,
@@ -359,12 +369,12 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
     }
 
     // Emit ModelUnload instant events (ph:"i") on pid=4.
-    for (path, t_ns, sha8) in &model_unloads {
+    for (path, ingest_ts_ns, sha8) in &model_unloads {
         let basename = std::path::Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(path.as_str());
-        let ts_us = *t_ns as f64 / 1000.0;
+        let ts_us = *ingest_ts_ns as f64 / 1000.0;
         let mut args = serde_json::Map::new();
         args.insert("path".into(), serde_json::Value::String(path.clone()));
         if let Some(s) = sha8 {
@@ -383,13 +393,16 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
     }
 
     // Emit ModelLoad swim-lane events (ph:"X") on pid=4.
-    for (path, size_bytes, t_start_ns, t_end_ns, sha8, framework) in &model_loads {
+    for (path, size_bytes, ingest_ts_ns, dur_ns, sha8, framework) in &model_loads {
         let basename = std::path::Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(path.as_str());
-        let ts_us = *t_start_ns as f64 / 1000.0;
-        let dur_us = (*t_end_ns - *t_start_ns) as f64 / 1000.0;
+        // Load end = ingest; a load that began before the session opened is
+        // clamped at t=0 (its visible duration truncates accordingly).
+        let start_ns = ingest_ts_ns.saturating_sub(*dur_ns);
+        let ts_us = start_ns as f64 / 1000.0;
+        let dur_us = (ingest_ts_ns - start_ns) as f64 / 1000.0;
         let mut args = serde_json::Map::new();
         args.insert("path".into(), serde_json::Value::String(path.clone()));
         args.insert("size_bytes".into(), json!(size_bytes));
@@ -411,21 +424,22 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
         }));
     }
 
-    // Emit per-model counter tracks (ph:"C") — cumulative bytes, sorted by t_end_ns.
+    // Emit per-model counter tracks (ph:"C") — cumulative bytes, sorted by
+    // ingest timestamp (= load end in session base).
     // Key: sha8 if present, else canonical path. Counter name: "model:<basename>".
     {
         let mut sorted = model_loads.clone();
-        sorted.sort_by_key(|(_, _, _, t_end, _, _)| *t_end);
+        sorted.sort_by_key(|(_, _, ingest, _, _, _)| *ingest);
         // cumulative bytes per (key -> basename, cumulative_bytes)
         let mut cumulative: HashMap<String, (String, u64)> = HashMap::new();
-        for (path, size_bytes, _t_start, t_end_ns, sha8, _framework) in &sorted {
+        for (path, size_bytes, ingest_ts_ns, _dur, sha8, _framework) in &sorted {
             let key = sha8.clone().unwrap_or_else(|| path.clone());
             let basename = std::path::Path::new(path)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(path.as_str())
                 .to_string();
-            let ts_us = *t_end_ns as f64 / 1000.0;
+            let ts_us = *ingest_ts_ns as f64 / 1000.0;
             let entry = cumulative.entry(key).or_insert((basename.clone(), 0));
             entry.1 += size_bytes;
             let counter_name = format!("model:{}", entry.0);
@@ -821,7 +835,7 @@ mod tests {
         let meta = SessionMetadata::now_starting(SessionId::new());
         let evs = vec![ev(
             1,
-            5_000_000, // ts_mono_ns (used for ts_us in the event loop, not for t_start_ns)
+            5_000_000, // ts_mono_ns — anchors the load end (session base)
             Source::PythonSidecar,
             Payload::ModelLoad {
                 path: "/models/llama/weights.safetensors".into(),
@@ -844,14 +858,101 @@ mod tests {
         assert_eq!(x[0]["name"], "weights.safetensors");
         assert_eq!(x[0]["cat"], "model-load");
         assert_eq!(x[0]["tid"], 0);
-        // ts = t_start_ns / 1000.0 = 1_000_000 / 1000.0 = 1000.0 µs
-        assert_eq!(x[0]["ts"], 1000.0);
-        // dur = (t_end_ns - t_start_ns) / 1000.0 = (3_000_000 - 1_000_000) / 1000.0 = 2000.0 µs
+        // dur = (t_end_ns - t_start_ns) = 2 ms; end anchored at ts_mono_ns
+        // (5 ms) → ts = 3_000_000 ns = 3000.0 µs.
+        assert_eq!(x[0]["ts"], 3000.0);
         assert_eq!(x[0]["dur"], 2000.0);
         assert_eq!(x[0]["args"]["path"], "/models/llama/weights.safetensors");
         assert_eq!(x[0]["args"]["size_bytes"], 1_048_576_u64);
         assert_eq!(x[0]["args"]["sha8"], "ab12cd34");
         assert_eq!(x[0]["args"]["framework"], "safetensors");
+    }
+
+    #[test]
+    fn chrome_trace_model_load_timestamps_are_session_rebased() {
+        // Payload t_start_ns/t_end_ns/t_ns come from the client's
+        // time.monotonic_ns() (machine-uptime base), while ev.ts_mono_ns is
+        // session-relative. The exporter must anchor on ev.ts_mono_ns or the
+        // Model Loads lane lands days away from the rest of the trace.
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let uptime_base: u64 = 627_000_000_000_000; // ~7.3 days of uptime
+        let evs = vec![
+            ev(
+                1,
+                5_000_000, // ingest at t+5 ms (session base)
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/llama/weights.safetensors".into(),
+                    size_bytes: 1_048_576,
+                    t_start_ns: uptime_base + 1_000_000,
+                    t_end_ns: uptime_base + 3_000_000, // 2 ms load
+                    sha8: Some("ab12cd34".into()),
+                    framework: None,
+                },
+            ),
+            ev(
+                2,
+                9_000_000, // ingest at t+9 ms
+                Source::PythonSidecar,
+                Payload::ModelUnload {
+                    path: "/models/llama/weights.safetensors".into(),
+                    t_ns: uptime_base + 8_000_000,
+                    sha8: Some("ab12cd34".into()),
+                },
+            ),
+        ];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let events = v["traceEvents"].as_array().unwrap();
+        let x: Vec<_> = events
+            .iter()
+            .filter(|e| e["ph"] == "X" && e["pid"] == 4)
+            .collect();
+        assert_eq!(x.len(), 1);
+        // End anchored at ingest (t+5 ms), duration preserved (2 ms):
+        // ts = 5_000_000 - 2_000_000 = 3_000_000 ns = 3000.0 µs.
+        assert_eq!(x[0]["ts"], 3000.0);
+        assert_eq!(x[0]["dur"], 2000.0);
+        let c: Vec<_> = events.iter().filter(|e| e["ph"] == "C").collect();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0]["ts"], 5000.0, "counter anchored at ingest ts");
+        let i: Vec<_> = events
+            .iter()
+            .filter(|e| e["ph"] == "i" && e["pid"] == 4)
+            .collect();
+        assert_eq!(i.len(), 1);
+        assert_eq!(i[0]["ts"], 9000.0, "unload anchored at ingest ts");
+    }
+
+    #[test]
+    fn chrome_trace_model_load_longer_than_session_clamps_at_zero() {
+        // A load that began before the session opened must not produce a
+        // negative ts: clamp the start at 0 and keep the end at ingest.
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = vec![ev(
+            1,
+            1_000_000, // ingest at t+1 ms, but the load took 4 ms
+            Source::PythonSidecar,
+            Payload::ModelLoad {
+                path: "/models/llama/weights.safetensors".into(),
+                size_bytes: 1_048_576,
+                t_start_ns: 10_000_000,
+                t_end_ns: 14_000_000,
+                sha8: None,
+                framework: None,
+            },
+        )];
+        let s = to_chrome_trace(&evs, &meta);
+        let v = parse_trace(&s);
+        let x: Vec<_> = v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["ph"] == "X" && e["pid"] == 4)
+            .collect();
+        assert_eq!(x.len(), 1);
+        assert_eq!(x[0]["ts"], 0.0);
+        assert_eq!(x[0]["dur"], 1000.0, "dur truncated to the visible span");
     }
 
     #[test]
@@ -898,11 +999,11 @@ mod tests {
             2,
             "expected 2 counter events, got {counters:?}"
         );
-        // Sorted by t_end_ns: first at ts=t_end_ns/1000=2000.0 µs, bytes=1MB;
-        // second at ts=4000.0 µs, bytes=3MB cumulative.
-        assert_eq!(counters[0]["ts"], 2000.0);
+        // Sorted by ingest ts_mono_ns: first at 5000.0 µs, bytes=1MB;
+        // second at 6000.0 µs, bytes=3MB cumulative.
+        assert_eq!(counters[0]["ts"], 5000.0);
         assert_eq!(counters[0]["args"]["bytes"], 1_048_576_u64);
-        assert_eq!(counters[1]["ts"], 4000.0);
+        assert_eq!(counters[1]["ts"], 6000.0);
         assert_eq!(counters[1]["args"]["bytes"], 3_145_728_u64);
         // Both use same counter name
         assert_eq!(counters[0]["name"], counters[1]["name"]);

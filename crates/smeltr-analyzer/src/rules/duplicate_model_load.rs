@@ -20,19 +20,18 @@ impl Rule for DuplicateModelLoadRule {
 
     fn check(&self, events: &[Event]) -> Vec<Finding> {
         // Walk events in chronological order (by seq, which is monotonic).
-        // currently_loaded: canonical_path → (t_start_ns, size_bytes, seq) of the last load.
+        // currently_loaded: canonical_path → (ts_mono_ns, size_bytes, seq) of
+        // the last load. Payload t_start_ns is client-clock (uptime base) —
+        // use the session-relative event timestamp everywhere.
         let mut currently_loaded: HashMap<String, (u64, u64, u64)> = HashMap::new();
         let mut out = Vec::new();
 
         for ev in events {
             match &ev.payload {
                 Payload::ModelLoad {
-                    path,
-                    size_bytes,
-                    t_start_ns,
-                    ..
+                    path, size_bytes, ..
                 } => {
-                    if let Some((first_t_start, _, _)) = currently_loaded.get(path.as_str()) {
+                    if let Some((first_ts, _, _)) = currently_loaded.get(path.as_str()) {
                         // Already loaded — this is a duplicate.
                         let mb = *size_bytes as f64 / 1_048_576.0;
                         let basename = std::path::Path::new(path)
@@ -44,12 +43,13 @@ impl Rule for DuplicateModelLoadRule {
                              (size={mb:.1} MB)"
                         );
                         let detail = format!(
-                            "Duplicate load of {path}: first at t={first_t_start} ns, \
-                             duplicate at t={t_start_ns} ns, size={size_bytes} bytes"
+                            "Duplicate load of {path}: first at t={first_ts} ns, \
+                             duplicate at t={} ns, size={size_bytes} bytes",
+                            ev.ts_mono_ns
                         );
                         let evidence = EvidenceRef {
                             seq: ev.seq,
-                            ts_mono_ns: *t_start_ns,
+                            ts_mono_ns: ev.ts_mono_ns,
                             description: format!("ModelLoad path={path} size_bytes={size_bytes}"),
                         };
                         out.push(
@@ -57,11 +57,9 @@ impl Rule for DuplicateModelLoadRule {
                                 .with_detail(detail)
                                 .with_evidence(evidence),
                         );
-                        // Update to the new load's info.
-                        currently_loaded.insert(path.clone(), (*t_start_ns, *size_bytes, ev.seq));
-                    } else {
-                        currently_loaded.insert(path.clone(), (*t_start_ns, *size_bytes, ev.seq));
                     }
+                    // Update to the new load's info (dup or first).
+                    currently_loaded.insert(path.clone(), (ev.ts_mono_ns, *size_bytes, ev.seq));
                 }
                 Payload::ModelUnload { path, .. } => {
                     currently_loaded.remove(path.as_str());
@@ -145,6 +143,32 @@ mod tests {
                 .contains("/models/gemma/model.safetensors"),
             "detail must include canonical path"
         );
+    }
+
+    #[test]
+    fn evidence_anchors_on_event_ts_not_payload_clock() {
+        // Payload t_start_ns is client time.monotonic_ns() (uptime base);
+        // EvidenceRef.ts_mono_ns must use the session-relative event ts.
+        let uptime = 627_000_000_000_000_u64;
+        let mk = |ts: u64| {
+            ev(
+                ts,
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/gemma/model.safetensors".into(),
+                    size_bytes: 2_000_000_000,
+                    t_start_ns: uptime + ts,
+                    t_end_ns: uptime + ts + 500_000_000,
+                    sha8: None,
+                    framework: None,
+                },
+            )
+        };
+        let events = vec![mk(1_000_000_000), mk(5_000_000_000)];
+        let findings = DuplicateModelLoadRule.check(&events);
+        assert_eq!(findings.len(), 1);
+        let evidence = findings[0].evidence.first().expect("evidence present");
+        assert_eq!(evidence.ts_mono_ns, 5_000_000_000);
     }
 
     #[test]

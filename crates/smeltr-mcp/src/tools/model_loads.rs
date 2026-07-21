@@ -68,21 +68,26 @@ pub fn compute_model_loads(events: &[Event]) -> Vec<ModelLoadInfo> {
                 };
                 // Update current load index for this path (whether or not it's a dup).
                 current_load_idx.insert(path.clone(), idx);
+                // Payload t_*_ns are client-clock (uptime base); only the
+                // duration is meaningful. Anchor the load end at the event's
+                // session-relative ingest timestamp so reported times can be
+                // correlated with other event streams.
+                let duration_ns = t_end_ns.saturating_sub(*t_start_ns);
                 loads.push(ModelLoadInfo {
                     path: path.clone(),
                     size_bytes: *size_bytes,
-                    t_start_ns: *t_start_ns,
-                    t_end_ns: *t_end_ns,
-                    duration_ns: t_end_ns - t_start_ns,
+                    t_start_ns: ev.ts_mono_ns.saturating_sub(duration_ns),
+                    t_end_ns: ev.ts_mono_ns,
+                    duration_ns,
                     sha8: sha8.clone(),
                     framework: framework.clone(),
                     duplicate_of,
                     unloaded_at_ns: None,
                 });
             }
-            Payload::ModelUnload { path, t_ns, .. } => {
+            Payload::ModelUnload { path, .. } => {
                 if let Some(&idx) = current_load_idx.get(path.as_str()) {
-                    loads[idx].unloaded_at_ns = Some(*t_ns);
+                    loads[idx].unloaded_at_ns = Some(ev.ts_mono_ns);
                     current_load_idx.remove(path.as_str());
                 }
             }
@@ -177,6 +182,45 @@ mod tests {
         assert_eq!(result[0].duration_ns, 500);
         assert!(result[0].duplicate_of.is_none());
         assert!(result[0].unloaded_at_ns.is_none());
+    }
+
+    #[test]
+    fn compute_model_loads_rebases_payload_clock_to_session_ts() {
+        // Payload t_*_ns come from client time.monotonic_ns() (uptime base);
+        // reported times must be session-relative (anchored on ev.ts_mono_ns)
+        // so consumers can correlate with query_events timestamps.
+        let uptime = 627_000_000_000_000_u64;
+        let evs = vec![
+            ev(
+                1,
+                5_000_000,
+                Source::PythonSidecar,
+                Payload::ModelLoad {
+                    path: "/models/weights.safetensors".to_string(),
+                    size_bytes: 1024,
+                    t_start_ns: uptime + 1_000_000,
+                    t_end_ns: uptime + 3_000_000,
+                    sha8: None,
+                    framework: None,
+                },
+            ),
+            ev(
+                2,
+                9_000_000,
+                Source::PythonSidecar,
+                Payload::ModelUnload {
+                    path: "/models/weights.safetensors".to_string(),
+                    t_ns: uptime + 8_000_000,
+                    sha8: None,
+                },
+            ),
+        ];
+        let result = compute_model_loads(&evs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].duration_ns, 2_000_000);
+        assert_eq!(result[0].t_end_ns, 5_000_000, "load end = ingest ts");
+        assert_eq!(result[0].t_start_ns, 3_000_000, "start = ingest - dur");
+        assert_eq!(result[0].unloaded_at_ns, Some(9_000_000));
     }
 
     #[test]
