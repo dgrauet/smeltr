@@ -786,3 +786,205 @@ mod window_tests {
         assert!(over_budget_windows(&[z], 0.9, S).is_empty());
     }
 }
+
+/// One time bucket of the memory timeline (#182). All values are the peak
+/// within the bucket; `device_alloc_bytes` comes from `MetalDeviceMemSample`
+/// (device-wide allocated), `active/cache` from the sidecar's `MlxMemoryPoll`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MemBucket {
+    pub t_start_s: u64,
+    pub t_end_s: u64,
+    #[serde(default)]
+    pub active_bytes: u64,
+    #[serde(default)]
+    pub cache_bytes: u64,
+    #[serde(default)]
+    pub device_alloc_bytes: u64,
+    #[serde(default)]
+    pub recommended_max_bytes: u64,
+}
+
+/// Time-resolved memory profile: fixed-width buckets + the over-budget
+/// windows from [`over_budget_windows`] (threshold 0.9, 5 s merge gap) —
+/// the aggregated peak %% hid multi-window peaks on the VOID dogfood (#182).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemTimeline {
+    pub bucket_seconds: u64,
+    pub buckets: Vec<MemBucket>,
+    pub windows: Vec<TimelineWindow>,
+}
+
+/// Serializable projection of [`MemWindow`] with session-relative times.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TimelineWindow {
+    pub t_start_s: u64,
+    pub t_end_s: u64,
+    pub peak_bytes: u64,
+    pub peak_pct: u64,
+    pub peak_scope: String,
+}
+
+pub fn compute_memory_timeline(events: &[Event], bucket_seconds: u64) -> MemTimeline {
+    let bucket_seconds = bucket_seconds.max(1);
+    let t0 = events.first().map(|e| e.ts_mono_ns).unwrap_or(0);
+    let bucket_ns = bucket_seconds * 1_000_000_000;
+    let mut buckets: Vec<MemBucket> = Vec::new();
+
+    let bucket_at = |ts: u64, buckets: &mut Vec<MemBucket>| -> usize {
+        let idx = (ts.saturating_sub(t0) / bucket_ns) as usize;
+        while buckets.len() <= idx {
+            let i = buckets.len() as u64;
+            buckets.push(MemBucket {
+                t_start_s: i * bucket_seconds,
+                t_end_s: (i + 1) * bucket_seconds,
+                active_bytes: 0,
+                cache_bytes: 0,
+                device_alloc_bytes: 0,
+                recommended_max_bytes: 0,
+            });
+        }
+        idx
+    };
+
+    for ev in events {
+        match &ev.payload {
+            Payload::MlxMemoryPoll {
+                active_bytes,
+                cache_bytes,
+                ..
+            } => {
+                let i = bucket_at(ev.ts_mono_ns, &mut buckets);
+                buckets[i].active_bytes = buckets[i].active_bytes.max(*active_bytes);
+                buckets[i].cache_bytes = buckets[i].cache_bytes.max(*cache_bytes);
+            }
+            Payload::MetalDeviceMemSample {
+                allocated_bytes,
+                recommended_max_bytes,
+                ..
+            } => {
+                let i = bucket_at(ev.ts_mono_ns, &mut buckets);
+                buckets[i].device_alloc_bytes = buckets[i].device_alloc_bytes.max(*allocated_bytes);
+                buckets[i].recommended_max_bytes =
+                    buckets[i].recommended_max_bytes.max(*recommended_max_bytes);
+            }
+            _ => {}
+        }
+    }
+
+    let rel_s = |ts: u64| ts.saturating_sub(t0) / 1_000_000_000;
+    let windows = over_budget_windows(events, 0.9, 5_000_000_000)
+        .into_iter()
+        .map(|w| TimelineWindow {
+            t_start_s: rel_s(w.start_ts_mono_ns),
+            t_end_s: rel_s(w.end_ts_mono_ns),
+            peak_bytes: w.peak_bytes,
+            peak_pct: (w.peak_ratio() * 100.0).round() as u64,
+            peak_scope: w.peak_scope.clone(),
+        })
+        .collect();
+
+    MemTimeline {
+        bucket_seconds,
+        buckets,
+        windows,
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+    use smeltr_core::event::{Payload, Source};
+    use uuid::Uuid;
+
+    const S: u64 = 1_000_000_000;
+
+    fn ev(ts: u64, payload: Payload) -> Event {
+        Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::MetalHook,
+            pid: None,
+            seq: ts,
+            payload,
+        }
+    }
+
+    fn poll(ts: u64, active: u64, cache: u64) -> Event {
+        ev(
+            ts,
+            Payload::MlxMemoryPoll {
+                active_bytes: active,
+                peak_bytes: active,
+                cache_bytes: cache,
+            },
+        )
+    }
+
+    fn dev(ts: u64, alloc: u64) -> Event {
+        ev(
+            ts,
+            Payload::MetalDeviceMemSample {
+                allocated_bytes: alloc,
+                recommended_max_bytes: 1000,
+                at_event: "cb_committed".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn buckets_hold_peaks_relative_to_session_start() {
+        // Session starts at t=100s absolute; buckets must be session-relative.
+        let evs = vec![
+            ev(
+                100 * S,
+                Payload::MetalHookSkipped {
+                    reason: "t0".into(),
+                },
+            ),
+            poll(105 * S, 400, 50),
+            poll(107 * S, 900, 10), // bucket 0 peak active
+            dev(108 * S, 700),
+            poll(112 * S, 300, 80), // bucket 1
+            dev(113 * S, 1100),     // bucket 1 device peak
+        ];
+        let t = compute_memory_timeline(&evs, 10);
+        assert_eq!(t.bucket_seconds, 10);
+        assert_eq!(t.buckets.len(), 2, "{t:#?}");
+        assert_eq!(t.buckets[0].t_start_s, 0);
+        assert_eq!(t.buckets[0].t_end_s, 10);
+        assert_eq!(t.buckets[0].active_bytes, 900);
+        assert_eq!(t.buckets[0].cache_bytes, 50);
+        assert_eq!(t.buckets[0].device_alloc_bytes, 700);
+        assert_eq!(t.buckets[1].t_start_s, 10);
+        assert_eq!(t.buckets[1].device_alloc_bytes, 1100);
+        assert_eq!(t.buckets[1].recommended_max_bytes, 1000);
+    }
+
+    #[test]
+    fn windows_are_projected_with_relative_times_and_pct() {
+        let evs = vec![
+            ev(
+                100 * S,
+                Payload::MetalHookSkipped {
+                    reason: "t0".into(),
+                },
+            ),
+            dev(336 * S, 1150),
+            dev(338 * S, 1100),
+        ];
+        let t = compute_memory_timeline(&evs, 10);
+        assert_eq!(t.windows.len(), 1, "{t:#?}");
+        assert_eq!(t.windows[0].t_start_s, 236);
+        assert_eq!(t.windows[0].t_end_s, 238);
+        assert_eq!(t.windows[0].peak_pct, 115);
+        assert_eq!(t.windows[0].peak_bytes, 1150);
+    }
+
+    #[test]
+    fn empty_session_yields_empty_timeline() {
+        let t = compute_memory_timeline(&[], 10);
+        assert!(t.buckets.is_empty());
+        assert!(t.windows.is_empty());
+    }
+}

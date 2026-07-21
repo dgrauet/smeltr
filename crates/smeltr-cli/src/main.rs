@@ -131,6 +131,12 @@ enum Cmd {
         /// Cap each section's row count.
         #[arg(long, default_value_t = 20)]
         top: usize,
+        /// Time-resolved view: per-bucket peaks + over-budget windows (#182).
+        #[arg(long)]
+        timeline: bool,
+        /// Bucket width in seconds for --timeline.
+        #[arg(long, default_value_t = 10)]
+        bucket: u64,
     },
     /// Run the MCP server (stdio by default; used by LLM clients).
     Mcp {
@@ -237,9 +243,13 @@ fn main() -> anyhow::Result<()> {
                 format,
                 output,
             } => commands::export::run(session.as_deref(), last, &format, output.as_deref()),
-            Cmd::Memory { session, last, top } => {
-                commands::memory::run(session.as_deref(), last, top)
-            }
+            Cmd::Memory {
+                session,
+                last,
+                top,
+                timeline,
+                bucket,
+            } => commands::memory::run(session.as_deref(), last, top, timeline, bucket),
             Cmd::Mcp { http } => commands::mcp::run(http).await,
             Cmd::Origins { session, last, top } => {
                 commands::origins::run(session.as_deref(), last, top)
