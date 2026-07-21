@@ -39,6 +39,11 @@ pub enum ClientToDaemon {
         scope_token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// Per-session chunked-format request (#188): set by `smeltr record`
+        /// when SMELTR_SESSION_INDEX=1 is in the CLIENT environment. The
+        /// daemon-side env remains the global default.
+        #[serde(default)]
+        chunked: bool,
     },
     /// Detach scoped probes for the given PID and emit a final marker.
     DetachScopedProbes { pid: u32, exit_code: Option<i32> },
@@ -114,6 +119,7 @@ mod tests {
             argv: vec!["python".into(), "script.py".into()],
             scope_token: None,
             name: None,
+            chunked: false,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();
@@ -265,6 +271,7 @@ mod tests {
             argv: vec!["uv".into(), "run".into()],
             scope_token: Some("tok-T".into()),
             name: Some("ltx2-run".into()),
+            chunked: false,
         };
         let mut buf = Vec::new();
         let mut writer = std::io::Cursor::new(&mut buf);
@@ -302,6 +309,40 @@ mod tests {
                 assert!(scope_token.is_none())
             }
             other => panic!("expected AttachScopedProbes, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod chunked_field_compat_tests {
+    use super::*;
+
+    /// #188: pre-existing clients omit `chunked` — the CBOR frame must
+    /// decode with the serde default (false). Encoded via a shadow enum
+    /// replicating the OLD wire shape.
+    #[test]
+    fn attach_without_chunked_field_decodes() {
+        #[derive(serde::Serialize)]
+        #[serde(tag = "op")]
+        enum OldClientToDaemon {
+            AttachScopedProbes { pid: u32, argv: Vec<String> },
+        }
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(
+            &OldClientToDaemon::AttachScopedProbes {
+                pid: 7,
+                argv: vec!["python".into()],
+            },
+            &mut buf,
+        )
+        .unwrap();
+        let msg: ClientToDaemon = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        match msg {
+            ClientToDaemon::AttachScopedProbes { chunked, pid, .. } => {
+                assert_eq!(pid, 7);
+                assert!(!chunked);
+            }
+            other => panic!("unexpected: {other:?}"),
         }
     }
 }

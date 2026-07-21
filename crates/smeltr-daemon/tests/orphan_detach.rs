@@ -64,6 +64,7 @@ fn client_death_without_detach_finalizes_scoped_session() {
                 argv: vec!["sleep".into(), "30".into()],
                 scope_token: Some("orphan-test-token".into()),
                 name: None,
+                chunked: false,
             },
         )
         .unwrap();
@@ -106,6 +107,7 @@ fn clean_detach_still_finalizes_with_exit_code() {
             argv: vec!["true".into()],
             scope_token: None,
             name: None,
+            chunked: false,
         },
     )
     .unwrap();

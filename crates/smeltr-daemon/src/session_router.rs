@@ -94,6 +94,7 @@ impl SessionRouter {
         argv: Vec<String>,
         scope_token: Option<String>,
         name: Option<String>,
+        chunked: bool,
     ) -> std::io::Result<SessionId> {
         let new = Arc::new(ActiveSession::open_scoped(
             pid,
@@ -102,6 +103,7 @@ impl SessionRouter {
             name,
             self.flight_recorder.clone(),
             self.bus.clone(),
+            chunked,
         )?);
         let id = new.id();
 
@@ -235,8 +237,12 @@ mod tests {
         let _h = temp_home();
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
-        let _old = r.attach_scoped(41, vec!["old".into()], None, None).unwrap();
-        let newest_id = r.attach_scoped(42, vec!["new".into()], None, None).unwrap();
+        let _old = r
+            .attach_scoped(41, vec!["old".into()], None, None, false)
+            .unwrap();
+        let newest_id = r
+            .attach_scoped(42, vec!["new".into()], None, None, false)
+            .unwrap();
         // Marker from an unrelated PID (the `smeltr mark` process).
         r.append(
             Source::Mark,
@@ -319,7 +325,7 @@ mod tests {
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
         let scoped_id = r
-            .attach_scoped(42, vec!["py".into(), "x".into()], None, None)
+            .attach_scoped(42, vec!["py".into(), "x".into()], None, None, false)
             .unwrap();
         r.append(
             Source::Mark,
@@ -403,8 +409,12 @@ mod tests {
         let _h = temp_home();
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
-        let _id1 = r.attach_scoped(7, vec!["a".into()], None, None).unwrap();
-        let id2 = r.attach_scoped(7, vec!["b".into()], None, None).unwrap();
+        let _id1 = r
+            .attach_scoped(7, vec!["a".into()], None, None, false)
+            .unwrap();
+        let id2 = r
+            .attach_scoped(7, vec!["b".into()], None, None, false)
+            .unwrap();
         // Append goes to the SECOND scoped session.
         r.append(
             Source::Mark,
@@ -445,7 +455,7 @@ mod tests {
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
         let scoped_id = r
-            .attach_scoped(42, vec!["py".into()], Some("TOK".into()), None)
+            .attach_scoped(42, vec!["py".into()], Some("TOK".into()), None, false)
             .unwrap();
         r.append(
             Source::Mark,
@@ -487,7 +497,7 @@ mod tests {
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
         let scoped_id = r
-            .attach_scoped(42, vec!["uv".into()], Some("TOK".into()), None)
+            .attach_scoped(42, vec!["uv".into()], Some("TOK".into()), None, false)
             .unwrap();
         r.append(
             Source::Mark,
@@ -526,7 +536,7 @@ mod tests {
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
         let scoped_id = r
-            .attach_scoped(42, vec!["py".into()], Some("TOK".into()), None)
+            .attach_scoped(42, vec!["py".into()], Some("TOK".into()), None, false)
             .unwrap();
         // Emit without a token - must fall back to PID match.
         r.append(
@@ -588,7 +598,7 @@ mod tests {
         let _h = temp_home();
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
-        r.attach_scoped(42, vec!["py".into()], Some("TOK".into()), None)
+        r.attach_scoped(42, vec!["py".into()], Some("TOK".into()), None, false)
             .unwrap();
         r.detach_scoped(42, Some(0));
         // After detach, emits with the token must fall back to ambient.
@@ -635,6 +645,7 @@ mod tests {
                 vec!["py".into()],
                 Some("TOK".into()),
                 Some("named-run".into()),
+                false,
             )
             .unwrap();
         r.detach_scoped(42, Some(0));
@@ -658,7 +669,8 @@ mod tests {
         let _h = temp_home();
         let ambient = Arc::new(ActiveSession::open_new().unwrap());
         let r = SessionRouter::new(ambient.clone(), None, None);
-        r.attach_scoped(42, vec!["py".into()], None, None).unwrap();
+        r.attach_scoped(42, vec!["py".into()], None, None, false)
+            .unwrap();
         assert_eq!(r.try_flush_all(), 2); // scoped + ambient
         ambient.finalize(Some(0), "test").unwrap();
     }

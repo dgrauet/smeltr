@@ -138,7 +138,10 @@ CBOR length-prefixed frames over a Unix socket. See
   command is a launcher (`uv run`, `poetry run`, `python -m foo`, shell
   wrapper) and the grandchild PID differs from the spawned child PID.
   Internal plumbing — not for end-user manual override.
-- `SMELTR_SESSION_INDEX=1` — opt-in chunked session format: `events.cbor.zst` is
+- `SMELTR_SESSION_INDEX=1` — opt-in chunked session format (set it on the
+  `smeltr record` invocation: the client forwards a per-session request to
+  the daemon — #188; setting it in the daemon's environment instead makes
+  chunked the global default for every session): `events.cbor.zst` is
   written as independent zstd chunks plus a CRC32-protected footer index (per
   chunk: offset, time range, source bitmap, event count). `query_events` then
   decodes only the chunks overlapping the requested `(source, time)` filter via

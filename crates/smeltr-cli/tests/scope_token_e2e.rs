@@ -33,6 +33,7 @@ fn grandchild_emit_with_token_lands_in_scoped_session() {
             vec!["sh".into(), "-c".into()],
             Some("UUID-X".into()),
             None,
+            false,
         )
         .unwrap();
 
