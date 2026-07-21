@@ -657,13 +657,17 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
     .to_string()
 }
 
-/// Re-aggregate one node's ops by resolved kind, falling back to the op name
-/// when `kind` is None. `symbol` is dropped (a kind row spans many kernels);
+/// Re-aggregate one node's ops by resolved kind, falling back to the symbol
+/// then the op name when `kind` is None. `symbol` is dropped (a kind row spans many kernels);
 /// `kind` is the first non-None in the bucket. Sorted by gpu_ns desc, tie by name.
 fn regroup_ops_by_kind(ops: &[OpAttribution]) -> Vec<OpAttribution> {
     let mut agg: HashMap<String, (u64, u64, Option<String>)> = HashMap::new();
     for op in ops {
-        let key = op.kind.clone().unwrap_or_else(|| op.name.clone());
+        let key = op
+            .kind
+            .clone()
+            .or_else(|| op.symbol.clone())
+            .unwrap_or_else(|| op.name.clone());
         let e = agg.entry(key).or_insert((0, 0, None));
         e.0 += op.gpu_ns;
         e.1 += op.count;
@@ -734,7 +738,11 @@ pub fn aggregate_ops_flat(root: &ModuleBreakdown, group_by: OpGroupBy) -> Vec<Op
         for op in &n.ops {
             let key = match group_by {
                 OpGroupBy::Name => op.name.clone(),
-                OpGroupBy::Kind => op.kind.clone().unwrap_or_else(|| op.name.clone()),
+                OpGroupBy::Kind => op
+                    .kind
+                    .clone()
+                    .or_else(|| op.symbol.clone())
+                    .unwrap_or_else(|| op.name.clone()),
             };
             let e = agg.entry(key).or_insert((0, 0, None, None));
             e.0 += op.gpu_ns;
@@ -2423,6 +2431,39 @@ mod tests {
         assert!(by_name.iter().any(|r| r.key == "gemm_b"));
         // sorted desc by gpu_ns
         assert!(by_name.windows(2).all(|w| w[0].gpu_ns >= w[1].gpu_ns));
+    }
+
+    #[test]
+    fn aggregate_ops_flat_by_kind_falls_back_to_symbol_before_name() {
+        // Unresolved-kind op WITH a symbol: the kind row must use the
+        // human-readable symbol, not the raw K_<addr> name (issue #193).
+        let root = ModuleBreakdown {
+            qualname: "root".into(),
+            class_name: String::new(),
+            calls: 0,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: 0,
+            eval_count: 0,
+            cb_count: 0,
+            ops: vec![OpAttribution {
+                name: "K_4000_0x0x0".into(),
+                gpu_ns: 100,
+                count: 1,
+                symbol: Some("weird_new_kernel_bf16".into()),
+                kind: None,
+            }],
+            children: vec![],
+            diagnostics: None,
+            fields: Default::default(),
+        };
+        let kind_rows = aggregate_ops_flat(&root, OpGroupBy::Kind);
+        assert_eq!(kind_rows.len(), 1);
+        assert_eq!(kind_rows[0].key, "weird_new_kernel_bf16");
+
+        let mut node = root;
+        apply_op_group_by(&mut node, OpGroupBy::Kind);
+        assert_eq!(node.ops.len(), 1);
+        assert_eq!(node.ops[0].name, "weird_new_kernel_bf16");
     }
 
     #[test]
