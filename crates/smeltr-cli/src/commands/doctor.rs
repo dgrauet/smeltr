@@ -73,16 +73,23 @@ fn check_thermal() -> ProbeCheck {
 }
 
 fn check_oslog() -> ProbeCheck {
-    match Command::new("/usr/bin/log").arg("help").output() {
-        Ok(o) if o.status.success() => ProbeCheck {
+    check_oslog_at("/usr/bin/log")
+}
+
+/// The probe only needs the binary to spawn (`log stream …`); the exit code
+/// of a help invocation is macOS-version-dependent (`log help` exits 64 on
+/// macOS 26), so any successful spawn counts as available (#195).
+fn check_oslog_at(path: &str) -> ProbeCheck {
+    match Command::new(path).arg("help").output() {
+        Ok(_) => ProbeCheck {
             name: "oslog",
             status: Status::Ok,
-            detail: "/usr/bin/log available".into(),
+            detail: format!("{path} available"),
         },
-        Ok(_) | Err(_) => ProbeCheck {
+        Err(_) => ProbeCheck {
             name: "oslog",
             status: Status::Failed,
-            detail: "/usr/bin/log unavailable".into(),
+            detail: format!("{path} unavailable"),
         },
     }
 }
@@ -217,4 +224,26 @@ pub fn run() -> anyhow::Result<()> {
         println!("\n{failed} probe(s) failed. Smeltr will run with these disabled.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oslog_available_when_binary_spawns_even_with_nonzero_exit() {
+        // `log help` exits 64 on macOS 26; the probe only needs the binary
+        // to spawn. /usr/bin/false always exits non-zero but spawns fine.
+        let c = check_oslog_at("/usr/bin/false");
+        assert!(
+            matches!(c.status, Status::Ok),
+            "spawnable binary must be Ok"
+        );
+    }
+
+    #[test]
+    fn oslog_failed_when_binary_missing() {
+        let c = check_oslog_at("/nonexistent/log-binary");
+        assert!(matches!(c.status, Status::Failed));
+    }
 }
