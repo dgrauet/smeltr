@@ -717,7 +717,7 @@ mod window_tests {
     #[test]
     fn two_distant_windows_stay_distinct() {
         let evs = vec![
-            sample(1 * S, 500),
+            sample(S, 500),
             sample(10 * S, 950),
             sample(11 * S, 1100),
             sample(12 * S, 960),

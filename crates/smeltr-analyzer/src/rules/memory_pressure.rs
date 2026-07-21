@@ -8,7 +8,7 @@
 
 use crate::finding::{Category, EvidenceRef, Finding, Severity};
 use crate::rule::Rule;
-use smeltr_core::event::{Event, Payload};
+use smeltr_core::event::Event;
 
 const WARN_RATIO: f64 = 0.90;
 
