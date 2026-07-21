@@ -113,11 +113,14 @@ pub fn summarize_delta(
             Payload::MetalCbOps { ops, .. } => {
                 for o in ops {
                     gpu_ns_total += o.gpu_ns;
+                    // Kind → symbol → raw name, like the other breakdown
+                    // surfaces (the raw name is a pipeline address).
                     let kind = o
                         .symbol
                         .as_deref()
                         .and_then(smeltr_analyzer::resolve_kind)
                         .map(|k| k.to_string())
+                        .or_else(|| o.symbol.clone())
                         .unwrap_or_else(|| o.name.clone());
                     let slot = op_acc.entry(kind).or_insert((0, 0));
                     slot.0 += o.gpu_ns;
@@ -599,9 +602,11 @@ mod tests {
     }
 
     #[test]
-    fn top_ops_fallback_to_op_name_when_symbol_unrecognized() {
+    fn top_ops_fallback_to_symbol_then_op_name_when_kind_unrecognized() {
         // An op whose symbol is not recognized by resolve_kind should fall
-        // back to using the op's name as the kind.
+        // back to the SYMBOL (human-readable kernel name), not the raw
+        // pipeline-address name; the raw name is last resort when there is
+        // no symbol at all (issue #193).
         let evs = vec![ev(
             0,
             Source::MetalHook,
@@ -609,7 +614,7 @@ mod tests {
                 cb_id: 1,
                 ops: vec![
                     smeltr_core::event::OpSample {
-                        name: "myop".into(),
+                        name: "K_4000_0x0x0".into(),
                         symbol: Some("totally_unknown_sym_xyz".into()),
                         gpu_ns: 1_000_000,
                         count: 1,
@@ -625,8 +630,8 @@ mod tests {
         )];
         let r = summarize_delta(&evs, 0, "sid".into(), None, true);
         assert_eq!(r.top_ops.len(), 2);
-        // Largest gpu_ns first: "myop" (1_000_000 ns) before "nosy" (500_000 ns).
-        assert_eq!(r.top_ops[0].kind, "myop");
+        // Largest gpu_ns first.
+        assert_eq!(r.top_ops[0].kind, "totally_unknown_sym_xyz");
         assert_eq!(r.top_ops[1].kind, "nosy");
     }
 
