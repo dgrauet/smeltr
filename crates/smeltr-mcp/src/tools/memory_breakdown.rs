@@ -10,20 +10,38 @@ use smeltr_core::reader::read_events;
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
     pub session: String,
+    /// Include a time-resolved profile (#182): per-bucket peaks + distinct
+    /// over-budget windows. Off by default (payload size).
+    #[serde(default)]
+    pub include_timeline: bool,
+    /// Bucket width in seconds for the timeline (default 10).
+    #[serde(default = "default_bucket_seconds")]
+    pub bucket_seconds: u64,
+}
+
+fn default_bucket_seconds() -> u64 {
+    10
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub scope_memory: Vec<ScopeMemory>,
     pub heap_memory: Vec<HeapMemory>,
+    /// Present when `include_timeline` was requested (#182).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<smeltr_analyzer::memory::MemTimeline>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
+    let timeline = params
+        .include_timeline
+        .then(|| smeltr_analyzer::memory::compute_memory_timeline(&events, params.bucket_seconds));
     Ok(Response {
         scope_memory: compute_memory_breakdown(&events),
         heap_memory: compute_heap_breakdown(&events),
+        timeline,
     })
 }
 
@@ -104,6 +122,8 @@ mod tests {
         w.finalize(Some(0), "x".into()).unwrap();
 
         let resp = run(Params {
+            include_timeline: false,
+            bucket_seconds: 10,
             session: id.short(),
         })
         .unwrap();
