@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0](https://github.com/dgrauet/smeltr/compare/v0.23.0...v0.24.0) (2026-07-21)
+
+
+### Features
+
+* **analyzer:** segment memory pressure into dated over-budget windows ([#183](https://github.com/dgrauet/smeltr/issues/183)) ([#184](https://github.com/dgrauet/smeltr/issues/184)) ([511a7cb](https://github.com/dgrauet/smeltr/commit/511a7cb504be8568d32bc82c83328e001cff1a89))
+* **cli,mcp,analyzer:** time-resolved memory view ([#182](https://github.com/dgrauet/smeltr/issues/182)) ([#187](https://github.com/dgrauet/smeltr/issues/187)) ([f122d88](https://github.com/dgrauet/smeltr/commit/f122d885b5a629701581ead880e4d638d88d4e97))
+
 ## [0.23.0](https://github.com/dgrauet/smeltr/compare/v0.22.0...v0.23.0) (2026-07-19)
 
 
