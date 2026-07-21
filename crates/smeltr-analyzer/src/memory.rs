@@ -570,3 +570,219 @@ mod tests {
         }
     }
 }
+
+/// A contiguous span of `MetalDeviceMemSample`s at or above the pressure
+/// threshold (#183). Timestamps are session-relative would be ambiguous —
+/// they are raw `ts_mono_ns`; callers subtract the session start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemWindow {
+    pub start_ts_mono_ns: u64,
+    pub end_ts_mono_ns: u64,
+    pub peak_bytes: u64,
+    pub peak_ts_mono_ns: u64,
+    pub peak_seq: u64,
+    pub recommended_max_bytes: u64,
+    /// Innermost scope/module qualname open at the peak sample.
+    pub peak_scope: String,
+}
+
+impl MemWindow {
+    pub fn peak_ratio(&self) -> f64 {
+        if self.recommended_max_bytes == 0 {
+            0.0
+        } else {
+            self.peak_bytes as f64 / self.recommended_max_bytes as f64
+        }
+    }
+}
+
+/// Segments the session's `MetalDeviceMemSample`s into distinct windows whose
+/// ratio to the budget stays >= `threshold`; windows separated by less than
+/// `merge_gap_ns` are merged (#183 — one aggregated percentage hid the fact
+/// that VOID's "115%" was two unrelated windows, transition + decode).
+pub fn over_budget_windows(events: &[Event], threshold: f64, merge_gap_ns: u64) -> Vec<MemWindow> {
+    let mut scope: Vec<String> = Vec::new();
+    let mut windows: Vec<MemWindow> = Vec::new();
+    let mut current: Option<MemWindow> = None;
+    // ts of the last over-threshold sample; a below-threshold stretch only
+    // closes the window once it outlasts merge_gap_ns.
+    let mut last_over_ts: u64 = 0;
+
+    for ev in events {
+        match &ev.payload {
+            Payload::ModuleEntered { qualname, .. } => scope.push(qualname.clone()),
+            Payload::ModuleReturned { .. } => {
+                scope.pop();
+            }
+            Payload::MetalDeviceMemSample {
+                allocated_bytes,
+                recommended_max_bytes,
+                ..
+            } => {
+                if *recommended_max_bytes == 0 {
+                    continue;
+                }
+                let ratio = *allocated_bytes as f64 / *recommended_max_bytes as f64;
+                if ratio >= threshold {
+                    // A long quiet stretch (no samples at all, or only
+                    // sub-threshold ones swallowed by the dip logic) still
+                    // separates windows.
+                    if let Some(w) = current.take() {
+                        if ev.ts_mono_ns.saturating_sub(last_over_ts) > merge_gap_ns {
+                            windows.push(w);
+                        } else {
+                            current = Some(w);
+                        }
+                    }
+                    last_over_ts = ev.ts_mono_ns;
+                    match current.as_mut() {
+                        Some(w) => {
+                            w.end_ts_mono_ns = ev.ts_mono_ns;
+                            if *allocated_bytes > w.peak_bytes {
+                                w.peak_bytes = *allocated_bytes;
+                                w.peak_ts_mono_ns = ev.ts_mono_ns;
+                                w.peak_seq = ev.seq;
+                                w.recommended_max_bytes = *recommended_max_bytes;
+                                w.peak_scope = scope
+                                    .last()
+                                    .cloned()
+                                    .unwrap_or_else(|| "<unscoped>".to_string());
+                            }
+                        }
+                        None => {
+                            current = Some(MemWindow {
+                                start_ts_mono_ns: ev.ts_mono_ns,
+                                end_ts_mono_ns: ev.ts_mono_ns,
+                                peak_bytes: *allocated_bytes,
+                                peak_ts_mono_ns: ev.ts_mono_ns,
+                                peak_seq: ev.seq,
+                                recommended_max_bytes: *recommended_max_bytes,
+                                peak_scope: scope
+                                    .last()
+                                    .cloned()
+                                    .unwrap_or_else(|| "<unscoped>".to_string()),
+                            });
+                        }
+                    }
+                } else if let Some(w) = current.take() {
+                    if ev.ts_mono_ns.saturating_sub(last_over_ts) <= merge_gap_ns {
+                        current = Some(w); // brief dip — keep the window open
+                    } else {
+                        windows.push(w);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(w) = current {
+        windows.push(w);
+    }
+    windows
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use smeltr_core::event::{Payload, Source};
+    use uuid::Uuid;
+
+    fn ev(ts: u64, payload: Payload) -> Event {
+        Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: 0,
+            session_id: Uuid::nil(),
+            source: Source::MetalHook,
+            pid: None,
+            seq: ts,
+            payload,
+        }
+    }
+
+    fn sample(ts: u64, allocated: u64) -> Event {
+        ev(
+            ts,
+            Payload::MetalDeviceMemSample {
+                allocated_bytes: allocated,
+                recommended_max_bytes: 1000,
+                at_event: "cb_committed".into(),
+            },
+        )
+    }
+
+    const S: u64 = 1_000_000_000;
+
+    /// The VOID shape: two unrelated over-budget windows (transition, decode)
+    /// far apart must stay two windows, each with its own peak.
+    #[test]
+    fn two_distant_windows_stay_distinct() {
+        let evs = vec![
+            sample(1 * S, 500),
+            sample(10 * S, 950),
+            sample(11 * S, 1100),
+            sample(12 * S, 960),
+            sample(13 * S, 400),
+            sample(200 * S, 1150),
+            sample(201 * S, 980),
+            sample(202 * S, 300),
+        ];
+        let w = over_budget_windows(&evs, 0.9, 2 * S);
+        assert_eq!(w.len(), 2, "{w:#?}");
+        assert_eq!(w[0].start_ts_mono_ns, 10 * S);
+        assert_eq!(w[0].end_ts_mono_ns, 12 * S);
+        assert_eq!(w[0].peak_bytes, 1100);
+        assert_eq!(w[0].peak_ts_mono_ns, 11 * S);
+        assert_eq!(w[1].peak_bytes, 1150);
+    }
+
+    /// A short dip below threshold within merge_gap_ns must not split.
+    #[test]
+    fn brief_dip_within_gap_merges() {
+        let evs = vec![
+            sample(10 * S, 1100),
+            sample(11 * S, 500),         // dip, 1 s < gap
+            sample(11 * S + S / 2, 950), // back over
+            sample(12 * S, 400),
+        ];
+        let w = over_budget_windows(&evs, 0.9, 2 * S);
+        assert_eq!(w.len(), 1, "{w:#?}");
+        assert_eq!(w[0].start_ts_mono_ns, 10 * S);
+        assert_eq!(w[0].end_ts_mono_ns, 11 * S + S / 2);
+    }
+
+    #[test]
+    fn peak_scope_names_innermost_open_module() {
+        let mut evs = vec![ev(
+            1,
+            Payload::ModuleEntered {
+                module_call_id: 1,
+                module_def_id: 0,
+                qualname: "vae.decode".into(),
+                class_name: String::new(),
+                parent_call_id: None,
+                depth: 0,
+                fields: Default::default(),
+            },
+        )];
+        evs.push(sample(10 * S, 1100));
+        evs.push(ev(11 * S, Payload::ModuleReturned { module_call_id: 1 }));
+        evs.push(sample(20 * S, 300));
+        let w = over_budget_windows(&evs, 0.9, 2 * S);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].peak_scope, "vae.decode");
+    }
+
+    #[test]
+    fn empty_and_zero_budget_yield_nothing() {
+        assert!(over_budget_windows(&[], 0.9, S).is_empty());
+        let z = ev(
+            1,
+            Payload::MetalDeviceMemSample {
+                allocated_bytes: 900,
+                recommended_max_bytes: 0,
+                at_event: "x".into(),
+            },
+        );
+        assert!(over_budget_windows(&[z], 0.9, S).is_empty());
+    }
+}
