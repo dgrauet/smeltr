@@ -36,11 +36,86 @@ struct Termination {
     signal: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct JetsamHeader {
+    #[serde(default)]
+    bug_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JetsamBody {
+    #[serde(default, rename = "memoryStatus")]
+    memory_status: Option<JetsamMemoryStatus>,
+    #[serde(default)]
+    processes: Vec<JetsamProcess>,
+    #[serde(default, rename = "largestProcess")]
+    largest_process: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JetsamMemoryStatus {
+    #[serde(default, rename = "pageSize")]
+    page_size: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct JetsamProcess {
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    rpages: Option<u64>,
+    #[serde(default, rename = "lifetimeMax")]
+    lifetime_max: Option<u64>,
+}
+
+/// Extrait le processus tué d'un rapport jetsam. On retient l'entrée nommée
+/// par `largestProcess` quand elle existe, sinon celle de plus grande
+/// empreinte : c'est celle que le noyau a sacrifiée.
+fn parse_jetsam(body_text: &str, path: &str) -> Option<Payload> {
+    let body: JetsamBody = serde_json::from_str(body_text).ok()?;
+    let page_size = body
+        .memory_status
+        .as_ref()
+        .and_then(|m| m.page_size)
+        .unwrap_or(16_384);
+
+    let victim = body
+        .largest_process
+        .as_ref()
+        .and_then(|want| {
+            body.processes
+                .iter()
+                .find(|p| p.name.as_deref() == Some(want.as_str()))
+        })
+        .or_else(|| body.processes.iter().max_by_key(|p| p.rpages.unwrap_or(0)))?;
+
+    Some(Payload::JetsamKill {
+        path: path.into(),
+        killed_pid: victim.pid,
+        killed_name: victim.name.clone().unwrap_or_default(),
+        footprint_bytes: victim.rpages.unwrap_or(0).saturating_mul(page_size),
+        lifetime_max_bytes: victim.lifetime_max.unwrap_or(0).saturating_mul(page_size),
+        page_size,
+    })
+}
+
 pub fn parse_ips(content: &str, path: &str) -> Option<Payload> {
     // Line 1 is the single-line header JSON; the body JSON is everything
     // after it — single-line on older macOS, pretty-printed across
     // thousands of lines on macOS 15/26 (#151).
     let (header_line, body_text) = content.split_once('\n')?;
+
+    // Un rapport jetsam n'a ni `exception` ni `termination` : sans ce
+    // branchement il se désérialise en un CrashReportEmitted entièrement
+    // vide, ce qui est pire qu'un rejet.
+    if let Ok(jh) = serde_json::from_str::<JetsamHeader>(header_line) {
+        if jh.bug_type.as_deref() == Some("298") {
+            return parse_jetsam(body_text, path);
+        }
+    }
+
     let _hdr: Header = serde_json::from_str(header_line).ok()?;
     let body: Body = serde_json::from_str(body_text).ok()?;
 
@@ -145,5 +220,56 @@ mod tests {
     #[test]
     fn garbage_returns_none() {
         assert!(parse_ips("not json\nstill not", "/x").is_none());
+    }
+
+    const JETSAM: &str = include_str!("../tests/fixtures/jetsam.ips");
+
+    #[test]
+    fn jetsam_report_yields_kill_with_footprint() {
+        let p = parse_ips(JETSAM, "/x/jetsam.ips").expect("parse failed");
+        let Payload::JetsamKill {
+            killed_pid,
+            killed_name,
+            footprint_bytes,
+            lifetime_max_bytes,
+            page_size,
+            ..
+        } = p
+        else {
+            panic!("attendu JetsamKill, eu {p:?}");
+        };
+        assert_eq!(killed_pid, Some(4242));
+        assert_eq!(killed_name, "python");
+        assert_eq!(page_size, 16384);
+        // 1 310 720 pages × 16 Ko = 21,47 Go — la signature du bug ltx-2-mlx #74.
+        assert_eq!(footprint_bytes, 1_310_720 * 16_384);
+        assert_eq!(lifetime_max_bytes, 1_400_000 * 16_384);
+    }
+
+    /// Régression : avant ce correctif, un rapport jetsam se désérialisait
+    /// silencieusement en un CrashReportEmitted entièrement vide, ce qui est
+    /// pire qu'un rejet — la session disait qu'un rapport existait sans rien
+    /// en dire. Ce test épingle que ça ne peut plus arriver.
+    #[test]
+    fn jetsam_report_is_never_an_empty_crash_report() {
+        let p = parse_ips(JETSAM, "/x/jetsam.ips").expect("parse failed");
+        assert!(
+            !matches!(
+                p,
+                Payload::CrashReportEmitted {
+                    crashed_pid: None,
+                    signal: None,
+                    ..
+                }
+            ),
+            "coquille vide de retour : {p:?}"
+        );
+    }
+
+    /// Le chemin nominal ne bouge pas.
+    #[test]
+    fn regular_crash_report_still_parses_as_before() {
+        let p = parse_ips(FIXTURE, "/x/sample.ips").expect("parse failed");
+        assert!(matches!(p, Payload::CrashReportEmitted { .. }));
     }
 }

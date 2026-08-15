@@ -1,0 +1,91 @@
+{"bug_type":"298","timestamp":"2026-08-09 12:37:16.00 +0200","os_version":"macOS 26.5.2 (25F84)","roots_installed":0,"incident_id":"F3BB9976-F030-4C9A-8979-DC702491496C"}
+{
+ "bug_type": "298",
+ "memoryStatus": {
+  "pageSize": 16384
+ },
+ "processes": [
+  {
+   "uuid": "884555b1-8dcc-3a56-b425-dbc146b2bd94",
+   "states": [],
+   "csFlags": 570522369,
+   "purgeable": 0,
+   "age": 15064278283258,
+   "fds": 25,
+   "coalition": 340,
+   "csTrustLevel": 4294967295,
+   "rpages": 80,
+   "priority": 0,
+   "mem_regions": 54,
+   "physicalPages": {
+    "internal": [
+     7,
+     62
+    ]
+   },
+   "freeze_skip_reason:": "none",
+   "pid": 436,
+   "cpuTime": 0.157874,
+   "name": "dirhelper",
+   "lifetimeMax": 88
+  },
+  {
+   "uuid": "64a85dac-1a08-3965-95c8-45494e088ef1",
+   "states": [],
+   "csFlags": 570522385,
+   "purgeable": 0,
+   "age": 15064278266390,
+   "fds": 25,
+   "coalition": 348,
+   "csTrustLevel": 4294967295,
+   "rpages": 122,
+   "priority": 0,
+   "mem_regions": 57,
+   "physicalPages": {
+    "internal": [
+     6,
+     105
+    ]
+   },
+   "freeze_skip_reason:": "none",
+   "pid": 440,
+   "cpuTime": 0.02082,
+   "name": "peakpowermanagerd",
+   "lifetimeMax": 124
+  },
+  {
+   "uuid": "a693b709-1219-31f6-8821-20bd7343ffa6",
+   "states": [],
+   "idleDelta": 660,
+   "csFlags": 570514177,
+   "purgeable": 0,
+   "age": 15064246271118,
+   "fds": 25,
+   "coalition": 424,
+   "csTrustLevel": 4294967295,
+   "rpages": 187,
+   "priority": 0,
+   "mem_regions": 67,
+   "physicalPages": {
+    "internal": [
+     5,
+     159
+    ]
+   },
+   "freeze_skip_reason:": "none",
+   "pid": 568,
+   "cpuTime": 0.020523,
+   "name": "com.apple.audio.SandboxHelper",
+   "lifetimeMax": 340
+  },
+  {
+   "pid": 4242,
+   "name": "python",
+   "rpages": 1310720,
+   "lifetimeMax": 1400000,
+   "priority": 0,
+   "cpuTime": 12.5
+  }
+ ],
+ "largestProcess": "python"
+}

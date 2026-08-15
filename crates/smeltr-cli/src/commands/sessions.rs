@@ -271,6 +271,18 @@ fn print_session(
                 "ProcFootprint pid={pid} {name} phys={phys_footprint_bytes} \
                  lifetime_max={lifetime_max_phys_footprint_bytes}"
             ),
+            smeltr_core::event::Payload::JetsamKill {
+                killed_pid,
+                killed_name,
+                footprint_bytes,
+                lifetime_max_bytes,
+                ..
+            } => format!(
+                "JetsamKill pid={killed_pid:?} {killed_name} footprint={} \
+                 lifetime_max={}",
+                human_bytes(*footprint_bytes),
+                human_bytes(*lifetime_max_bytes)
+            ),
             smeltr_core::event::Payload::MlxArrayAlive {
                 array_id,
                 size_bytes,

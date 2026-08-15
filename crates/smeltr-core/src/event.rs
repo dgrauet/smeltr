@@ -137,6 +137,17 @@ pub enum Payload {
         exception_codes: Vec<String>,
         summary: String,
     },
+    /// Le noyau a tué un processus sous pression mémoire (jetsam,
+    /// `bug_type: 298`). `footprint_bytes` est l'empreinte au moment du kill,
+    /// reconstruite depuis `rpages × pageSize`.
+    JetsamKill {
+        path: String,
+        killed_pid: Option<u32>,
+        killed_name: String,
+        footprint_bytes: u64,
+        lifetime_max_bytes: u64,
+        page_size: u64,
+    },
     MetalCbCommitted {
         cb_id: u64,
         queue_id: u64,
@@ -459,6 +470,21 @@ mod tests {
                 signal: Some("SIGABRT".into()),
                 exception_codes: vec!["0x0e".into()],
                 summary: "kIOGPU...".into(),
+            },
+            Source::CrashReport,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_jetsam_kill() {
+        round_trip(
+            Payload::JetsamKill {
+                path: "/x.ips".into(),
+                killed_pid: Some(4242),
+                killed_name: "python".into(),
+                footprint_bytes: 1_310_720 * 16_384,
+                lifetime_max_bytes: 1_400_000 * 16_384,
+                page_size: 16_384,
             },
             Source::CrashReport,
         );

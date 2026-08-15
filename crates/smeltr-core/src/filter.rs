@@ -81,6 +81,7 @@ pub fn payload_kind(e: &Event) -> &'static str {
         Payload::OsLogLine { .. } => "OsLogLine",
         Payload::MachException { .. } => "MachException",
         Payload::CrashReportEmitted { .. } => "CrashReportEmitted",
+        Payload::JetsamKill { .. } => "JetsamKill",
         Payload::MetalCbCommitted { .. } => "MetalCbCommitted",
         Payload::MetalCbScheduled { .. } => "MetalCbScheduled",
         Payload::MetalCbCompleted { .. } => "MetalCbCompleted",
