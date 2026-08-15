@@ -190,7 +190,12 @@ impl ActiveSession {
     }
 
     /// Idempotent. Subsequent calls are no-ops.
-    pub fn finalize(&self, exit_code: Option<i32>, reason: &str) -> std::io::Result<()> {
+    pub fn finalize(
+        &self,
+        exit_code: Option<i32>,
+        term_signal: Option<i32>,
+        reason: &str,
+    ) -> std::io::Result<()> {
         let _ = self.append(
             Source::System,
             None,
@@ -205,7 +210,9 @@ impl ActiveSession {
         };
         let Some(inner) = inner else { return Ok(()) };
         let ended = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
-        inner.writer.finalize(exit_code, ended)
+        inner
+            .writer
+            .finalize_with_signal(exit_code, term_signal, ended)
     }
 }
 
@@ -245,7 +252,7 @@ mod tests {
             false,
         )
         .unwrap();
-        s.finalize(Some(0), "test").unwrap();
+        s.finalize(Some(0), None, "test").unwrap();
         let dirs = list_sessions().unwrap();
         let meta = read_metadata(&dirs[0]).unwrap();
         match meta.kind {
@@ -281,7 +288,7 @@ mod tests {
             },
         )
         .unwrap();
-        s.finalize(Some(0), "test").unwrap();
+        s.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         assert_eq!(dirs.len(), 1);
@@ -304,7 +311,7 @@ mod tests {
         let s = std::sync::Arc::new(ActiveSession::open_new().unwrap());
         let s_clone = s.clone();
 
-        s.finalize(Some(7), "shutdown").unwrap();
+        s.finalize(Some(7), None, "shutdown").unwrap();
 
         let dirs = list_sessions().unwrap();
         let meta = read_metadata(&dirs[0]).unwrap();
@@ -328,7 +335,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.scope_token(), Some("tok-XYZ"));
-        s.finalize(Some(0), "test").unwrap();
+        s.finalize(Some(0), None, "test").unwrap();
 
         // Re-read metadata from disk and check scope_token survived.
         let dirs = smeltr_core::reader::list_sessions().unwrap();
@@ -360,7 +367,7 @@ mod tests {
             false,
         )
         .unwrap();
-        s.finalize(Some(0), "test").unwrap();
+        s.finalize(Some(0), None, "test").unwrap();
 
         let dirs = smeltr_core::reader::list_sessions().unwrap();
         let meta = smeltr_core::reader::read_metadata(&dirs[0]).unwrap();
@@ -375,7 +382,7 @@ mod tests {
         let s =
             ActiveSession::open_scoped(4242, vec!["python".into()], None, None, None, None, false)
                 .unwrap();
-        s.finalize(Some(0), "test").unwrap();
+        s.finalize(Some(0), None, "test").unwrap();
         std::env::remove_var("SMELTR_SESSION_NAME");
 
         let dirs = smeltr_core::reader::list_sessions().unwrap();
@@ -402,7 +409,7 @@ mod tests {
         .unwrap();
         // SessionStarted (emitted by constructor) + Mark = 2 events in the ring.
         assert_eq!(fr.len(), 2);
-        s.finalize(Some(0), "test").unwrap();
+        s.finalize(Some(0), None, "test").unwrap();
     }
 
     #[test]

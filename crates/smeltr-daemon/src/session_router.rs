@@ -126,12 +126,17 @@ impl SessionRouter {
                     g.remove(prev_tok);
                 }
             }
-            let _ = prev.finalize(None, "superseded by new AttachScopedProbes");
+            let _ = prev.finalize(None, None, "superseded by new AttachScopedProbes");
         }
         Ok(id)
     }
 
-    pub fn detach_scoped(&self, pid: u32, exit_code: Option<i32>) -> Option<SessionId> {
+    pub fn detach_scoped(
+        &self,
+        pid: u32,
+        exit_code: Option<i32>,
+        term_signal: Option<i32>,
+    ) -> Option<SessionId> {
         let removed = {
             let mut guard = self.by_pid.lock().unwrap();
             guard.remove(&pid)
@@ -141,7 +146,7 @@ impl SessionRouter {
         if let Some(tok) = removed.scope_token() {
             self.by_token.lock().unwrap().remove(tok);
         }
-        let _ = removed.finalize(exit_code, &format!("record:exit pid={pid}"));
+        let _ = removed.finalize(exit_code, term_signal, &format!("record:exit pid={pid}"));
         Some(id)
     }
 
@@ -182,9 +187,9 @@ impl SessionRouter {
         };
         self.by_token.lock().unwrap().clear();
         for s in scoped {
-            let _ = s.finalize(None, reason);
+            let _ = s.finalize(None, None, reason);
         }
-        self.ambient.finalize(None, reason)
+        self.ambient.finalize(None, None, reason)
     }
 }
 
@@ -217,7 +222,7 @@ mod tests {
             },
         )
         .unwrap();
-        ambient.finalize(Some(0), "test").unwrap();
+        ambient.finalize(Some(0), None, "test").unwrap();
         let dirs = list_sessions().unwrap();
         assert_eq!(dirs.len(), 1);
         let evs = read_events(&dirs[0]).unwrap();
@@ -266,9 +271,9 @@ mod tests {
             },
         )
         .unwrap();
-        r.detach_scoped(41, Some(0));
-        r.detach_scoped(42, Some(0));
-        ambient.finalize(Some(0), "test").unwrap();
+        r.detach_scoped(41, Some(0), None);
+        r.detach_scoped(42, Some(0), None);
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         for d in &list_sessions().unwrap() {
             let meta = read_metadata(d).unwrap();
@@ -309,7 +314,7 @@ mod tests {
             },
         )
         .unwrap();
-        ambient.finalize(Some(0), "test").unwrap();
+        ambient.finalize(Some(0), None, "test").unwrap();
         let dirs = list_sessions().unwrap();
         assert_eq!(dirs.len(), 1);
         let evs = read_events(&dirs[0]).unwrap();
@@ -337,8 +342,8 @@ mod tests {
             },
         )
         .unwrap();
-        r.detach_scoped(42, Some(0));
-        ambient.finalize(Some(0), "test").unwrap();
+        r.detach_scoped(42, Some(0), None);
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         assert_eq!(dirs.len(), 2);
@@ -392,7 +397,7 @@ mod tests {
             },
         )
         .unwrap();
-        ambient.finalize(Some(0), "test").unwrap();
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         assert_eq!(dirs.len(), 1);
@@ -426,8 +431,8 @@ mod tests {
             },
         )
         .unwrap();
-        r.detach_scoped(7, Some(0));
-        ambient.finalize(Some(0), "test").unwrap();
+        r.detach_scoped(7, Some(0), None);
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         // Three sessions: 2 scoped (one superseded, one finalized after Mark) + 1 ambient.
         let dirs = list_sessions().unwrap();
@@ -467,8 +472,8 @@ mod tests {
             },
         )
         .unwrap();
-        r.detach_scoped(42, Some(0));
-        ambient.finalize(Some(0), "test").unwrap();
+        r.detach_scoped(42, Some(0), None);
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         let mut found_in_scoped = false;
@@ -509,8 +514,8 @@ mod tests {
             },
         )
         .unwrap();
-        r.detach_scoped(42, Some(0));
-        ambient.finalize(Some(0), "test").unwrap();
+        r.detach_scoped(42, Some(0), None);
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         let mut found_in_scoped = false;
@@ -549,8 +554,8 @@ mod tests {
             },
         )
         .unwrap();
-        r.detach_scoped(42, Some(0));
-        ambient.finalize(Some(0), "test").unwrap();
+        r.detach_scoped(42, Some(0), None);
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         let mut found = false;
@@ -582,7 +587,7 @@ mod tests {
             },
         )
         .unwrap();
-        ambient.finalize(Some(0), "test").unwrap();
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         assert_eq!(dirs.len(), 1);
@@ -600,7 +605,7 @@ mod tests {
         let r = SessionRouter::new(ambient.clone(), None, None);
         r.attach_scoped(42, vec!["py".into()], Some("TOK".into()), None, false)
             .unwrap();
-        r.detach_scoped(42, Some(0));
+        r.detach_scoped(42, Some(0), None);
         // After detach, emits with the token must fall back to ambient.
         r.append(
             Source::Mark,
@@ -612,7 +617,7 @@ mod tests {
             },
         )
         .unwrap();
-        ambient.finalize(Some(0), "test").unwrap();
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         let mut in_ambient = false;
@@ -648,8 +653,8 @@ mod tests {
                 false,
             )
             .unwrap();
-        r.detach_scoped(42, Some(0));
-        ambient.finalize(Some(0), "test").unwrap();
+        r.detach_scoped(42, Some(0), None);
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = list_sessions().unwrap();
         let mut found = false;
@@ -672,6 +677,6 @@ mod tests {
         r.attach_scoped(42, vec!["py".into()], None, None, false)
             .unwrap();
         assert_eq!(r.try_flush_all(), 2); // scoped + ambient
-        ambient.finalize(Some(0), "test").unwrap();
+        ambient.finalize(Some(0), None, "test").unwrap();
     }
 }

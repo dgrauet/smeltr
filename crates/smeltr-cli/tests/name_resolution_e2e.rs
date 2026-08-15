@@ -33,8 +33,8 @@ fn named_scoped_session_is_persisted_and_resolvable() {
             false,
         )
         .unwrap();
-    router.detach_scoped(1000, Some(0));
-    ambient.finalize(Some(0), "test").unwrap();
+    router.detach_scoped(1000, Some(0), None);
+    ambient.finalize(Some(0), None, "test").unwrap();
 
     // 1. Metadata on disk has the name.
     let dirs = smeltr_core::reader::list_sessions().unwrap();

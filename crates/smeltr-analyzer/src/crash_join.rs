@@ -425,6 +425,13 @@ pub fn join_crash(report: &mut crate::report::Report, dir: &Path) {
     }
 }
 
+/// Signaux d'arrêt demandés par l'utilisateur ou par un superviseur. Écrits
+/// en dur plutôt qu'importés de `libc` : l'analyzer lit des sessions qui
+/// peuvent venir d'une autre machine, et ces deux numéros sont fixés par
+/// POSIX.
+const SIGINT: i32 = 2;
+const SIGTERM: i32 = 15;
+
 /// Croissance minimale entre le premier et le dernier échantillon pour
 /// qualifier une pente. Facteur, pas seuil absolu : on ne prétend pas savoir
 /// à partir de quelle taille le noyau frappe, et la limite jetsam par
@@ -463,6 +470,14 @@ fn presume_memory_death(
     events: &[Event],
     report: &crate::report::Report,
 ) -> Option<Finding> {
+    // Un arrêt demandé par l'utilisateur n'est pas une mort mémoire. Ctrl-C
+    // envoie SIGINT à tout le groupe de processus au premier plan, et un run
+    // long franchit toujours le facteur de croissance : sans cette garde, le
+    // geste normal pour interrompre une inférence produirait une présomption
+    // de pression mémoire (#203).
+    if matches!(meta.term_signal, Some(SIGINT) | Some(SIGTERM)) {
+        return None;
+    }
     let ended_abnormally = match meta.exit_code {
         Some(-1) => true,
         // Pas de code de sortie : fin anormale seulement si la session est
@@ -1138,6 +1153,34 @@ mod tests {
         smeltr_core::session::write_metadata(dir, &meta).unwrap();
     }
 
+    fn set_term_signal(dir: &Path, sig: Option<i32>) {
+        let mut meta = smeltr_core::reader::read_metadata(dir).unwrap();
+        meta.term_signal = sig;
+        smeltr_core::session::write_metadata(dir, &meta).unwrap();
+    }
+
+    /// Comme `risk_case`, mais en précisant le signal ayant tué l'enfant.
+    fn risk_case_signal(home: &Path, sig: Option<i32>) -> Vec<Finding> {
+        let t = now_ns();
+        let evs = vec![
+            footprint_bytes_ev(1, t, 4242, 4_000_000_000),
+            footprint_bytes_ev(2, t + 1_000_000_000, 4242, 18_000_000_000),
+        ];
+        let dir = scoped_session(
+            home,
+            4242,
+            vec!["/usr/bin/python3".into()],
+            "2026-08-09T10:00:00Z",
+            Some("2026-08-09T10:05:00Z"),
+            &evs,
+        );
+        set_exit_code(&dir, Some(-1));
+        set_term_signal(&dir, sig);
+        let mut report = empty_report();
+        join_jetsam(&mut report, &dir);
+        report.findings
+    }
+
     fn empty_report() -> crate::report::Report {
         crate::report::Report {
             findings: Vec::new(),
@@ -1387,6 +1430,72 @@ mod tests {
             report.findings
         );
         assert_eq!(report.findings[0].category, Category::RootCause);
+    }
+
+    /// #203 : un Ctrl-C est un arrêt demandé, pas une mort mémoire. C'est le
+    /// geste normal pour interrompre une inférence qui traîne, et un run long
+    /// franchit toujours le facteur de croissance — sans cette garde, arrêter
+    /// volontairement un run produirait une présomption de pression mémoire.
+    #[test]
+    #[serial_test::serial]
+    fn sigint_is_a_requested_stop_not_a_memory_death() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case_signal(home.path(), Some(2)); // SIGINT
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(f.is_empty(), "un Ctrl-C ne doit rien présumer : {f:#?}");
+    }
+
+    /// SIGTERM a la même nature : arrêt demandé par un superviseur.
+    #[test]
+    #[serial_test::serial]
+    fn sigterm_is_a_requested_stop_too() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case_signal(home.path(), Some(15)); // SIGTERM
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
+    /// SIGKILL reste une mort subie : c'est ce que fait jetsam, la présomption
+    /// doit sortir. C'est l'autre moitié de la discrimination.
+    #[test]
+    #[serial_test::serial]
+    fn sigkill_still_yields_the_presumption() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case_signal(home.path(), Some(9)); // SIGKILL
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].severity, Severity::Warning);
+    }
+
+    /// Sessions antérieures à #203 : `term_signal` absent. On ne doit pas
+    /// perdre le signal pour autant — le comportement retombe sur `exit_code`.
+    #[test]
+    #[serial_test::serial]
+    fn a_session_without_a_recorded_signal_still_works() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case_signal(home.path(), None);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(f.len(), 1, "{f:#?}");
     }
 
     /// Le faux positif à ne surtout pas laisser passer : une session ENCORE
