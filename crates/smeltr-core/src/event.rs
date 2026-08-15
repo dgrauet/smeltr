@@ -97,6 +97,18 @@ pub enum Payload {
         top: Vec<ProcEntry>,
         flagged: Vec<String>,
     },
+    /// Empreinte mémoire d'un processus de l'arbre tracé (#jetsam).
+    /// `phys_footprint_bytes` est la métrique sur laquelle jetsam décide de
+    /// tuer un processus — distincte de `VmSample` (système) et de la mémoire
+    /// MTLDevice (ce que le noyau ne regarde pas).
+    ProcFootprint {
+        pid: u32,
+        name: String,
+        phys_footprint_bytes: u64,
+        lifetime_max_phys_footprint_bytes: u64,
+        /// Vrai pour le processus directement lancé par `smeltr record`.
+        is_traced_root: bool,
+    },
     ThermalState {
         level: u32,
     },
@@ -124,6 +136,23 @@ pub enum Payload {
         signal: Option<String>,
         exception_codes: Vec<String>,
         summary: String,
+    },
+    /// Le noyau a tué un processus sous pression mémoire (jetsam,
+    /// `bug_type: 298`). `footprint_bytes` est l'empreinte au moment du kill,
+    /// reconstruite depuis `rpages × pageSize`.
+    JetsamKill {
+        path: String,
+        killed_pid: Option<u32>,
+        killed_name: String,
+        footprint_bytes: u64,
+        lifetime_max_bytes: u64,
+        page_size: u64,
+        /// Motif rendu par le noyau : `per-process-limit` (le processus a
+        /// dépassé SA limite) vs `vm-pageshortage` (la machine manquait de
+        /// mémoire) appellent des corrections opposées. Absent des rapports
+        /// antérieurs à ce champ.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     MetalCbCommitted {
         cb_id: u64,
@@ -453,6 +482,22 @@ mod tests {
     }
 
     #[test]
+    fn cbor_round_trip_jetsam_kill() {
+        round_trip(
+            Payload::JetsamKill {
+                path: "/x.ips".into(),
+                killed_pid: Some(4242),
+                killed_name: "python".into(),
+                footprint_bytes: 1_310_720 * 16_384,
+                lifetime_max_bytes: 1_400_000 * 16_384,
+                page_size: 16_384,
+                reason: Some("per-process-limit".into()),
+            },
+            Source::CrashReport,
+        );
+    }
+
+    #[test]
     fn cbor_round_trip_probe_health() {
         round_trip(
             Payload::ProbeHealth {
@@ -659,6 +704,20 @@ mod tests {
                 cache_bytes: 4_096,
             },
             Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_round_trip_proc_footprint() {
+        round_trip(
+            Payload::ProcFootprint {
+                pid: 4242,
+                name: "python".into(),
+                phys_footprint_bytes: 21_474_836_480,
+                lifetime_max_phys_footprint_bytes: 23_000_000_000,
+                is_traced_root: true,
+            },
+            Source::Proc,
         );
     }
 

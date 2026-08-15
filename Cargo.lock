@@ -2312,10 +2312,12 @@ version = "0.24.2"
 dependencies = [
  "serde",
  "serde_json",
+ "serial_test",
  "smeltr-core",
  "smeltr-probes-crash-reports",
  "tempfile",
  "thiserror 1.0.69",
+ "time",
  "uuid",
 ]
 
@@ -2528,6 +2530,7 @@ version = "0.24.2"
 dependencies = [
  "async-trait",
  "libc",
+ "serial_test",
  "smeltr-core",
  "smeltr-probes-core",
  "tokio",

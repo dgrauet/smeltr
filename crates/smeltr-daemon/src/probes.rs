@@ -71,6 +71,12 @@ impl ProbeRuntime {
         sup.add(Box::new(
             smeltr_probes_crash_reports::CrashReportsProbe::new().filter_pids(vec![pid]),
         ));
+        sup.add(Box::new(
+            smeltr_probes_proc::footprint_probe::FootprintProbe::new(
+                pid,
+                smeltr_probes_proc::footprint_probe::FootprintProbe::default_period(),
+            ),
+        ));
         let handle = sup.spawn();
         self.scoped.lock().await.insert(pid, handle);
     }

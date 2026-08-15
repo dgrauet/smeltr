@@ -79,3 +79,86 @@ fn two_records_create_two_scoped_sessions() {
         .assert()
         .success();
 }
+
+/// Un `smeltr record` réel doit produire des ProcFootprint dans sa session
+/// scopée : c'est le seul test qui vérifie le routage bout en bout, de la
+/// sonde jusqu'au fichier de session.
+#[test]
+#[serial_test::serial]
+#[cfg(target_os = "macos")]
+fn record_emits_proc_footprint_in_scoped_session() {
+    let home = tempfile::tempdir().unwrap();
+    let sock = home.path().join("smeltr.sock");
+
+    // `SMELTR_FOOTPRINT_PERIOD_MS` is read by `FootprintProbe::default_period()`
+    // inside `ProbeRuntime::attach_scoped`, which runs in the *daemon*
+    // process — not in the `smeltr record` client. Setting it on the record
+    // command (as an earlier version of this test did) is a no-op: the
+    // daemon was already spawned with its own environment by the time
+    // `record` runs, so the probe silently falls back to the 2s default.
+    // That earlier version of the test passed anyway, because it only
+    // asserted `scoped_root_samples > 0`, which the 2s-default cadence also
+    // satisfies over a 1s sleep — the assertion couldn't tell a working knob
+    // from a no-op one. Set the variable on the daemon here instead, and
+    // assert a count that only a ~200ms cadence can produce.
+    let mut daemon =
+        DaemonGuard::spawn_with_env(home.path(), &sock, &[("SMELTR_FOOTPRINT_PERIOD_MS", "200")]);
+
+    Command::cargo_bin("smeltr")
+        .unwrap()
+        .env("SMELTR_HOME", home.path())
+        .env("SMELTR_SOCKET", &sock)
+        .args(["record", "--no-hook", "/bin/sleep", "2"])
+        .assert()
+        .success();
+
+    daemon.stop();
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Relire toutes les sessions et compter les ProcFootprint par type.
+    let sessions_dir = home.path().join("sessions");
+    let mut scoped_root_samples = 0usize;
+    let mut ambient_samples = 0usize;
+    for entry in std::fs::read_dir(&sessions_dir).unwrap().flatten() {
+        let dir = entry.path();
+        let Ok(meta) = smeltr_core::reader::read_metadata(&dir) else {
+            continue;
+        };
+        let Ok(events) = smeltr_core::reader::read_events(&dir) else {
+            continue;
+        };
+        let is_ambient = matches!(meta.kind, smeltr_core::session::SessionKind::Ambient);
+        for e in &events {
+            if let smeltr_core::event::Payload::ProcFootprint {
+                is_traced_root,
+                phys_footprint_bytes,
+                ..
+            } = &e.payload
+            {
+                assert!(
+                    *phys_footprint_bytes > 0,
+                    "une empreinte nulle n'a pas de sens"
+                );
+                if is_ambient {
+                    ambient_samples += 1;
+                } else if *is_traced_root {
+                    scoped_root_samples += 1;
+                }
+            }
+        }
+    }
+
+    // A 2s-default cadence over a 2s sleep would produce ~1 sample; a 200ms
+    // cadence produces ~10. Require ≥5 so the assertion actually
+    // distinguishes "the knob worked" from "the knob was ignored" — do not
+    // weaken this back to `> 0`.
+    assert!(
+        scoped_root_samples >= 5,
+        "attendu ≥5 ProcFootprint racine (cadence 200ms sur ~2s), eu {scoped_root_samples} \
+         — la cadence par défaut (2s) n'en produirait qu'~1"
+    );
+    assert_eq!(
+        ambient_samples, 0,
+        "la session ambiante ne doit recevoir aucun ProcFootprint"
+    );
+}

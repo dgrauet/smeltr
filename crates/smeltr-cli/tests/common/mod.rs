@@ -55,6 +55,16 @@ impl DaemonGuard {
     /// socket never appears, distinguishing a dead daemon (exit status in
     /// the message) from one that is merely too slow under load.
     pub fn spawn(home: &Path, sock: &Path) -> Self {
+        Self::spawn_with_env(home, sock, &[])
+    }
+
+    /// Same as [`Self::spawn`], but with extra environment variables set on
+    /// the daemon process itself. Some probe knobs (e.g.
+    /// `SMELTR_FOOTPRINT_PERIOD_MS`) are read daemon-side, inside
+    /// `ProbeRuntime::attach_scoped` — not by the `record` client — so a test
+    /// exercising them must set the variable here, not on the `smeltr
+    /// record` invocation.
+    pub fn spawn_with_env(home: &Path, sock: &Path, extra_env: &[(&str, &str)]) -> Self {
         // DIAGNOSTIC (issue #101, local-only, not for CI): when
         // SMELTR_TEST_DAEMON_LOG points at a directory, capture the daemon's
         // stdout+stderr (tracing writes to stdout) at debug level, and on a
@@ -63,6 +73,9 @@ impl DaemonGuard {
         let diag_dir = std::env::var("SMELTR_TEST_DAEMON_LOG").ok();
         let mut cmd = Command::new(smeltrd_path());
         cmd.env("SMELTR_HOME", home).env("SMELTR_SOCKET", sock);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
         match &diag_dir {
             Some(dir) => {
                 let tag = format!(

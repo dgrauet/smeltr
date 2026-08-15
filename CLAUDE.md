@@ -159,3 +159,16 @@ CBOR length-prefixed frames over a Unix socket. See
 - `SMELTR_STACK_CAPTURE=1` — opt-in: capture top 3 Python frames at each `mx.eval`
   (~1-5 µs/eval). Fills `MlxEvalEntered.stack_frames`; consumed by `smeltr origins` /
   `get_dispatch_origins`.
+- `SMELTR_FOOTPRINT_PERIOD_MS=<n>` — sampling cadence for `phys_footprint`
+  over the traced process tree (default 2000, aligned with the `proc` probe).
+  Read by `FootprintProbe::default_period()`, which runs inside the
+  **daemon** process — set it in the daemon's environment, not on the
+  `smeltr record` invocation (measured: var on `record` gave 2 samples over a
+  3 s run, i.e. the 2 s default was unaffected; var on the daemon gave 15).
+  This differs from `SMELTR_SESSION_INDEX`, which the record client forwards
+  per-session to the daemon (#188). The probe calls `proc_pid_rusage` per pid
+  in the tree plus one `proc_listallpids` enumeration per tick — measured
+  cost on this machine (~480 visible processes): `sample_tree` 562 µs/tick
+  (`list_processes` ≈ 546 µs, `read_footprint` ≈ 588 ns), i.e. ~0.03 % of one
+  core at the 2 s default — negligible, cadence left at 2 s. Set it lower to
+  tighten the curve ahead of a jetsam death, higher on multi-hour runs.

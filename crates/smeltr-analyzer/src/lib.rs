@@ -19,6 +19,7 @@ pub mod dispatch_origins;
 
 pub mod export;
 
+pub mod footprint;
 pub mod memory;
 
 pub mod op_clamp;
