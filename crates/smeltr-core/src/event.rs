@@ -147,6 +147,12 @@ pub enum Payload {
         footprint_bytes: u64,
         lifetime_max_bytes: u64,
         page_size: u64,
+        /// Motif rendu par le noyau : `per-process-limit` (le processus a
+        /// dépassé SA limite) vs `vm-pageshortage` (la machine manquait de
+        /// mémoire) appellent des corrections opposées. Absent des rapports
+        /// antérieurs à ce champ.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     MetalCbCommitted {
         cb_id: u64,
@@ -485,6 +491,7 @@ mod tests {
                 footprint_bytes: 1_310_720 * 16_384,
                 lifetime_max_bytes: 1_400_000 * 16_384,
                 page_size: 16_384,
+                reason: Some("per-process-limit".into()),
             },
             Source::CrashReport,
         );

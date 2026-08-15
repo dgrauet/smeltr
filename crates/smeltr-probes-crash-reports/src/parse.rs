@@ -48,8 +48,6 @@ struct JetsamBody {
     memory_status: Option<JetsamMemoryStatus>,
     #[serde(default)]
     processes: Vec<JetsamProcess>,
-    #[serde(default, rename = "largestProcess")]
-    largest_process: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -68,11 +66,29 @@ struct JetsamProcess {
     rpages: Option<u64>,
     #[serde(default, rename = "lifetimeMax")]
     lifetime_max: Option<u64>,
+    /// Motif du kill. Présent sur la seule entrée que le noyau a tuée.
+    #[serde(default)]
+    reason: Option<String>,
+    /// Délai entre le franchissement de la limite et le kill. Second
+    /// marqueur de victime : rien ne garantit que macOS émette toujours les
+    /// deux ensemble.
+    #[serde(default, rename = "killDelta")]
+    kill_delta: Option<u64>,
 }
 
-/// Extrait le processus tué d'un rapport jetsam. On retient l'entrée nommée
-/// par `largestProcess` quand elle existe, sinon celle de plus grande
-/// empreinte : c'est celle que le noyau a sacrifiée.
+/// Extrait le processus tué d'un rapport jetsam.
+///
+/// La victime est l'entrée qui porte un marqueur de kill (`reason` et/ou
+/// `killDelta`). Le tableau `processes` est un instantané de TOUTE la
+/// machine — 908 entrées sur le rapport réel de celle-ci, dont une seule
+/// marquée. `largestProcess` nomme le plus gros processus vivant, pas la
+/// victime : s'en servir attribuait le kill d'un démon de fond au run MLX
+/// analysé, précisément parce qu'un run MLX est le plus gros processus de
+/// la machine.
+///
+/// Sans marqueur, on retourne `None`. Pas de repli : un rapport dont on ne
+/// sait pas lire la victime doit produire le silence, jamais une hypothèse
+/// habillée en cause racine Critical.
 fn parse_jetsam(body_text: &str, path: &str) -> Option<Payload> {
     let body: JetsamBody = serde_json::from_str(body_text).ok()?;
     let page_size = body
@@ -82,14 +98,9 @@ fn parse_jetsam(body_text: &str, path: &str) -> Option<Payload> {
         .unwrap_or(16_384);
 
     let victim = body
-        .largest_process
-        .as_ref()
-        .and_then(|want| {
-            body.processes
-                .iter()
-                .find(|p| p.name.as_deref() == Some(want.as_str()))
-        })
-        .or_else(|| body.processes.iter().max_by_key(|p| p.rpages.unwrap_or(0)))?;
+        .processes
+        .iter()
+        .find(|p| p.reason.is_some() || p.kill_delta.is_some())?;
 
     Some(Payload::JetsamKill {
         path: path.into(),
@@ -98,6 +109,7 @@ fn parse_jetsam(body_text: &str, path: &str) -> Option<Payload> {
         footprint_bytes: victim.rpages.unwrap_or(0).saturating_mul(page_size),
         lifetime_max_bytes: victim.lifetime_max.unwrap_or(0).saturating_mul(page_size),
         page_size,
+        reason: victim.reason.clone(),
     })
 }
 
@@ -233,6 +245,7 @@ mod tests {
             footprint_bytes,
             lifetime_max_bytes,
             page_size,
+            reason,
             ..
         } = p
         else {
@@ -244,6 +257,92 @@ mod tests {
         // 1 310 720 pages × 16 Ko = 21,47 Go — la signature du bug ltx-2-mlx #74.
         assert_eq!(footprint_bytes, 1_310_720 * 16_384);
         assert_eq!(lifetime_max_bytes, 1_400_000 * 16_384);
+        // Le POURQUOI du kill : c'est toute la raison d'être de la
+        // fonctionnalité, et il est dans le rapport pour rien si on le jette.
+        assert_eq!(reason.as_deref(), Some("per-process-limit"));
+    }
+
+    /// Régression du bug le plus grave de cette branche : `largestProcess`
+    /// nomme le plus gros processus de la MACHINE, pas la victime. Vérifié
+    /// sur le rapport réel de cette machine (908 entrées) : une seule entrée
+    /// porte `reason`/`killDelta` (`knowledgeconstructiond`, 1002 pages),
+    /// tandis que `largestProcess` vaut `com.apple.Virtualization.Virtual`
+    /// (119 425 pages, ni `reason` ni `killDelta` — pas tué).
+    ///
+    /// Sans ce test, un run MLX sain — qui EST le plus gros processus de la
+    /// machine — se voyait attribuer le kill d'un démon de fond quelconque.
+    #[test]
+    fn victim_is_the_entry_carrying_a_kill_marker_not_the_largest_process() {
+        let report = r#"{"bug_type":"298"}
+{
+ "bug_type": "298",
+ "memoryStatus": { "pageSize": 16384 },
+ "processes": [
+  { "pid": 1104, "name": "com.apple.Virtualization.Virtual", "rpages": 119425, "lifetimeMax": 119425 },
+  { "pid": 46005, "name": "knowledgeconstructiond", "rpages": 1002, "lifetimeMax": 2277,
+    "reason": "per-process-limit", "killDelta": 75696 }
+ ],
+ "largestProcess": "com.apple.Virtualization.Virtual"
+}"#;
+        let p = parse_ips(report, "/x/jetsam.ips").expect("parse failed");
+        let Payload::JetsamKill {
+            killed_pid,
+            killed_name,
+            footprint_bytes,
+            reason,
+            ..
+        } = p
+        else {
+            panic!("attendu JetsamKill, eu {p:?}");
+        };
+        assert_eq!(killed_pid, Some(46005));
+        assert_eq!(killed_name, "knowledgeconstructiond");
+        assert_eq!(footprint_bytes, 1002 * 16_384);
+        assert_eq!(reason.as_deref(), Some("per-process-limit"));
+    }
+
+    /// Sans marqueur de kill, aucune victime identifiable : on se tait. Pas
+    /// de repli sur `largestProcess` ni sur le max de `rpages` — une
+    /// hypothèse rendue avec l'autorité d'un verdict Critical est pire que
+    /// le silence.
+    #[test]
+    fn jetsam_report_without_a_kill_marker_yields_none() {
+        let report = r#"{"bug_type":"298"}
+{
+ "bug_type": "298",
+ "memoryStatus": { "pageSize": 16384 },
+ "processes": [
+  { "pid": 1104, "name": "com.apple.Virtualization.Virtual", "rpages": 119425 },
+  { "pid": 4242, "name": "python", "rpages": 1310720 }
+ ],
+ "largestProcess": "com.apple.Virtualization.Virtual"
+}"#;
+        assert!(parse_ips(report, "/x/jetsam.ips").is_none());
+    }
+
+    /// `killDelta` seul suffit : les deux champs marquent le kill, et rien
+    /// ne garantit que macOS les émette toujours ensemble.
+    #[test]
+    fn kill_delta_alone_marks_the_victim() {
+        let report = r#"{"bug_type":"298"}
+{
+ "bug_type": "298",
+ "memoryStatus": { "pageSize": 16384 },
+ "processes": [
+  { "pid": 1104, "name": "big", "rpages": 119425 },
+  { "pid": 4242, "name": "python", "rpages": 1002, "killDelta": 75696 }
+ ],
+ "largestProcess": "big"
+}"#;
+        let p = parse_ips(report, "/x/jetsam.ips").expect("parse failed");
+        let Payload::JetsamKill {
+            killed_pid, reason, ..
+        } = p
+        else {
+            panic!("attendu JetsamKill, eu {p:?}");
+        };
+        assert_eq!(killed_pid, Some(4242));
+        assert_eq!(reason, None);
     }
 
     /// Régression : avant ce correctif, un rapport jetsam se désérialisait

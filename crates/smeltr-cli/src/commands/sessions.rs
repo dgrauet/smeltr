@@ -276,10 +276,13 @@ fn print_session(
                 killed_name,
                 footprint_bytes,
                 lifetime_max_bytes,
+                reason,
                 ..
             } => format!(
-                "JetsamKill pid={killed_pid:?} {killed_name} footprint={} \
+                "JetsamKill pid={} {killed_name} reason={} footprint={} \
                  lifetime_max={}",
+                killed_pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
+                reason.as_deref().unwrap_or("-"),
                 human_bytes(*footprint_bytes),
                 human_bytes(*lifetime_max_bytes)
             ),

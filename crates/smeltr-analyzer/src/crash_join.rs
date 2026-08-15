@@ -117,6 +117,8 @@ pub struct JetsamJoin {
     pub killed_name: String,
     pub footprint_bytes: u64,
     pub lifetime_max_bytes: u64,
+    /// Motif rendu par le noyau, quand il le donne.
+    pub reason: Option<String>,
 }
 
 /// Répertoires où macOS dépose les rapports de pression mémoire.
@@ -180,6 +182,7 @@ pub fn find_jetsam_report(
                 killed_name,
                 footprint_bytes,
                 lifetime_max_bytes,
+                reason,
                 ..
             }) = parse_ips(&content, &path.to_string_lossy())
             else {
@@ -194,6 +197,7 @@ pub fn find_jetsam_report(
                 killed_name,
                 footprint_bytes,
                 lifetime_max_bytes,
+                reason,
             };
             match &best {
                 Some((t, _)) if *t >= mtime_ns => {}
@@ -209,6 +213,24 @@ pub fn jetsam_finding(j: &JetsamJoin) -> Finding {
     // Go décimal (1e9), pas Gio binaire — cohérent avec la façon dont macOS
     // et les rapports jetsam eux-mêmes expriment les empreintes mémoire.
     let gb = |b: u64| b as f64 / 1_000_000_000.0;
+    // `per-process-limit` et `vm-pageshortage` appellent des corrections
+    // opposées : réduire l'empreinte du run vs libérer la machine. Le motif
+    // est dans le rapport ; le taire, c'est jeter la réponse à la question
+    // même que cette fonctionnalité existe pour trancher.
+    let motif = match j.reason.as_deref() {
+        Some("per-process-limit") => {
+            " Motif : `per-process-limit` — le processus a dépassé SA propre \
+             limite, indépendamment de l'état du reste de la machine."
+                .to_string()
+        }
+        Some("vm-pageshortage") => {
+            " Motif : `vm-pageshortage` — c'est la machine entière qui manquait \
+             de mémoire ; le run n'est pas forcément le fautif."
+                .to_string()
+        }
+        Some(other) => format!(" Motif rendu par le noyau : `{other}`."),
+        None => String::new(),
+    };
     Finding::new(
         Severity::Critical,
         Category::RootCause,
@@ -216,7 +238,7 @@ pub fn jetsam_finding(j: &JetsamJoin) -> Finding {
     )
     .with_detail(format!(
         "jetsam a tué le PID {} ({}) avec une empreinte de {:.2} Go \
-         (maximum de vie {:.2} Go). C'est `phys_footprint` qui décide, pas la \
+         (maximum de vie {:.2} Go).{} C'est `phys_footprint` qui décide, pas la \
          mémoire MTLDevice : un run peut tenir dans le budget GPU et se faire \
          tuer quand même. Le processus disparaît sans traceback ni exception — \
          ce finding est la seule trace de la décision.\n    rapport : {}",
@@ -224,6 +246,7 @@ pub fn jetsam_finding(j: &JetsamJoin) -> Finding {
         j.killed_name,
         gb(j.footprint_bytes),
         gb(j.lifetime_max_bytes),
+        motif,
         j.path
     ))
 }
@@ -440,12 +463,37 @@ mod tests {
             killed_name: "python".into(),
             footprint_bytes: 21_474_836_480,
             lifetime_max_bytes: 21_474_836_480,
+            reason: Some("per-process-limit".into()),
         };
         let f = jetsam_finding(&j);
         assert_eq!(f.severity, Severity::Critical);
         assert_eq!(f.category, Category::RootCause);
         assert!(f.detail.contains("21"), "detail: {}", f.detail);
         assert!(f.detail.contains("jetsam") || f.title.contains("jetsam"));
+        // Le POURQUOI du kill doit être rendu : c'est la question à laquelle
+        // la fonctionnalité existe pour répondre.
+        assert!(
+            f.detail.contains("per-process-limit"),
+            "detail: {}",
+            f.detail
+        );
+    }
+
+    /// Sans motif rendu par le noyau, le finding reste lisible : pas de
+    /// « Motif : None » ni de phrase amputée.
+    #[test]
+    fn jetsam_finding_without_a_reason_stays_clean() {
+        let j = JetsamJoin {
+            path: "/x/JetsamEvent.ips".into(),
+            killed_pid: 4242,
+            killed_name: "python".into(),
+            footprint_bytes: 21_474_836_480,
+            lifetime_max_bytes: 21_474_836_480,
+            reason: None,
+        };
+        let f = jetsam_finding(&j);
+        assert!(!f.detail.contains("Motif"), "detail: {}", f.detail);
+        assert!(!f.detail.contains("None"), "detail: {}", f.detail);
     }
 
     #[test]

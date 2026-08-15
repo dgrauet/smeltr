@@ -152,6 +152,7 @@ mod tests {
                     footprint_bytes: 21_474_836_480,
                     lifetime_max_bytes: 21_474_836_480,
                     page_size: 16_384,
+                    reason: Some("per-process-limit".into()),
                 },
             ),
         ];

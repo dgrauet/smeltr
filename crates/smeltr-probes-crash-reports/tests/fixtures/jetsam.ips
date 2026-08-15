@@ -79,13 +79,57 @@
    "lifetimeMax": 340
   },
   {
-   "pid": 4242,
-   "name": "python",
+   "uuid": "3894b962-e966-3686-8ac4-8dc0bdd06acf",
+   "states": [],
+   "genCount": 0,
+   "purgeable": 628,
    "rpages": 1310720,
-   "lifetimeMax": 1400000,
+   "physicalPages": {
+    "internal": [
+     353,
+     1252
+    ]
+   },
+   "mem_regions": 212,
+   "fds": 100,
+   "name": "python",
    "priority": 0,
-   "cpuTime": 12.5
+   "csTrustLevel": 4294967295,
+   "cpuTime": 12.5,
+   "freeze_skip_reason:": "none",
+   "idleDelta": 103189759,
+   "age": 924478425818,
+   "coalition": 16033,
+   "csFlags": 570522369,
+   "reason": "per-process-limit",
+   "pid": 4242,
+   "lifetimeMax": 1400000,
+   "killDelta": 75696
+  },
+  {
+   "uuid": "0e1cf7f6-2b39-3d2c-9a4f-1c7b9d2ea511",
+   "states": [],
+   "csFlags": 570522369,
+   "purgeable": 0,
+   "age": 15064278283258,
+   "fds": 310,
+   "coalition": 1104,
+   "csTrustLevel": 4294967295,
+   "rpages": 2000000,
+   "priority": 0,
+   "mem_regions": 4821,
+   "physicalPages": {
+    "internal": [
+     1024,
+     1998976
+    ]
+   },
+   "freeze_skip_reason:": "none",
+   "pid": 1104,
+   "cpuTime": 8231.4,
+   "name": "com.apple.Virtualization.Virtual",
+   "lifetimeMax": 2100000
   }
  ],
- "largestProcess": "python"
+ "largestProcess": "com.apple.Virtualization.Virtual"
 }
