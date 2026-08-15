@@ -182,11 +182,18 @@ mod tests {
         let f = read_footprint(std::process::id()).expect("own footprint readable");
         assert!(f.phys_bytes > 0, "phys_bytes = {}", f.phys_bytes);
         assert!(
-            f.lifetime_max_bytes >= f.phys_bytes,
-            "lifetime_max {} < phys {}",
-            f.lifetime_max_bytes,
-            f.phys_bytes
+            f.lifetime_max_bytes > 0,
+            "lifetime_max_bytes = {}",
+            f.lifetime_max_bytes
         );
+        // `f.lifetime_max_bytes >= f.phys_bytes` does NOT hold in general and
+        // must not be asserted here. The kernel updates
+        // `ri_lifetime_max_phys_footprint` lazily, at page granularity, so it
+        // can trail `ri_phys_footprint` by up to one page while another
+        // thread/process is actively allocating. Reproduced 4/25 runs of
+        // `cargo test -p smeltr-probes-proc` under concurrent allocation
+        // (from `finds_spawned_children`), always with a delta of exactly
+        // 16384 bytes (one page), e.g. "lifetime_max 1327416 < phys 1343800".
     }
 
     #[test]
