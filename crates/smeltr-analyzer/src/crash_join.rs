@@ -389,13 +389,24 @@ const RISE_FACTOR: f64 = 2.0;
 ///
 /// Trois conditions, toutes nécessaires :
 ///
-/// 1. **La session s'est terminée anormalement.** C'est le code de sortie qui
-///    le dit, pas le flux d'événements : `finalize()` écrit `SessionEnded`
+/// 1. **La session s'est terminée, et anormalement.** C'est le code de sortie
+///    qui le dit, pas le flux d'événements : `finalize()` écrit `SessionEnded`
 ///    même quand l'enfant a été tué, parce que le client `record` survit au
 ///    kill et détache proprement (#201). `Some(-1)` vient de
-///    `status.code().unwrap_or(-1)` et signifie « tué par un signal » ;
-///    `None` signifie que la session n'a jamais été finalisée. Une sortie
-///    propre (`Some(0)`) comme un échec ordinaire (`Some(1)`) sont exclus.
+///    `status.code().unwrap_or(-1)` et signifie « tué par un signal ». Une
+///    sortie propre (`Some(0)`) comme un échec ordinaire (`Some(1)`) sont
+///    exclus.
+///
+///    Le cas `None` demande une garde supplémentaire. Il couvre deux formes
+///    de fin anormale — le daemon a finalisé sur déconnexion du client, ou la
+///    reprise au boot a rattrapé une session orpheline — mais aussi une
+///    session **encore en cours**, dont le code de sortie n'existe pas
+///    encore. Sans distinction, un `smeltr analyze --last` pendant un long
+///    run annoncerait une fin anormale sur une session qui se porte bien.
+///    Or tout chemin de finalisation écrit `ended_rfc3339` : `finalize()` le
+///    pose avec le code de sortie (`writer.rs`), et la reprise au boot le
+///    pose aussi (`recovery.rs`). Son absence signifie donc exactement
+///    « session vivante », et c'est ce qu'on exclut.
 /// 2. **L'empreinte montait.** Le premier échantillon est le tout premier tic
 ///    de la sonde, avant que l'enfant ait exec'é sa charge, donc la pente
 ///    seule ne prouve rien — d'où la condition 1.
@@ -406,7 +417,14 @@ fn presume_memory_death(
     events: &[Event],
     report: &crate::report::Report,
 ) -> Option<Finding> {
-    if !matches!(meta.exit_code, Some(-1) | None) {
+    let ended_abnormally = match meta.exit_code {
+        Some(-1) => true,
+        // Pas de code de sortie : fin anormale seulement si la session est
+        // bel et bien terminée. Sinon elle est en cours — voir ci-dessus.
+        None => meta.ended_rfc3339.is_some(),
+        _ => false,
+    };
+    if !ended_abnormally {
         return None;
     }
     if report
@@ -1192,21 +1210,50 @@ mod tests {
         assert!(f.is_empty(), "{f:#?}");
     }
 
-    /// Une session jamais finalisée (exit_code absent) est aussi une fin
-    /// anormale : c'est ce que produit un kill quand `record` meurt aussi.
+    /// Sans code de sortie mais AVEC une fin datée : le daemon a finalisé sur
+    /// déconnexion du client, ou la reprise au boot a rattrapé une session
+    /// orpheline. Fin anormale, la présomption sort.
     #[test]
     #[serial_test::serial]
-    fn never_finalized_session_also_counts_as_abnormal() {
+    fn finalized_without_exit_code_counts_as_abnormal() {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_HOME", home.path());
         let reports = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
 
-        let f = risk_case(home.path(), 4_000_000_000, 18_000_000_000, None, None);
+        let f = risk_case(
+            home.path(),
+            4_000_000_000,
+            18_000_000_000,
+            Some("2026-08-09T10:05:00Z"),
+            None,
+        );
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
 
         assert_eq!(f.len(), 1, "{f:#?}");
         assert_eq!(f[0].severity, Severity::Warning);
+    }
+
+    /// Le faux positif à ne surtout pas laisser passer : une session ENCORE
+    /// EN COURS n'a ni code de sortie ni fin datée, et son empreinte monte
+    /// forcément. Un `smeltr analyze --last` pendant un long run ne doit pas
+    /// annoncer une fin anormale sur une session qui se porte bien.
+    #[test]
+    #[serial_test::serial]
+    fn live_in_progress_session_yields_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        // Ni `ended`, ni `exit_code` : la forme exacte d'une session vivante.
+        let f = risk_case(home.path(), 4_000_000_000, 18_000_000_000, None, None);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(
+            f.is_empty(),
+            "une session en cours ne s'est pas terminée anormalement : {f:#?}"
+        );
     }
 
     /// Quand une cause racine est déjà établie (crash joint en amont), la
@@ -1243,11 +1290,7 @@ mod tests {
         join_jetsam(&mut report, &dir);
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
 
-        assert_eq!(f_len(&report), 1, "{:#?}", report.findings);
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
         assert_eq!(report.findings[0].category, Category::RootCause);
-    }
-
-    fn f_len(r: &crate::report::Report) -> usize {
-        r.findings.len()
     }
 }
