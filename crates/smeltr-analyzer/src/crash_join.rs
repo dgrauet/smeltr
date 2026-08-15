@@ -156,8 +156,13 @@ pub fn names_compatible(a: &str, b: &str) -> bool {
     n > 0 && a.as_bytes()[..n] == b.as_bytes()[..n]
 }
 
-/// Cherche dans `dirs` un rapport jetsam nommant `pid`, dont le mtime tombe
-/// dans `[wall_start_ns, wall_end_ns + grace_ns]`. Retourne le plus récent.
+/// Cherche dans `dirs` un rapport jetsam nommant l'un de `pids`, dont le
+/// mtime tombe dans `[wall_start_ns, wall_end_ns + grace_ns]`. Retourne le
+/// plus récent.
+///
+/// `pids` contient le PID scopé ET tout PID observé dans les échantillons
+/// d'empreinte : sous `uv run` / `poetry run` / `python -m`, le processus
+/// qui meurt est un petit-enfant au PID différent (#31).
 ///
 /// Le triple filtre PID + fenêtre + nom est ce qui empêche d'attribuer au run
 /// analysé un kill jetsam d'un processus sans rapport avec lui. `known_names`
@@ -165,7 +170,7 @@ pub fn names_compatible(a: &str, b: &str) -> bool {
 /// s'applique pas et on retombe sur PID + fenêtre.
 pub fn find_jetsam_report(
     dirs: &[std::path::PathBuf],
-    pid: u32,
+    pids: &[u32],
     known_names: &[String],
     wall_start_ns: u64,
     wall_end_ns: u64,
@@ -206,9 +211,9 @@ pub fn find_jetsam_report(
             else {
                 continue;
             };
-            if killed_pid != Some(pid) {
+            let Some(matched_pid) = killed_pid.filter(|k| pids.contains(k)) else {
                 continue;
-            }
+            };
             // Garde de nom : le PID seul ne suffit pas, macOS les recycle.
             // Elle ne s'applique que si les DEUX côtés donnent un nom —
             // sinon rejeter ferait rater le kill qu'on cherche.
@@ -222,7 +227,7 @@ pub fn find_jetsam_report(
             }
             let join = JetsamJoin {
                 path: p,
-                killed_pid: pid,
+                killed_pid: matched_pid,
                 killed_name,
                 footprint_bytes,
                 lifetime_max_bytes,
@@ -317,8 +322,16 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
         })
         .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp_nanos() as u64);
 
-    // Noms connus du processus tracé, pour la garde de nom : le basename
-    // d'argv[0] et tout nom vu dans les échantillons d'empreinte.
+    // PID candidats : le PID scopé PLUS tout PID vu dans les échantillons
+    // d'empreinte, qui couvrent tout l'arbre tracé. Sous `uv run` /
+    // `poetry run` / `python -m` — le flux normal du projet — le processus
+    // qui meurt est un petit-enfant au PID différent de l'enfant lancé
+    // (#31) : s'en tenir au PID scopé rendait le silence dans le cas même
+    // que la fonctionnalité vise.
+    //
+    // Noms connus, pour la garde de nom : le basename d'argv[0] et tout nom
+    // vu dans ces mêmes échantillons.
+    let mut pids: Vec<u32> = vec![*pid];
     let mut known_names: Vec<String> = argv
         .first()
         .and_then(|a| a.rsplit('/').next())
@@ -326,7 +339,15 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
         .map(|s| vec![s.to_string()])
         .unwrap_or_default();
     for e in &events {
-        if let Payload::ProcFootprint { name, .. } = &e.payload {
+        if let Payload::ProcFootprint {
+            pid: sample_pid,
+            name,
+            ..
+        } = &e.payload
+        {
+            if !pids.contains(sample_pid) {
+                pids.push(*sample_pid);
+            }
             if !name.is_empty() && !known_names.iter().any(|n| n == name) {
                 known_names.push(name.clone());
             }
@@ -340,7 +361,7 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
     // éviter les faux positifs.
     if let Some(j) = find_jetsam_report(
         &jetsam_reports_dirs(),
-        *pid,
+        &pids,
         &known_names,
         start_ns,
         end_ns,
@@ -437,7 +458,7 @@ mod tests {
         let (start, end) = window_around(&f);
         let j = find_jetsam_report(
             &[tmp.path().to_path_buf()],
-            4242,
+            &[4242],
             &[],
             start,
             end,
@@ -460,7 +481,7 @@ mod tests {
         let (start, end) = window_around(&f);
         assert!(find_jetsam_report(
             &[tmp.path().to_path_buf()],
-            999_999,
+            &[999_999],
             &[],
             start,
             end,
@@ -479,7 +500,7 @@ mod tests {
         // Fenêtre fermée bien avant l'écriture du fichier.
         assert!(find_jetsam_report(
             &[tmp.path().to_path_buf()],
-            4242,
+            &[4242],
             &[],
             start.saturating_sub(600_000_000_000),
             start.saturating_sub(300_000_000_000),
@@ -497,7 +518,7 @@ mod tests {
         let (start, end) = window_around(&f);
         assert!(find_jetsam_report(
             &[tmp.path().to_path_buf()],
-            11672,
+            &[11672],
             &[],
             start,
             end,
@@ -831,6 +852,84 @@ mod tests {
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
 
         assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    }
+
+    /// Le cas normal du projet, pas un cas limite : sous `uv run` /
+    /// `poetry run` / `python -m`, le processus qui meurt est un
+    /// petit-enfant dont le PID diffère de celui de l'enfant lancé — c'est
+    /// la raison d'être de `SMELTR_SCOPE_TOKEN` (#31). Le rapport jetsam
+    /// nomme le petit-enfant ; ne regarder que le PID scopé rendait le
+    /// silence exactement dans le cas visé.
+    #[test]
+    #[serial_test::serial]
+    fn joins_a_grandchild_pid_seen_in_footprint_samples() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        // La session est scopée sur le lanceur (`uv`, PID 9999) ; le vrai
+        // travail — et le kill — est sur le petit-enfant python 4242.
+        let dir = scoped_session(
+            home.path(),
+            9999,
+            vec!["/opt/homebrew/bin/uv".into()],
+            "2026-05-15T17:35:05Z",
+            None,
+            &[
+                footprint_ev(1, now_ns(), 9999, "uv", true),
+                footprint_ev(2, now_ns(), 4242, "python", false),
+            ],
+        );
+        let f = reports.path().join("JetsamEvent-2026-08-09-123716.ips");
+        std::fs::write(&f, JETSAM).unwrap();
+
+        let mut report = crate::report::Report {
+            findings: Vec::new(),
+            session_short: None,
+            event_count: 0,
+        };
+        join_jetsam(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+        assert!(
+            report.findings[0].detail.contains("4242"),
+            "detail: {}",
+            report.findings[0].detail
+        );
+    }
+
+    /// Élargir aux PID observés ne doit pas ouvrir la porte : un PID que la
+    /// session n'a jamais vu reste sans jointure.
+    #[test]
+    #[serial_test::serial]
+    fn an_unobserved_pid_still_does_not_join() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let dir = scoped_session(
+            home.path(),
+            9999,
+            vec!["/opt/homebrew/bin/uv".into()],
+            "2026-05-15T17:35:05Z",
+            None,
+            &[footprint_ev(1, now_ns(), 9999, "uv", true)],
+        );
+        let f = reports.path().join("JetsamEvent-2026-08-09-123716.ips");
+        std::fs::write(&f, JETSAM).unwrap();
+
+        let mut report = crate::report::Report {
+            findings: Vec::new(),
+            session_short: None,
+            event_count: 0,
+        };
+        join_jetsam(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(report.findings.is_empty(), "{:#?}", report.findings);
     }
 
     #[test]
