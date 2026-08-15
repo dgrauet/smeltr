@@ -90,15 +90,25 @@ fn record_emits_proc_footprint_in_scoped_session() {
     let home = tempfile::tempdir().unwrap();
     let sock = home.path().join("smeltr.sock");
 
-    let mut daemon = DaemonGuard::spawn(home.path(), &sock);
+    // `SMELTR_FOOTPRINT_PERIOD_MS` is read by `FootprintProbe::default_period()`
+    // inside `ProbeRuntime::attach_scoped`, which runs in the *daemon*
+    // process — not in the `smeltr record` client. Setting it on the record
+    // command (as an earlier version of this test did) is a no-op: the
+    // daemon was already spawned with its own environment by the time
+    // `record` runs, so the probe silently falls back to the 2s default.
+    // That earlier version of the test passed anyway, because it only
+    // asserted `scoped_root_samples > 0`, which the 2s-default cadence also
+    // satisfies over a 1s sleep — the assertion couldn't tell a working knob
+    // from a no-op one. Set the variable on the daemon here instead, and
+    // assert a count that only a ~200ms cadence can produce.
+    let mut daemon =
+        DaemonGuard::spawn_with_env(home.path(), &sock, &[("SMELTR_FOOTPRINT_PERIOD_MS", "200")]);
 
-    // Cadence serrée pour que `sleep 1` couvre plusieurs ticks.
     Command::cargo_bin("smeltr")
         .unwrap()
         .env("SMELTR_HOME", home.path())
         .env("SMELTR_SOCKET", &sock)
-        .env("SMELTR_FOOTPRINT_PERIOD_MS", "200")
-        .args(["record", "--no-hook", "/bin/sleep", "1"])
+        .args(["record", "--no-hook", "/bin/sleep", "2"])
         .assert()
         .success();
 
@@ -120,11 +130,16 @@ fn record_emits_proc_footprint_in_scoped_session() {
         let is_ambient = matches!(meta.kind, smeltr_core::session::SessionKind::Ambient);
         for e in &events {
             if let smeltr_core::event::Payload::ProcFootprint {
+                pid,
+                name,
                 is_traced_root,
                 phys_footprint_bytes,
                 ..
             } = &e.payload
             {
+                if *phys_footprint_bytes == 0 {
+                    eprintln!("DEBUG zero footprint: pid={pid} name={name:?} is_traced_root={is_traced_root} is_ambient={is_ambient}");
+                }
                 assert!(
                     *phys_footprint_bytes > 0,
                     "une empreinte nulle n'a pas de sens"
@@ -138,9 +153,14 @@ fn record_emits_proc_footprint_in_scoped_session() {
         }
     }
 
+    // A 2s-default cadence over a 2s sleep would produce ~1 sample; a 200ms
+    // cadence produces ~10. Require ≥5 so the assertion actually
+    // distinguishes "the knob worked" from "the knob was ignored" — do not
+    // weaken this back to `> 0`.
     assert!(
-        scoped_root_samples > 0,
-        "attendu ≥1 ProcFootprint racine dans la session scopée, eu 0"
+        scoped_root_samples >= 5,
+        "attendu ≥5 ProcFootprint racine (cadence 200ms sur ~2s), eu {scoped_root_samples} \
+         — la cadence par défaut (2s) n'en produirait qu'~1"
     );
     assert_eq!(
         ambient_samples, 0,
