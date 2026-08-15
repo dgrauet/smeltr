@@ -1,3 +1,4 @@
+pub mod footprint;
 pub mod probe;
 pub mod raw;
 
