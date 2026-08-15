@@ -171,7 +171,13 @@ pub fn descendants_of(root: u32, all: &[ProcNode]) -> Vec<ProcNode> {
 mod tests {
     use super::*;
 
+    // `reads_own_footprint` races with `finds_spawned_children`: forking
+    // children under `finds_spawned_children` churns memory enough that the
+    // kernel's `ri_lifetime_max_phys_footprint` bookkeeping can lag behind
+    // `ri_phys_footprint` for a moment. `#[serial]` keeps the two from
+    // interleaving.
     #[test]
+    #[serial_test::serial]
     fn reads_own_footprint() {
         let f = read_footprint(std::process::id()).expect("own footprint readable");
         assert!(f.phys_bytes > 0, "phys_bytes = {}", f.phys_bytes);
@@ -252,6 +258,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn finds_spawned_children() {
         use std::process::Command;
         use std::thread;
