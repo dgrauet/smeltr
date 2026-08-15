@@ -3,12 +3,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use smeltr_analyzer::analyze;
-use smeltr_analyzer::crash_join::{
-    crash_finding, find_crash_report, rfc3339_unix_ns, CRASH_REPORT_GRACE_NS,
-};
 use smeltr_core::reader::{read_events, read_metadata};
-use smeltr_core::session::SessionKind;
-use std::path::PathBuf;
 
 pub fn run(arg_last: bool, session_id: Option<String>, include_ambient: bool) -> Result<()> {
     let dir = crate::session_resolver::resolve(session_id, arg_last, include_ambient)?;
@@ -22,53 +17,19 @@ fn build_report(dir: &std::path::Path) -> Result<smeltr_analyzer::report::Report
         read_events(dir).with_context(|| format!("reading events from {}", dir.display()))?;
     let mut report = analyze(&events);
 
-    // #153: ReportCrash writes the .ips seconds AFTER the crashed child
-    // dies, when the scoped session is already finalized — the live probe
-    // cannot land it there. Join it back at analyze time instead; also
-    // works on sessions recorded before this feature existed.
-    //
-    // The window uses the metadata's RFC3339 timestamps (real wall clock
-    // at write time), NOT the events' ts_wall_ns: those are derived from
-    // the monotonic clock, which stops during system sleep — a run that
-    // slept mid-recording has event wall times behind reality by the
-    // whole sleep duration.
     if let Ok(meta) = read_metadata(dir) {
         // #170: post-mortem sessions carry events stamped with the ambient
         // session that ingested them — name the session actually analyzed.
         report.session_short = Some(meta.session_id.short());
-        if let SessionKind::Scoped { pid, .. } = &meta.kind {
-            if meta.exit_code != Some(0) {
-                if let (Some(start_ns), Some(end_ns), Some(reports_dir)) = (
-                    rfc3339_unix_ns(&meta.started_rfc3339),
-                    meta.ended_rfc3339.as_deref().and_then(rfc3339_unix_ns),
-                    diagnostic_reports_dir(),
-                ) {
-                    if let Some(join) = find_crash_report(
-                        &reports_dir,
-                        *pid,
-                        start_ns,
-                        end_ns,
-                        CRASH_REPORT_GRACE_NS,
-                    ) {
-                        report.findings.insert(0, crash_finding(&join));
-                    }
-                }
-            }
-        }
     }
 
+    // Les deux jointures rétroactives (#153, #200) vivent dans l'analyzer et
+    // sont appelées à l'identique par le MCP : les avoir ici seulement, c'est
+    // ce qui privait `get_session_summary` du verdict de crash (#204).
+    smeltr_analyzer::crash_join::join_crash(&mut report, dir);
     smeltr_analyzer::crash_join::join_jetsam(&mut report, dir);
 
     Ok(report)
-}
-
-/// `~/Library/Logs/DiagnosticReports`, overridable for tests via
-/// `SMELTR_DIAGNOSTIC_REPORTS_DIR`.
-fn diagnostic_reports_dir() -> Option<PathBuf> {
-    if let Some(over) = std::env::var_os("SMELTR_DIAGNOSTIC_REPORTS_DIR") {
-        return Some(PathBuf::from(over));
-    }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Logs/DiagnosticReports"))
 }
 
 #[cfg(test)]
