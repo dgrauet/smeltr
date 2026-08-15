@@ -1,10 +1,16 @@
 //! Présomption de mort par jetsam quand le rapport `.ips` manque.
 //!
-//! Signal plus faible que [`crate::rules::jetsam_kill`] : le rapport peut
-//! être écrit après la fin de la session, le répertoire peut être illisible,
-//! la génération peut être désactivée. Quand l'empreinte montait franchement
-//! et que la session s'arrête net, ça vaut d'être dit — mais comme une
-//! présomption, jamais comme un verdict.
+//! Signal plus faible que le verdict rendu par
+//! [`crate::crash_join::join_jetsam`] : le rapport peut être écrit après la
+//! fin de la session, le répertoire peut être illisible, la génération peut
+//! être désactivée. Quand l'empreinte montait franchement et que la session
+//! s'arrête net, ça vaut d'être dit — mais comme une présomption, jamais
+//! comme un verdict.
+//!
+//! La pente NE SUFFIT PAS. Le premier échantillon est le tout premier tic de
+//! la sonde, à l'attachement, avant que l'enfant ait exec'é sa charge : tout
+//! run qui alloue quoi que ce soit franchit le facteur. Il faut aussi une
+//! preuve de fin anormale — l'absence de `SessionEnded` dans le flux.
 //!
 //! Aucun seuil jetsam n'est codé ici : la règle regarde une *pente*, pas une
 //! limite. La limite par processus n'est pas interrogeable sans droits
@@ -27,11 +33,18 @@ impl Rule for JetsamRiskRule {
     }
 
     fn check(&self, events: &[Event]) -> Vec<Finding> {
-        // Un verdict confirmé rend cette présomption inutile.
-        if events
-            .iter()
-            .any(|e| matches!(e.payload, Payload::JetsamKill { .. }))
-        {
+        // Un verdict confirmé rend cette présomption inutile ; et une
+        // session finalisée proprement n'est pas morte de pression mémoire.
+        // `SessionEnded` n'est écrit que par `finalize`, seul chemin vers
+        // `ended_rfc3339` — son absence du flux est donc une vraie preuve de
+        // fin anormale. (La reprise au boot ne réécrit que les métadonnées,
+        // sans ajouter d'événement : elle ne masque pas le signal.)
+        if events.iter().any(|e| {
+            matches!(
+                e.payload,
+                Payload::JetsamKill { .. } | Payload::SessionEnded { .. }
+            )
+        }) {
             return Vec::new();
         }
 
@@ -56,32 +69,35 @@ impl Rule for JetsamRiskRule {
             return Vec::new();
         }
 
-        let gib = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
+        // Go décimal (1e9), comme `jetsam_finding` : macOS et les rapports
+        // jetsam eux-mêmes expriment les empreintes ainsi, et deux findings
+        // sur le même fait dans deux unités différentes ne se comparent pas.
+        let gb = |b: u64| b as f64 / 1_000_000_000.0;
         vec![Finding::new(
             Severity::Warning,
             Category::ContributingFactor,
             "L'empreinte mémoire montait franchement en fin de session",
         )
         .with_detail(format!(
-            "L'empreinte du processus tracé est passée de {:.2} à {:.2} Gio \
-             avant que la session s'arrête, et aucun rapport jetsam n'a été \
-             joint. Une mort par jetsam est possible : le processus disparaît \
-             alors sans traceback ni exception. Vérifiez \
+            "L'empreinte du processus tracé est passée de {:.2} à {:.2} Go \
+             avant que la session s'arrête sans fin propre, et aucun rapport \
+             jetsam n'a été joint. Une mort par jetsam est possible : le \
+             processus disparaît alors sans traceback ni exception. Vérifiez \
              /Library/Logs/DiagnosticReports pour un JetsamEvent-*.ips \
              postérieur à la fin de la session — il peut être écrit après \
              coup. Ceci est une présomption, pas un verdict.",
-            gib(first),
-            gib(last)
+            gb(first),
+            gb(last)
         ))
         .with_evidence(EvidenceRef {
             seq: first_ev.seq,
             ts_mono_ns: first_ev.ts_mono_ns,
-            description: format!("empreinte initiale {:.2} Gio", gib(first)),
+            description: format!("empreinte initiale {:.2} Go", gb(first)),
         })
         .with_evidence(EvidenceRef {
             seq: last_ev.seq,
             ts_mono_ns: last_ev.ts_mono_ns,
-            description: format!("dernière empreinte {:.2} Gio", gib(last)),
+            description: format!("dernière empreinte {:.2} Go", gb(last)),
         })]
     }
 }
@@ -162,5 +178,55 @@ mod tests {
     #[test]
     fn no_footprint_samples_yield_nothing() {
         assert!(JetsamRiskRule.check(&[]).is_empty());
+    }
+
+    fn session_ended(ts: u64) -> smeltr_core::event::Event {
+        ev(
+            ts,
+            Source::System,
+            Payload::SessionEnded {
+                wall_unix_ns: ts,
+                reason: "record:exit pid=4242".into(),
+            },
+        )
+    }
+
+    /// La pente seule fait feu sur pratiquement TOUT run sain : le premier
+    /// échantillon est le tout premier tic de la sonde, à l'attachement,
+    /// avant même que l'enfant ait exec'é sa charge — quelques Mo — et le
+    /// dernier est le pic du run. Un run d'acceptation parfaitement sain est
+    /// passé de 15 Mo à 1007 Mo. Un avertissement qui se déclenche toujours
+    /// apprend à ignorer toute la liste des findings, y compris le Critical
+    /// pour lequel cette branche existe.
+    ///
+    /// `SessionEnded` n'est écrit que par `finalize` (le seul chemin vers
+    /// `ended_rfc3339`) : son absence du FLUX est donc un vrai signal de fin
+    /// anormale. La reprise au boot, elle, ne réécrit que les métadonnées et
+    /// n'ajoute aucun événement — elle ne masque pas le signal.
+    #[test]
+    fn a_healthy_rising_session_that_ended_cleanly_is_not_a_risk() {
+        let events = vec![
+            footprint(1, 15_000_000),
+            footprint(2, 500_000_000),
+            footprint(3, 1_007_000_000),
+            session_ended(4),
+        ];
+        assert!(
+            JetsamRiskRule.check(&events).is_empty(),
+            "got: {:#?}",
+            JetsamRiskRule.check(&events)
+        );
+    }
+
+    /// La même pente SANS fin propre reste un risque : c'est la forme que
+    /// produit un kill jetsam.
+    #[test]
+    fn the_same_rise_without_a_clean_end_is_still_a_risk() {
+        let events = vec![
+            footprint(1, 15_000_000),
+            footprint(2, 500_000_000),
+            footprint(3, 1_007_000_000),
+        ];
+        assert_eq!(JetsamRiskRule.check(&events).len(), 1);
     }
 }
