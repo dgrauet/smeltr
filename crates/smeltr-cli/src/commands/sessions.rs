@@ -261,6 +261,16 @@ fn print_session(
                     human_bytes(*cache_bytes)
                 )
             }
+            smeltr_core::event::Payload::ProcFootprint {
+                pid,
+                name,
+                phys_footprint_bytes,
+                lifetime_max_phys_footprint_bytes,
+                ..
+            } => format!(
+                "ProcFootprint pid={pid} {name} phys={phys_footprint_bytes} \
+                 lifetime_max={lifetime_max_phys_footprint_bytes}"
+            ),
             smeltr_core::event::Payload::MlxArrayAlive {
                 array_id,
                 size_bytes,

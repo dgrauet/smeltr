@@ -92,6 +92,7 @@ pub fn payload_kind(e: &Event) -> &'static str {
         Payload::MetalBufferFree { .. } => "MetalBufferFree",
         Payload::MetalTextureAlloc { .. } => "MetalTextureAlloc",
         Payload::MetalTextureFree { .. } => "MetalTextureFree",
+        Payload::ProcFootprint { .. } => "ProcFootprint",
         Payload::MetalHookDropped { .. } => "MetalHookDropped",
         Payload::MetalHookSkipped { .. } => "MetalHookSkipped",
         Payload::MlxEvalEntered { .. } => "MlxEvalEntered",
