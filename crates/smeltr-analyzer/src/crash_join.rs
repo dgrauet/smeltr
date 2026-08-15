@@ -141,14 +141,32 @@ pub fn jetsam_reports_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Deux noms de processus désignent-ils plausiblement le même processus ?
+///
+/// Comparaison par PRÉFIXE, pas par égalité : les deux côtés tronquent
+/// différemment. `pbi_comm` (d'où viennent les noms de `ProcFootprint`) fait
+/// 16 octets — `MAXCOMLEN` — tandis que le `name` d'un rapport jetsam va
+/// jusqu'à ~32 (observé sur cette machine :
+/// `"com.apple.Virtualization.Virtual"`, 32 caractères). Exiger l'égalité
+/// rejetterait précisément les noms longs.
+///
+/// Un nom vide n'apporte aucune information et ne prouve donc rien.
+pub fn names_compatible(a: &str, b: &str) -> bool {
+    let n = a.len().min(b.len());
+    n > 0 && a.as_bytes()[..n] == b.as_bytes()[..n]
+}
+
 /// Cherche dans `dirs` un rapport jetsam nommant `pid`, dont le mtime tombe
 /// dans `[wall_start_ns, wall_end_ns + grace_ns]`. Retourne le plus récent.
 ///
-/// Le double filtre PID + fenêtre est ce qui empêche d'attribuer au run
-/// analysé un kill jetsam d'un processus sans rapport avec lui.
+/// Le triple filtre PID + fenêtre + nom est ce qui empêche d'attribuer au run
+/// analysé un kill jetsam d'un processus sans rapport avec lui. `known_names`
+/// liste les noms connus du processus tracé ; vide, la garde de nom ne
+/// s'applique pas et on retombe sur PID + fenêtre.
 pub fn find_jetsam_report(
     dirs: &[std::path::PathBuf],
     pid: u32,
+    known_names: &[String],
     wall_start_ns: u64,
     wall_end_ns: u64,
     grace_ns: u64,
@@ -189,6 +207,17 @@ pub fn find_jetsam_report(
                 continue;
             };
             if killed_pid != Some(pid) {
+                continue;
+            }
+            // Garde de nom : le PID seul ne suffit pas, macOS les recycle.
+            // Elle ne s'applique que si les DEUX côtés donnent un nom —
+            // sinon rejeter ferait rater le kill qu'on cherche.
+            if !known_names.is_empty()
+                && !killed_name.is_empty()
+                && !known_names
+                    .iter()
+                    .any(|n| names_compatible(n, &killed_name))
+            {
                 continue;
             }
             let join = JetsamJoin {
@@ -260,28 +289,59 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
     let Ok(meta) = smeltr_core::reader::read_metadata(dir) else {
         return;
     };
-    let smeltr_core::session::SessionKind::Scoped { pid, .. } = &meta.kind else {
+    let smeltr_core::session::SessionKind::Scoped { pid, argv } = &meta.kind else {
         return;
     };
     let Some(start_ns) = rfc3339_unix_ns(&meta.started_rfc3339) else {
         return;
     };
+    let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
+
     // Un kill jetsam empêche souvent le client `record` de finaliser
     // proprement la session (même symptôme que le crash join, #143) : à
-    // défaut d'`ended_rfc3339`, la fenêtre reste ouverte jusqu'à maintenant.
+    // défaut d'`ended_rfc3339`, on borne la fenêtre au dernier événement
+    // écrit. Laisser courir jusqu'à MAINTENANT rendrait la fenêtre large de
+    // plusieurs semaines sur une vieille session non finalisée — et il ne
+    // resterait alors qu'un PID que macOS recycle pour garder le verdict.
+    // Repli sur maintenant seulement s'il n'y a aucun événement à dater.
     let end_ns = meta
         .ended_rfc3339
         .as_deref()
         .and_then(rfc3339_unix_ns)
+        .or_else(|| {
+            events
+                .iter()
+                .map(|e| e.ts_wall_ns)
+                .max()
+                .map(|t| t.saturating_add(CRASH_REPORT_GRACE_NS))
+        })
         .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp_nanos() as u64);
+
+    // Noms connus du processus tracé, pour la garde de nom : le basename
+    // d'argv[0] et tout nom vu dans les échantillons d'empreinte.
+    let mut known_names: Vec<String> = argv
+        .first()
+        .and_then(|a| a.rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![s.to_string()])
+        .unwrap_or_default();
+    for e in &events {
+        if let Payload::ProcFootprint { name, .. } = &e.payload {
+            if !name.is_empty() && !known_names.iter().any(|n| n == name) {
+                known_names.push(name.clone());
+            }
+        }
+    }
+
     // Volontairement PAS de garde sur meta.exit_code (contrairement au join
     // de crash) : un processus tué par jetsam n'a pas de code de sortie
     // propre, mais le shell parent peut en rapporter un — on ne veut pas
-    // rater le kill pour ça. Le double filtre PID + fenêtre suffit à éviter
-    // les faux positifs.
+    // rater le kill pour ça. Le triple filtre PID + fenêtre + nom suffit à
+    // éviter les faux positifs.
     if let Some(j) = find_jetsam_report(
         &jetsam_reports_dirs(),
         *pid,
+        &known_names,
         start_ns,
         end_ns,
         CRASH_REPORT_GRACE_NS,
@@ -378,6 +438,7 @@ mod tests {
         let j = find_jetsam_report(
             &[tmp.path().to_path_buf()],
             4242,
+            &[],
             start,
             end,
             CRASH_REPORT_GRACE_NS,
@@ -400,6 +461,7 @@ mod tests {
         assert!(find_jetsam_report(
             &[tmp.path().to_path_buf()],
             999_999,
+            &[],
             start,
             end,
             CRASH_REPORT_GRACE_NS
@@ -418,6 +480,7 @@ mod tests {
         assert!(find_jetsam_report(
             &[tmp.path().to_path_buf()],
             4242,
+            &[],
             start.saturating_sub(600_000_000_000),
             start.saturating_sub(300_000_000_000),
             0
@@ -435,6 +498,7 @@ mod tests {
         assert!(find_jetsam_report(
             &[tmp.path().to_path_buf()],
             11672,
+            &[],
             start,
             end,
             CRASH_REPORT_GRACE_NS
@@ -536,6 +600,237 @@ mod tests {
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
         assert_eq!(report.findings.len(), 1, "findings: {:#?}", report.findings);
         assert_eq!(report.findings[0].category, Category::RootCause);
+    }
+
+    /// Construit une session scopée sur disque : métadonnées (départ, fin,
+    /// argv) et flux d'événements maîtrisés, ce qu'aucun helper existant ne
+    /// permet — `SessionWriter::create` date toujours le départ à maintenant.
+    fn scoped_session(
+        home: &Path,
+        pid: u32,
+        argv: Vec<String>,
+        started: &str,
+        ended: Option<&str>,
+        events: &[smeltr_core::event::Event],
+    ) -> std::path::PathBuf {
+        use smeltr_core::session::{SessionId, SessionKind, SessionMetadata};
+        use smeltr_core::writer::SessionWriter;
+
+        // SMELTR_HOME est déjà positionné par l'appelant (test #[serial]).
+        let _ = home;
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.kind = SessionKind::Scoped { pid, argv };
+        let mut w = SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        for e in events {
+            w.write_event(e).unwrap();
+        }
+        w.flush().unwrap();
+        drop(w);
+
+        // Réécrit les horodatages APRÈS coup : le writer impose "maintenant".
+        let mut meta = smeltr_core::reader::read_metadata(&dir).unwrap();
+        meta.started_rfc3339 = started.to_string();
+        meta.ended_rfc3339 = ended.map(str::to_string);
+        smeltr_core::session::write_metadata(&dir, &meta).unwrap();
+        dir
+    }
+
+    fn footprint_ev(
+        seq: u64,
+        ts_wall_ns: u64,
+        pid: u32,
+        name: &str,
+        is_traced_root: bool,
+    ) -> smeltr_core::event::Event {
+        smeltr_core::event::Event {
+            ts_mono_ns: seq,
+            ts_wall_ns,
+            session_id: uuid::Uuid::nil(),
+            source: smeltr_core::event::Source::Proc,
+            pid: Some(pid),
+            seq,
+            payload: Payload::ProcFootprint {
+                pid,
+                name: name.into(),
+                phys_footprint_bytes: 1_000_000,
+                lifetime_max_phys_footprint_bytes: 1_000_000,
+                is_traced_root,
+            },
+        }
+    }
+
+    fn now_ns() -> u64 {
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos() as u64
+    }
+
+    /// Le bord non borné : une session jamais finalisée — exactement ce que
+    /// jetsam produit — voyait sa fenêtre courir jusqu'à MAINTENANT. Une
+    /// session de mai analysée aujourd'hui avale ainsi tout rapport jetsam
+    /// des semaines suivantes, sur la seule foi d'un PID que macOS recycle.
+    #[test]
+    #[serial_test::serial]
+    fn unfinalized_session_does_not_swallow_a_much_later_report() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        // Dernier événement il y a une heure ; la session n'a jamais été
+        // finalisée (pas d'`ended_rfc3339`), comme après un kill jetsam.
+        let hour_ago = now_ns().saturating_sub(3_600_000_000_000);
+        let dir = scoped_session(
+            home.path(),
+            4242,
+            vec!["python".into()],
+            "2026-05-15T17:35:05Z",
+            None,
+            &[footprint_ev(1, hour_ago, 4242, "python", true)],
+        );
+
+        // Le rapport, lui, est écrit MAINTENANT : bien après la fin réelle
+        // de la session.
+        let f = reports.path().join("JetsamEvent-2026-08-09-123716.ips");
+        std::fs::write(&f, JETSAM).unwrap();
+
+        let mut report = crate::report::Report {
+            findings: Vec::new(),
+            session_short: None,
+            event_count: 0,
+        };
+        join_jetsam(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(
+            report.findings.is_empty(),
+            "fenêtre non bornée : {:#?}",
+            report.findings
+        );
+    }
+
+    /// Le repli borné reste utile : un rapport écrit juste après le dernier
+    /// événement d'une session non finalisée doit toujours être joint.
+    #[test]
+    #[serial_test::serial]
+    fn unfinalized_session_still_joins_a_report_written_right_after() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let dir = scoped_session(
+            home.path(),
+            4242,
+            vec!["python".into()],
+            "2026-05-15T17:35:05Z",
+            None,
+            &[footprint_ev(1, now_ns(), 4242, "python", true)],
+        );
+        let f = reports.path().join("JetsamEvent-2026-08-09-123716.ips");
+        std::fs::write(&f, JETSAM).unwrap();
+
+        let mut report = crate::report::Report {
+            findings: Vec::new(),
+            session_short: None,
+            event_count: 0,
+        };
+        join_jetsam(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    }
+
+    /// Le PID seul ne suffit pas : macOS les recycle. Quand les deux côtés
+    /// donnent un nom et qu'ils divergent, pas de jointure.
+    #[test]
+    #[serial_test::serial]
+    fn name_mismatch_rejects_the_join() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        // Le rapport nomme "python" ; cette session-là est un run ruby qui
+        // a simplement réutilisé le PID 4242.
+        let dir = scoped_session(
+            home.path(),
+            4242,
+            vec!["/usr/bin/ruby".into()],
+            "2026-05-15T17:35:05Z",
+            None,
+            &[footprint_ev(1, now_ns(), 4242, "ruby", true)],
+        );
+        let f = reports.path().join("JetsamEvent-2026-08-09-123716.ips");
+        std::fs::write(&f, JETSAM).unwrap();
+
+        let mut report = crate::report::Report {
+            findings: Vec::new(),
+            session_short: None,
+            event_count: 0,
+        };
+        join_jetsam(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(
+            report.findings.is_empty(),
+            "nom incompatible joint quand même : {:#?}",
+            report.findings
+        );
+    }
+
+    /// Les deux côtés tronquent différemment : `pbi_comm` fait 16 octets
+    /// (MAXCOMLEN), le `name` d'un rapport jetsam ~32 (observé sur cette
+    /// machine : "com.apple.Virtualization.Virtual", 32 caractères). Comparer
+    /// à égalité rejetterait le vrai cas — on compare par préfixe.
+    #[test]
+    fn truncated_names_match_by_prefix() {
+        assert!(names_compatible(
+            "com.apple.Virtua",
+            "com.apple.Virtualization.Virtual"
+        ));
+        assert!(names_compatible("python", "python"));
+        assert!(!names_compatible("ruby", "python"));
+        // Un nom vide n'apporte aucune information : il ne prouve rien.
+        assert!(!names_compatible("", "python"));
+    }
+
+    /// Sans nom d'un côté, on ne rejette pas : PID + fenêtre restent les
+    /// gardes, comme avant. Rejeter ferait rater le kill que la
+    /// fonctionnalité existe pour attraper.
+    #[test]
+    #[serial_test::serial]
+    fn missing_name_falls_back_to_pid_and_window() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        // Ni argv ni ProcFootprint : aucun nom côté session.
+        let dir = scoped_session(
+            home.path(),
+            4242,
+            vec![],
+            "2026-05-15T17:35:05Z",
+            Some(
+                &time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap(),
+            ),
+            &[],
+        );
+        let f = reports.path().join("JetsamEvent-2026-08-09-123716.ips");
+        std::fs::write(&f, JETSAM).unwrap();
+
+        let mut report = crate::report::Report {
+            findings: Vec::new(),
+            session_short: None,
+            event_count: 0,
+        };
+        join_jetsam(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
     }
 
     #[test]
