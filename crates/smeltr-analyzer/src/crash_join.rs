@@ -121,7 +121,7 @@ pub struct JetsamJoin {
     pub reason: Option<String>,
 }
 
-/// Répertoires où macOS dépose les rapports de pression mémoire.
+/// Répertoires où macOS dépose ses rapports de diagnostic.
 ///
 /// Le répertoire SYSTÈME vient en premier : c'est là que les
 /// `JetsamEvent-*.ips` sont écrits, contrairement aux rapports de crash
@@ -130,7 +130,7 @@ pub struct JetsamJoin {
 /// fonctionnalité ne se déclenche jamais.
 ///
 /// `SMELTR_DIAGNOSTIC_REPORTS_DIR` remplace toute la liste, pour les tests.
-pub fn jetsam_reports_dirs() -> Vec<std::path::PathBuf> {
+pub fn diagnostic_reports_dirs() -> Vec<std::path::PathBuf> {
     if let Some(over) = std::env::var_os("SMELTR_DIAGNOSTIC_REPORTS_DIR") {
         return vec![std::path::PathBuf::from(over)];
     }
@@ -302,25 +302,7 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
     };
     let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
 
-    // Un kill jetsam empêche souvent le client `record` de finaliser
-    // proprement la session (même symptôme que le crash join, #143) : à
-    // défaut d'`ended_rfc3339`, on borne la fenêtre au dernier événement
-    // écrit. Laisser courir jusqu'à MAINTENANT rendrait la fenêtre large de
-    // plusieurs semaines sur une vieille session non finalisée — et il ne
-    // resterait alors qu'un PID que macOS recycle pour garder le verdict.
-    // Repli sur maintenant seulement s'il n'y a aucun événement à dater.
-    let end_ns = meta
-        .ended_rfc3339
-        .as_deref()
-        .and_then(rfc3339_unix_ns)
-        .or_else(|| {
-            events
-                .iter()
-                .map(|e| e.ts_wall_ns)
-                .max()
-                .map(|t| t.saturating_add(CRASH_REPORT_GRACE_NS))
-        })
-        .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp_nanos() as u64);
+    let end_ns = window_end_ns(&meta, &events);
 
     // PID candidats : le PID scopé PLUS tout PID vu dans les échantillons
     // d'empreinte, qui couvrent tout l'arbre tracé. Sous `uv run` /
@@ -360,7 +342,7 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
     // rater le kill pour ça. Le triple filtre PID + fenêtre + nom suffit à
     // éviter les faux positifs.
     if let Some(j) = find_jetsam_report(
-        &jetsam_reports_dirs(),
+        &diagnostic_reports_dirs(),
         &pids,
         &known_names,
         start_ns,
@@ -376,6 +358,70 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
     // verdict — plutôt qu'une vérification séparée qu'on pourrait oublier.
     if let Some(f) = presume_memory_death(&meta, &events, report) {
         report.findings.push(f);
+    }
+}
+
+/// Borne haute de la fenêtre wall-clock d'une session, pour joindre un
+/// rapport écrit après coup.
+///
+/// Un kill (jetsam comme crash) empêche souvent le client `record` de
+/// finaliser proprement (#143) : à défaut d'`ended_rfc3339`, on borne au
+/// dernier événement écrit. Laisser courir jusqu'à MAINTENANT rendrait la
+/// fenêtre large de plusieurs semaines sur une vieille session non
+/// finalisée — et il ne resterait alors qu'un PID que macOS recycle pour
+/// garder le verdict. Repli sur maintenant seulement s'il n'y a aucun
+/// événement à dater.
+fn window_end_ns(meta: &smeltr_core::session::SessionMetadata, events: &[Event]) -> u64 {
+    meta.ended_rfc3339
+        .as_deref()
+        .and_then(rfc3339_unix_ns)
+        .or_else(|| {
+            events
+                .iter()
+                .map(|e| e.ts_wall_ns)
+                .max()
+                .map(|t| t.saturating_add(CRASH_REPORT_GRACE_NS))
+        })
+        .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp_nanos() as u64)
+}
+
+/// Joint un éventuel rapport de crash à la session, en tête des findings.
+///
+/// Jumeau de [`join_jetsam`], appelé depuis `smeltr analyze` **et** depuis le
+/// MCP `get_session_summary`. Avant #204 ce travail vivait dans `analyze.rs`
+/// et n'existait donc qu'en CLI : le MCP ne rendait jamais le verdict d'un
+/// crash, et depuis #201 il lui substituait la présomption de mort mémoire —
+/// dire quelque chose d'inexact étant pire que se taire.
+///
+/// La fenêtre passe par [`window_end_ns`], donc une session jamais finalisée
+/// est couverte elle aussi ; l'ancien bloc exigeait `ended_rfc3339` et sautait
+/// silencieusement ce cas, y compris en CLI.
+pub fn join_crash(report: &mut crate::report::Report, dir: &Path) {
+    let Ok(meta) = smeltr_core::reader::read_metadata(dir) else {
+        return;
+    };
+    let smeltr_core::session::SessionKind::Scoped { pid, .. } = &meta.kind else {
+        return;
+    };
+    // Une sortie propre n'est pas un crash. Garde volontairement absente de
+    // `join_jetsam` (un kill jetsam peut laisser le shell rapporter un code
+    // propre), mais légitime ici : ReportCrash n'écrit rien sur un exit 0.
+    if meta.exit_code == Some(0) {
+        return;
+    }
+    let Some(start_ns) = rfc3339_unix_ns(&meta.started_rfc3339) else {
+        return;
+    };
+    let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
+    let end_ns = window_end_ns(&meta, &events);
+
+    for reports_dir in diagnostic_reports_dirs() {
+        if let Some(j) =
+            find_crash_report(&reports_dir, *pid, start_ns, end_ns, CRASH_REPORT_GRACE_NS)
+        {
+            report.findings.insert(0, crash_finding(&j));
+            return;
+        }
     }
 }
 
@@ -648,7 +694,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn jetsam_dirs_include_the_system_directory() {
-        let dirs = jetsam_reports_dirs();
+        let dirs = diagnostic_reports_dirs();
         assert!(
             dirs.iter()
                 .any(|d| d == std::path::Path::new("/Library/Logs/DiagnosticReports")),
@@ -1232,6 +1278,115 @@ mod tests {
 
         assert_eq!(f.len(), 1, "{f:#?}");
         assert_eq!(f[0].severity, Severity::Warning);
+    }
+
+    /// #204 : la jointure de crash doit couvrir une session JAMAIS finalisée.
+    /// L'ancien bloc de `analyze.rs` exigeait `ended_rfc3339` et sautait donc
+    /// silencieusement ce cas, y compris en CLI — alors que c'est exactement
+    /// la forme que produit une mort brutale.
+    #[test]
+    #[serial_test::serial]
+    fn join_crash_covers_a_never_finalized_session() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        // Un événement daté maintenant : c'est lui qui borne la fenêtre en
+        // l'absence de `ended_rfc3339`.
+        let evs = vec![footprint_ev(1, now_ns(), 11672, "python3", true)];
+        let dir = scoped_session(
+            home.path(),
+            11672,
+            vec!["/usr/bin/python3".into()],
+            "2026-08-09T10:00:00Z",
+            None,
+            &evs,
+        );
+        set_exit_code(&dir, Some(-1));
+        std::fs::write(reports.path().join("Python-crash.ips"), MULTILINE).unwrap();
+
+        let mut report = empty_report();
+        join_crash(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+        assert_eq!(report.findings[0].category, Category::RootCause);
+        assert!(report.findings[0].title.contains("crashed"));
+    }
+
+    /// Une sortie propre n'est pas un crash : garde conservée depuis
+    /// `analyze.rs`.
+    #[test]
+    #[serial_test::serial]
+    fn join_crash_skips_a_clean_exit() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let evs = vec![footprint_ev(1, now_ns(), 11672, "python3", true)];
+        let dir = scoped_session(
+            home.path(),
+            11672,
+            vec!["/usr/bin/python3".into()],
+            "2026-08-09T10:00:00Z",
+            Some("2026-08-09T10:05:00Z"),
+            &evs,
+        );
+        set_exit_code(&dir, Some(0));
+        std::fs::write(reports.path().join("Python-crash.ips"), MULTILINE).unwrap();
+
+        let mut report = empty_report();
+        join_crash(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(report.findings.is_empty(), "{:#?}", report.findings);
+    }
+
+    /// Un crash prime sur la présomption mémoire : `join_crash` pose la cause
+    /// racine, que `presume_memory_death` voit ensuite et respecte. C'est le
+    /// scénario que le chemin MCP misattribuait avant #204.
+    #[test]
+    #[serial_test::serial]
+    fn a_crash_suppresses_the_memory_presumption() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let t = now_ns();
+        let evs = vec![
+            footprint_bytes_ev(1, t, 11672, 4_000_000_000),
+            footprint_bytes_ev(2, t + 1_000_000_000, 11672, 18_000_000_000),
+        ];
+        // `ended` absent : la fenêtre se borne au dernier événement, daté de
+        // maintenant, donc elle couvre la mtime du rapport qu'on vient
+        // d'écrire. Une date de fin figée dans le passé le mettrait hors
+        // fenêtre et le test testerait autre chose.
+        let dir = scoped_session(
+            home.path(),
+            11672,
+            vec!["/usr/bin/python3".into()],
+            "2026-08-09T10:00:00Z",
+            None,
+            &evs,
+        );
+        set_exit_code(&dir, Some(-1));
+        std::fs::write(reports.path().join("Python-crash.ips"), MULTILINE).unwrap();
+
+        let mut report = empty_report();
+        join_crash(&mut report, &dir);
+        join_jetsam(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(
+            report.findings.len(),
+            1,
+            "le crash doit primer, sans présomption ajoutée : {:#?}",
+            report.findings
+        );
+        assert_eq!(report.findings[0].category, Category::RootCause);
     }
 
     /// Le faux positif à ne surtout pas laisser passer : une session ENCORE
