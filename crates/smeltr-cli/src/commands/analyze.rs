@@ -55,6 +55,8 @@ fn build_report(dir: &std::path::Path) -> Result<smeltr_analyzer::report::Report
         }
     }
 
+    smeltr_analyzer::crash_join::join_jetsam(&mut report, dir);
+
     Ok(report)
 }
 

@@ -18,7 +18,8 @@ pub struct Response {
 pub fn run(params: Params) -> Result<Response, ToolError> {
     let dir = resolve_session(&params.session)?;
     let events = smeltr_core::reader::read_events(&dir)?;
-    let report = smeltr_analyzer::analyze(&events);
+    let mut report = smeltr_analyzer::analyze(&events);
+    smeltr_analyzer::crash_join::join_jetsam(&mut report, &dir);
     Ok(Response {
         report,
         event_count: events.len(),

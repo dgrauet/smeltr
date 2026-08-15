@@ -10,7 +10,9 @@ smeltr-probes-crash-reports = { path = "../smeltr-probes-crash-reports" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1"
 thiserror = { workspace = true }
+time.workspace = true
 
 [dev-dependencies]
 uuid = { workspace = true }
 tempfile = { workspace = true }
+serial_test = "3"
