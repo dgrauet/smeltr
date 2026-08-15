@@ -72,20 +72,39 @@ pub fn detect(events: &[Event]) -> Option<SidecarAbsent> {
 pub struct NothingInstrumented {
     /// Nombre total d'événements de la session (tous issus des sondes).
     pub event_count: usize,
+    /// La session porte-t-elle des échantillons d'empreinte processus ?
+    ///
+    /// Les sessions ambiantes n'en portent JAMAIS : leur présence prouve
+    /// qu'un processus a bien été suivi, donc qu'un run a été enregistré.
+    pub has_proc_footprint: bool,
 }
 
 impl NothingInstrumented {
     pub fn advice(&self) -> String {
+        // Ne PAS affirmer de quelle sorte de session il s'agit quand des
+        // `ProcFootprint` sont là : `smeltr record --no-hook -- /bin/sleep 2`
+        // produit exactement cette forme dans une session SCOPÉE. Dire à
+        // quelqu'un qui vient d'enregistrer un run qu'il regarde la session
+        // ambiante — et lui conseiller d'enregistrer un run — est faux deux
+        // fois. On s'en tient à ce qui est su.
+        let suite = if self.has_proc_footprint {
+            "Un processus a bien été suivi (échantillons d'empreinte \
+             présents), mais ni le hook Metal ni le sidecar Python n'ont \
+             produit d'événement : lancé avec `--no-hook`, sur une cible non \
+             Metal, ou sans le paquet `smeltr` installé dans l'environnement \
+             Python de la cible."
+        } else {
+            "C'est la forme attendue de la session ambiante que le daemon \
+             ouvre à chaque démarrage. Pour analyser un run réel, \
+             enregistrez-le avec `smeltr record -- <commande>` puis ciblez-le \
+             avec `--last` ou avec le nom donné via SMELTR_SESSION_NAME."
+        };
         format!(
             "Cette session contient {} événement(s), tous issus des sondes \
              système : aucune capture Metal et aucun événement du sidecar \
              Python. Il n'y a donc rien à ventiler par scope ou par module — \
              les tableaux vides signifient « rien n'a été instrumenté », pas \
-             « rien à signaler ». C'est la forme attendue de la session \
-             ambiante que le daemon ouvre à chaque démarrage. Pour analyser \
-             un run réel, enregistrez-le avec `smeltr record -- <commande>` \
-             puis ciblez-le avec `--last` ou avec le nom donné via \
-             SMELTR_SESSION_NAME.",
+             « rien à signaler ». {suite}",
             self.event_count
         )
     }
@@ -97,17 +116,20 @@ pub fn detect_nothing_instrumented(events: &[Event]) -> Option<NothingInstrument
     if events.is_empty() {
         return None;
     }
+    let mut has_proc_footprint = false;
     for ev in events {
         match &ev.payload {
             Payload::PythonSidecarHello { .. }
             | Payload::ModuleEntered { .. }
             | Payload::MlxEvalEntered { .. }
             | Payload::MetalCbCompleted { .. } => return None,
+            Payload::ProcFootprint { .. } => has_proc_footprint = true,
             _ => {}
         }
     }
     Some(NothingInstrumented {
         event_count: events.len(),
+        has_proc_footprint,
     })
 }
 
@@ -284,6 +306,47 @@ mod tests {
             },
         )];
         assert!(detect_nothing_instrumented(&events).is_none());
+    }
+
+    fn proc_footprint(ts: u64) -> Event {
+        ev(
+            ts,
+            Source::Proc,
+            Payload::ProcFootprint {
+                pid: 4242,
+                name: "sleep".into(),
+                phys_footprint_bytes: 1_000_000,
+                lifetime_max_phys_footprint_bytes: 1_000_000,
+                is_traced_root: true,
+            },
+        )
+    }
+
+    /// Cette branche crée le contre-exemple de l'ancienne rédaction :
+    /// `smeltr record --no-hook -- /bin/sleep 2` produit une session SCOPÉE
+    /// ne contenant que des `ProcFootprint`. Dire à un utilisateur qui vient
+    /// d'enregistrer un run qu'il regarde la session ambiante du daemon —
+    /// et lui conseiller d'enregistrer un run — est faux deux fois.
+    ///
+    /// Les sessions ambiantes ne portent jamais de `ProcFootprint` : leur
+    /// présence suffit à trancher.
+    #[test]
+    fn a_session_with_footprint_samples_is_not_called_ambient() {
+        let events = vec![proc_footprint(10), proc_footprint(20)];
+        let n = detect_nothing_instrumented(&events).expect("should detect");
+        let advice = n.advice();
+        assert!(!advice.contains("ambiante"), "advice: {advice}");
+        // Ce qui est réellement su reste dit.
+        assert!(advice.contains("Metal"), "advice: {advice}");
+        assert!(advice.contains("sidecar"), "advice: {advice}");
+    }
+
+    /// Sans `ProcFootprint`, la forme reste celle de la session ambiante et
+    /// le conseil d'enregistrer un run garde son sens.
+    #[test]
+    fn a_session_without_footprint_samples_still_mentions_the_ambient_shape() {
+        let n = detect_nothing_instrumented(&[vm_sample(10)]).expect("should detect");
+        assert!(n.advice().contains("ambiante"), "advice: {}", n.advice());
     }
 
     #[test]
