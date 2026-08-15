@@ -64,6 +64,53 @@ pub fn detect(events: &[Event]) -> Option<SidecarAbsent> {
     })
 }
 
+/// Détectée quand la session ne contient ni capture Metal ni événement
+/// sidecar : typiquement la session ambiante du daemon, qui n'enregistre
+/// que les sondes système. Distincte de [`SidecarAbsent`], qui suppose du
+/// travail GPU capturé.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NothingInstrumented {
+    /// Nombre total d'événements de la session (tous issus des sondes).
+    pub event_count: usize,
+}
+
+impl NothingInstrumented {
+    pub fn advice(&self) -> String {
+        format!(
+            "Cette session contient {} événement(s), tous issus des sondes \
+             système : aucune capture Metal et aucun événement du sidecar \
+             Python. Il n'y a donc rien à ventiler par scope ou par module — \
+             les tableaux vides signifient « rien n'a été instrumenté », pas \
+             « rien à signaler ». C'est la forme attendue de la session \
+             ambiante que le daemon ouvre à chaque démarrage. Pour analyser \
+             un run réel, enregistrez-le avec `smeltr record -- <commande>` \
+             puis ciblez-le avec `--last` ou avec le nom donné via \
+             SMELTR_SESSION_NAME.",
+            self.event_count
+        )
+    }
+}
+
+/// Retourne `Some` quand la session ne contient aucun `MetalCbCompleted` et
+/// aucun événement du sidecar Python, mais au moins un événement.
+pub fn detect_nothing_instrumented(events: &[Event]) -> Option<NothingInstrumented> {
+    if events.is_empty() {
+        return None;
+    }
+    for ev in events {
+        match &ev.payload {
+            Payload::PythonSidecarHello { .. }
+            | Payload::ModuleEntered { .. }
+            | Payload::MlxEvalEntered { .. }
+            | Payload::MetalCbCompleted { .. } => return None,
+            _ => {}
+        }
+    }
+    Some(NothingInstrumented {
+        event_count: events.len(),
+    })
+}
+
 pub struct SidecarAbsentRule;
 
 impl Rule for SidecarAbsentRule {
@@ -72,6 +119,14 @@ impl Rule for SidecarAbsentRule {
     }
 
     fn check(&self, events: &[Event]) -> Vec<Finding> {
+        if let Some(nothing) = detect_nothing_instrumented(events) {
+            return vec![Finding::new(
+                Severity::Info,
+                Category::ContributingFactor,
+                "Aucune charge GPU instrumentée dans cette session",
+            )
+            .with_detail(nothing.advice())];
+        }
         let Some(absent) = detect(events) else {
             return Vec::new();
         };
@@ -185,5 +240,77 @@ mod tests {
         assert_eq!(findings[0].severity, Severity::Info);
         assert!(findings[0].detail.contains("pip install"));
         assert_eq!(findings[0].evidence.len(), 1);
+    }
+
+    fn vm_sample(ts: u64) -> Event {
+        ev(
+            ts,
+            Source::Vm,
+            Payload::VmSample {
+                wired_bytes: 1,
+                active_bytes: 1,
+                compressed_bytes: 0,
+                swap_used_bytes: 0,
+                page_outs_per_sec: 0.0,
+            },
+        )
+    }
+
+    #[test]
+    fn system_only_session_is_nothing_instrumented() {
+        // Session ambiante du daemon : que des sondes système.
+        let events = vec![vm_sample(10), vm_sample(20)];
+        let n = detect_nothing_instrumented(&events).expect("should detect");
+        assert_eq!(n.event_count, 2);
+        assert!(n.advice().contains("--last"));
+    }
+
+    #[test]
+    fn metal_work_suppresses_nothing_instrumented() {
+        // Il y a du Metal : c'est le cas #178, pas celui-ci.
+        let events = vec![vm_sample(10), cb_completed(100, 1)];
+        assert!(detect_nothing_instrumented(&events).is_none());
+    }
+
+    #[test]
+    fn sidecar_events_suppress_nothing_instrumented() {
+        let events = vec![ev(
+            10,
+            Source::PythonSidecar,
+            Payload::PythonSidecarHello {
+                python_version: "3.12".into(),
+                mlx_version: None,
+                argv: vec![],
+            },
+        )];
+        assert!(detect_nothing_instrumented(&events).is_none());
+    }
+
+    #[test]
+    fn empty_session_is_not_reported() {
+        // Zéro événement : rien à dire, pas même que rien n'est instrumenté.
+        assert!(detect_nothing_instrumented(&[]).is_none());
+    }
+
+    /// Table de vérité des trois formes, pour que personne ne les confonde
+    /// en refactorant.
+    #[test]
+    fn the_two_detectors_are_mutually_exclusive() {
+        let system_only = vec![vm_sample(10)];
+        let metal_no_sidecar = vec![cb_completed(100, 1)];
+
+        assert!(detect(&system_only).is_none());
+        assert!(detect_nothing_instrumented(&system_only).is_some());
+
+        assert!(detect(&metal_no_sidecar).is_some());
+        assert!(detect_nothing_instrumented(&metal_no_sidecar).is_none());
+    }
+
+    #[test]
+    fn rule_emits_nothing_instrumented_finding() {
+        let findings = SidecarAbsentRule.check(&[vm_sample(10)]);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert_eq!(findings[0].severity, Severity::Info);
+        assert!(findings[0].title.contains("instrument"));
     }
 }
