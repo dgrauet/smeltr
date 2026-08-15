@@ -56,108 +56,69 @@ pub struct ProcNode {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(non_camel_case_types)]
 mod sys {
     use super::ProcNode;
-
-    // kinfo_proc structure size on modern macOS (roughly 648 bytes).
-    // We don't need the exact layout, just enough to pass to sysctl.
-    #[repr(C)]
-    pub struct kinfo_proc {
-        _data: [u8; 648],
-    }
-
-    /// Extract fields from a kinfo_proc buffer at known offsets.
-    /// Based on Apple's bsd/sys/proc_internal.h and <sys/sysctl.h>.
-    struct KinfoProcFields {
-        pid: libc::pid_t,
-        ppid: libc::pid_t,
-        comm: [libc::c_char; 17],
-    }
-
-    impl KinfoProcFields {
-        fn from_buffer(buf: &[u8]) -> Self {
-            // p_pid is at offset 40 (after initial fields in struct proc)
-            // SAFETY: buf is guaranteed to be at least 648 bytes from sysctl
-            let pid =
-                unsafe { std::ptr::read_unaligned(buf.as_ptr().add(40) as *const libc::pid_t) };
-
-            // p_comm is at offset 163 (char array of 17 bytes)
-            let mut comm = [0i8; 17];
-            // SAFETY: copying from known offset within our buffer
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    buf.as_ptr().add(163),
-                    comm.as_mut_ptr() as *mut u8,
-                    17,
-                );
-            }
-
-            // e_ppid is at offset 192 + 32 = 224 (in the eproc part)
-            // SAFETY: buf is large enough and e_ppid is at known offset
-            let ppid =
-                unsafe { std::ptr::read_unaligned(buf.as_ptr().add(224) as *const libc::pid_t) };
-
-            KinfoProcFields { pid, ppid, comm }
-        }
-    }
+    use std::ffi::CStr;
 
     pub fn list_processes() -> Vec<ProcNode> {
-        let mut mib: [libc::c_int; 4] = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL, 0];
-        let mut len: libc::size_t = 0;
-
-        // Premier appel : dimensionner le tampon.
-        // SAFETY: mib est un tableau valide de 4 entiers ; buffer nul + len nul
-        // est la forme documentée pour interroger la taille.
-        let rc = unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                mib.len() as libc::c_uint,
-                std::ptr::null_mut(),
-                &mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if rc != 0 || len == 0 {
+        // First call: get the count of PIDs.
+        // SAFETY: proc_listallpids accepts a null buffer to query the count.
+        let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        if count <= 0 {
             return Vec::new();
         }
 
-        let entry_size = std::mem::size_of::<kinfo_proc>();
-        // Marge : la table peut grandir entre les deux appels.
-        let mut buf: Vec<u8> = vec![0; len + 16 * entry_size];
-        let mut len2 = buf.len();
-        // SAFETY: buf has capacity len2 ; le noyau écrit au plus
-        // len2 octets et met à jour len2 avec ce qu'il a réellement écrit.
-        let rc = unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                mib.len() as libc::c_uint,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                &mut len2,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if rc != 0 {
+        // Allocate buffer with some headroom (the table can grow between calls).
+        let mut pids: Vec<libc::pid_t> = Vec::with_capacity(count as usize + 16);
+        let buf_size = (pids.capacity() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+
+        // Second call: fill the buffer with PIDs.
+        // SAFETY: pids has the capacity we allocated, and buf_size matches that capacity in bytes.
+        let bytes_written =
+            unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, buf_size) };
+
+        if bytes_written <= 0 {
             return Vec::new();
         }
 
-        let count = len2 / entry_size;
+        let actual_count = (bytes_written as usize) / std::mem::size_of::<libc::pid_t>();
+        // SAFETY: proc_listallpids just initialized actual_count entries.
+        unsafe { pids.set_len(actual_count) };
+
         let mut result = Vec::new();
-        for i in 0..count {
-            let entry_buf = &buf[i * entry_size..(i + 1) * entry_size];
-            let fields = KinfoProcFields::from_buffer(entry_buf);
-            let raw: Vec<u8> = fields
-                .comm
-                .iter()
-                .take_while(|c| **c != 0)
-                .map(|c| *c as u8)
-                .collect();
+        for pid in pids {
+            // Query process info for this PID.
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            // SAFETY: info is a valid uninitialized proc_bsdinfo that we will fill via proc_pidinfo.
+            // The flavor PROC_PIDTBSDINFO (3) and arg 0 are documented.
+            let rc = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    &mut info as *mut _ as *mut libc::c_void,
+                    std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+                )
+            };
+
+            // Success is returning the size of the struct.
+            if rc as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+                // Process died between calls or other transient error—skip it.
+                continue;
+            }
+
+            // Extract process name from the NUL-terminated c_char array.
+            // SAFETY: pbi_comm is guaranteed to be a valid NUL-terminated C string or padded with nulls.
+            let name = unsafe {
+                CStr::from_ptr(info.pbi_comm.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+            };
+
             result.push(ProcNode {
-                pid: fields.pid as u32,
-                ppid: fields.ppid as u32,
-                name: String::from_utf8_lossy(&raw).into_owned(),
+                pid: info.pbi_pid,
+                ppid: info.pbi_ppid,
+                name,
             });
         }
         result
