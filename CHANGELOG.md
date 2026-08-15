@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0](https://github.com/dgrauet/smeltr/compare/v0.24.2...v0.25.0) (2026-08-15)
+
+
+### Features
+
+* **analyzer,mcp:** say when a session has no instrumentation ([#199](https://github.com/dgrauet/smeltr/issues/199)) ([c14095b](https://github.com/dgrauet/smeltr/commit/c14095bbc5d131055b2711aea75d4e321382f379))
+* **probes,analyzer,mcp:** diagnose jetsam kills via phys_footprint ([#200](https://github.com/dgrauet/smeltr/issues/200)) ([ffaed8b](https://github.com/dgrauet/smeltr/commit/ffaed8b7f7a058478cd0aa7df58f7a2f5d6a7a8b))
+
 ## [0.24.2](https://github.com/dgrauet/smeltr/compare/v0.24.1...v0.24.2) (2026-07-21)
 
 
