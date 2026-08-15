@@ -374,7 +374,7 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
 /// Même parsing que `analyze.rs` : les timestamps des métadonnées sont du
 /// vrai wall-clock, contrairement aux `ts_wall_ns` des événements qui
 /// dérivent de l'horloge monotone et s'arrêtent en veille (#153).
-fn rfc3339_unix_ns(s: &str) -> Option<u64> {
+pub fn rfc3339_unix_ns(s: &str) -> Option<u64> {
     use time::format_description::well_known::Rfc3339;
     let t = time::OffsetDateTime::parse(s, &Rfc3339).ok()?;
     u64::try_from(t.unix_timestamp_nanos()).ok()
@@ -531,6 +531,7 @@ mod tests {
     /// écrit les JetsamEvent-*.ips. Vérifié sur la machine : 0 fichier jetsam
     /// dans ~/Library/Logs/DiagnosticReports, 1 dans /Library/Logs/DiagnosticReports.
     #[test]
+    #[serial_test::serial]
     fn jetsam_dirs_include_the_system_directory() {
         let dirs = jetsam_reports_dirs();
         assert!(

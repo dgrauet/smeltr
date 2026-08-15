@@ -90,9 +90,12 @@ mod sys {
         let mut result = Vec::new();
         for pid in pids {
             // Query process info for this PID.
+            // SAFETY: proc_bsdinfo is a plain C struct of integers and byte
+            // arrays, so the all-zero bit pattern is a valid inhabitant.
             let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-            // SAFETY: info is a valid uninitialized proc_bsdinfo that we will fill via proc_pidinfo.
-            // The flavor PROC_PIDTBSDINFO (3) and arg 0 are documented.
+            // SAFETY: info is a live, correctly sized proc_bsdinfo that
+            // proc_pidinfo fills; the size argument matches the struct we
+            // pass. The flavor PROC_PIDTBSDINFO and arg 0 are documented.
             let rc = unsafe {
                 libc::proc_pidinfo(
                     pid,

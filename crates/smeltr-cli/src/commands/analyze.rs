@@ -3,7 +3,9 @@
 use anyhow::Context;
 use anyhow::Result;
 use smeltr_analyzer::analyze;
-use smeltr_analyzer::crash_join::{crash_finding, find_crash_report, CRASH_REPORT_GRACE_NS};
+use smeltr_analyzer::crash_join::{
+    crash_finding, find_crash_report, rfc3339_unix_ns, CRASH_REPORT_GRACE_NS,
+};
 use smeltr_core::reader::{read_events, read_metadata};
 use smeltr_core::session::SessionKind;
 use std::path::PathBuf;
@@ -58,12 +60,6 @@ fn build_report(dir: &std::path::Path) -> Result<smeltr_analyzer::report::Report
     smeltr_analyzer::crash_join::join_jetsam(&mut report, dir);
 
     Ok(report)
-}
-
-fn rfc3339_unix_ns(s: &str) -> Option<u64> {
-    use time::format_description::well_known::Rfc3339;
-    let t = time::OffsetDateTime::parse(s, &Rfc3339).ok()?;
-    u64::try_from(t.unix_timestamp_nanos()).ok()
 }
 
 /// `~/Library/Logs/DiagnosticReports`, overridable for tests via
