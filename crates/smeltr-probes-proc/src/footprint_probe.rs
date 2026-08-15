@@ -106,6 +106,7 @@ impl Probe for FootprintProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::footprint::{list_processes, read_footprint};
     use smeltr_core::event::Payload;
 
     #[test]
@@ -167,5 +168,41 @@ mod tests {
             phys_bytes: 1,
             lifetime_max_bytes: 1,
         }));
+    }
+
+    /// Mesure le coût d'un tick complet. Lancer avec :
+    ///   cargo test -p smeltr-probes-proc cost_of_one_tick -- --ignored --nocapture
+    #[test]
+    #[ignore = "mesure de coût, pas une assertion de correction"]
+    fn cost_of_one_tick() {
+        let me = std::process::id();
+        // Chauffe.
+        let _ = sample_tree(me);
+
+        let iters = 50;
+        let t0 = std::time::Instant::now();
+        let mut total = 0usize;
+        for _ in 0..iters {
+            total += sample_tree(me).len();
+        }
+        let per_tick = t0.elapsed() / iters;
+
+        // Coût isolé de l'énumération, qui domine attendu.
+        let t1 = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = list_processes();
+        }
+        let per_list = t1.elapsed() / iters;
+
+        // Coût isolé d'une lecture d'empreinte.
+        let t2 = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = read_footprint(me);
+        }
+        let per_read = t2.elapsed() / iters;
+
+        println!("sample_tree      : {per_tick:?} / tick ({total} payloads sur {iters} ticks)");
+        println!("list_processes   : {per_list:?} / appel");
+        println!("read_footprint   : {per_read:?} / appel");
     }
 }
