@@ -34,6 +34,11 @@ pub struct Response {
     /// JSON dès qu'il y a quelque chose à ventiler.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Empreinte mémoire par processus de l'arbre tracé — la métrique sur
+    /// laquelle jetsam décide. Absent quand la sonde n'a rien enregistré
+    /// (session antérieure à la sonde, ou run non scopé).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub process_footprint: Vec<smeltr_analyzer::footprint::ProcFootprintSummary>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -44,6 +49,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         .then(|| smeltr_analyzer::memory::compute_memory_timeline(&events, params.bucket_seconds));
     let scope_memory = compute_memory_breakdown(&events);
     let heap_memory = compute_heap_breakdown(&events);
+    let process_footprint = smeltr_analyzer::footprint::compute_footprint_summary(&events);
 
     let mut notes = Vec::new();
     if scope_memory.is_empty() && heap_memory.is_empty() {
@@ -60,6 +66,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         heap_memory,
         timeline,
         notes,
+        process_footprint,
     })
 }
 
@@ -264,8 +271,22 @@ mod tests {
             heap_memory: vec![],
             timeline: None,
             notes: vec![],
+            process_footprint: vec![],
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("notes"), "json: {json}");
+    }
+
+    #[test]
+    fn empty_process_footprint_is_omitted_from_json() {
+        let resp = Response {
+            scope_memory: vec![],
+            heap_memory: vec![],
+            timeline: None,
+            notes: vec![],
+            process_footprint: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("process_footprint"), "json: {json}");
     }
 }
