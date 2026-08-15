@@ -8,8 +8,8 @@
 //! the DiagnosticReports directory for a matching report and turns it
 //! into a RootCause finding. Works on sessions recorded before the fix.
 
-use crate::finding::{Category, Finding, Severity};
-use smeltr_core::event::Payload;
+use crate::finding::{Category, EvidenceRef, Finding, Severity};
+use smeltr_core::event::{Event, Payload};
 use smeltr_probes_crash_reports::parse::parse_ips;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
@@ -368,7 +368,122 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
         CRASH_REPORT_GRACE_NS,
     ) {
         report.findings.insert(0, jetsam_finding(&j));
+        return;
     }
+
+    // Pas de rapport joignable : reste la présomption, et seulement ici.
+    // La suppression est structurelle — on n'atteint ce point que faute de
+    // verdict — plutôt qu'une vérification séparée qu'on pourrait oublier.
+    if let Some(f) = presume_memory_death(&meta, &events, report) {
+        report.findings.push(f);
+    }
+}
+
+/// Croissance minimale entre le premier et le dernier échantillon pour
+/// qualifier une pente. Facteur, pas seuil absolu : on ne prétend pas savoir
+/// à partir de quelle taille le noyau frappe, et la limite jetsam par
+/// processus n'est de toute façon pas interrogeable sans droits particuliers.
+const RISE_FACTOR: f64 = 2.0;
+
+/// Présume une mort par pression mémoire quand aucun rapport n'est joignable.
+///
+/// Trois conditions, toutes nécessaires :
+///
+/// 1. **La session s'est terminée, et anormalement.** C'est le code de sortie
+///    qui le dit, pas le flux d'événements : `finalize()` écrit `SessionEnded`
+///    même quand l'enfant a été tué, parce que le client `record` survit au
+///    kill et détache proprement (#201). `Some(-1)` vient de
+///    `status.code().unwrap_or(-1)` et signifie « tué par un signal ». Une
+///    sortie propre (`Some(0)`) comme un échec ordinaire (`Some(1)`) sont
+///    exclus.
+///
+///    Le cas `None` demande une garde supplémentaire. Il couvre deux formes
+///    de fin anormale — le daemon a finalisé sur déconnexion du client, ou la
+///    reprise au boot a rattrapé une session orpheline — mais aussi une
+///    session **encore en cours**, dont le code de sortie n'existe pas
+///    encore. Sans distinction, un `smeltr analyze --last` pendant un long
+///    run annoncerait une fin anormale sur une session qui se porte bien.
+///    Or tout chemin de finalisation écrit `ended_rfc3339` : `finalize()` le
+///    pose avec le code de sortie (`writer.rs`), et la reprise au boot le
+///    pose aussi (`recovery.rs`). Son absence signifie donc exactement
+///    « session vivante », et c'est ce qu'on exclut.
+/// 2. **L'empreinte montait.** Le premier échantillon est le tout premier tic
+///    de la sonde, avant que l'enfant ait exec'é sa charge, donc la pente
+///    seule ne prouve rien — d'où la condition 1.
+/// 3. **Aucune cause racine n'est déjà établie.** Un SIGSEGV donne aussi
+///    `-1` ; s'il a été joint en amont, le verdict prime sur la supposition.
+fn presume_memory_death(
+    meta: &smeltr_core::session::SessionMetadata,
+    events: &[Event],
+    report: &crate::report::Report,
+) -> Option<Finding> {
+    let ended_abnormally = match meta.exit_code {
+        Some(-1) => true,
+        // Pas de code de sortie : fin anormale seulement si la session est
+        // bel et bien terminée. Sinon elle est en cours — voir ci-dessus.
+        None => meta.ended_rfc3339.is_some(),
+        _ => false,
+    };
+    if !ended_abnormally {
+        return None;
+    }
+    if report
+        .findings
+        .iter()
+        .any(|f| f.category == Category::RootCause)
+    {
+        return None;
+    }
+
+    let samples: Vec<(&Event, u64)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            Payload::ProcFootprint {
+                phys_footprint_bytes,
+                is_traced_root: true,
+                ..
+            } => Some((e, *phys_footprint_bytes)),
+            _ => None,
+        })
+        .collect();
+    let (first_ev, first) = samples.first().copied()?;
+    let (last_ev, last) = samples.last().copied()?;
+    if first == 0 || (last as f64) < (first as f64) * RISE_FACTOR {
+        return None;
+    }
+
+    // Go décimal (1e9), comme `jetsam_finding` : macOS et les rapports jetsam
+    // expriment les empreintes ainsi, et deux findings sur le même fait dans
+    // deux unités différentes ne se comparent pas.
+    let gb = |b: u64| b as f64 / 1_000_000_000.0;
+    Some(
+        Finding::new(
+            Severity::Warning,
+            Category::ContributingFactor,
+            "L'empreinte mémoire montait et la session s'est terminée anormalement",
+        )
+        .with_detail(format!(
+            "L'empreinte du processus tracé est passée de {:.2} à {:.2} Go, \
+             et la session ne s'est pas terminée proprement, sans qu'aucun \
+             rapport jetsam ne soit joignable. Une mort par pression mémoire \
+             est possible : le processus disparaît alors sans traceback ni \
+             exception. Vérifiez /Library/Logs/DiagnosticReports pour un \
+             JetsamEvent-*.ips postérieur à la session — il peut être écrit \
+             après coup. Ceci est une présomption, pas un verdict.",
+            gb(first),
+            gb(last)
+        ))
+        .with_evidence(EvidenceRef {
+            seq: first_ev.seq,
+            ts_mono_ns: first_ev.ts_mono_ns,
+            description: format!("empreinte initiale {:.2} Go", gb(first)),
+        })
+        .with_evidence(EvidenceRef {
+            seq: last_ev.seq,
+            ts_mono_ns: last_ev.ts_mono_ns,
+            description: format!("dernière empreinte {:.2} Go", gb(last)),
+        }),
+    )
 }
 
 /// Même parsing que `analyze.rs` : les timestamps des métadonnées sont du
@@ -947,5 +1062,235 @@ mod tests {
         assert_eq!(f.category, Category::RootCause);
         assert!(f.title.contains("SIGABRT"));
         assert!(f.detail.contains("/x/Python.ips"));
+    }
+
+    // ---- présomption de mort mémoire (#201) ----
+
+    /// Variante de `footprint_ev` avec une empreinte choisie.
+    fn footprint_bytes_ev(
+        seq: u64,
+        ts_wall_ns: u64,
+        pid: u32,
+        bytes: u64,
+    ) -> smeltr_core::event::Event {
+        let mut e = footprint_ev(seq, ts_wall_ns, pid, "python3", true);
+        if let Payload::ProcFootprint {
+            phys_footprint_bytes,
+            lifetime_max_phys_footprint_bytes,
+            ..
+        } = &mut e.payload
+        {
+            *phys_footprint_bytes = bytes;
+            *lifetime_max_phys_footprint_bytes = bytes;
+        }
+        e
+    }
+
+    fn set_exit_code(dir: &Path, code: Option<i32>) {
+        let mut meta = smeltr_core::reader::read_metadata(dir).unwrap();
+        meta.exit_code = code;
+        smeltr_core::session::write_metadata(dir, &meta).unwrap();
+    }
+
+    fn empty_report() -> crate::report::Report {
+        crate::report::Report {
+            findings: Vec::new(),
+            session_short: None,
+            event_count: 0,
+        }
+    }
+
+    /// Prépare une session scopée avec empreinte, fin et code de sortie
+    /// choisis, puis joint. Retourne les findings produits.
+    fn risk_case(
+        home: &Path,
+        first: u64,
+        last: u64,
+        ended: Option<&str>,
+        exit_code: Option<i32>,
+    ) -> Vec<Finding> {
+        let t = now_ns();
+        let evs = vec![
+            footprint_bytes_ev(1, t, 4242, first),
+            footprint_bytes_ev(2, t + 1_000_000_000, 4242, last),
+        ];
+        let dir = scoped_session(
+            home,
+            4242,
+            vec!["/usr/bin/python3".into()],
+            "2026-08-09T10:00:00Z",
+            ended,
+            &evs,
+        );
+        set_exit_code(&dir, exit_code);
+        let mut report = empty_report();
+        join_jetsam(&mut report, &dir);
+        report.findings
+    }
+
+    /// LE cas que #201 rouvre : l'enfant est tué par un signal, aucun rapport
+    /// jetsam n'est joignable, et l'empreinte montait. La présomption sort.
+    #[test]
+    #[serial_test::serial]
+    fn killed_by_signal_with_rising_footprint_yields_the_presumption() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case(home.path(), 4_000_000_000, 18_000_000_000, None, Some(-1));
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(f.len(), 1, "findings: {f:#?}");
+        assert_eq!(f[0].severity, Severity::Warning);
+        assert_eq!(f[0].category, Category::ContributingFactor);
+        assert!(
+            f[0].detail.contains("possible") || f[0].detail.contains("peut"),
+            "le ton doit rester une présomption : {}",
+            f[0].detail
+        );
+    }
+
+    /// Le défaut d'origine : un run SAIN qui alloue beaucoup et se termine
+    /// proprement ne doit rien produire. C'est ce que la première version
+    /// de la règle faisait crier sur tous les runs.
+    #[test]
+    #[serial_test::serial]
+    fn clean_exit_with_rising_footprint_yields_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case(
+            home.path(),
+            15_000_000,
+            1_007_000_000,
+            Some("2026-08-09T10:05:00Z"),
+            Some(0),
+        );
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(f.is_empty(), "un run sain ne doit rien produire : {f:#?}");
+    }
+
+    /// Un programme qui échoue normalement (exit 1) n'est pas une mort mémoire.
+    #[test]
+    #[serial_test::serial]
+    fn ordinary_failure_exit_yields_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case(
+            home.path(),
+            4_000_000_000,
+            18_000_000_000,
+            Some("2026-08-09T10:05:00Z"),
+            Some(1),
+        );
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
+    /// Empreinte plate + mort par signal : rien à présumer côté mémoire.
+    #[test]
+    #[serial_test::serial]
+    fn killed_by_signal_without_rising_footprint_yields_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case(home.path(), 4_000_000_000, 4_100_000_000, None, Some(-1));
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(f.is_empty(), "{f:#?}");
+    }
+
+    /// Sans code de sortie mais AVEC une fin datée : le daemon a finalisé sur
+    /// déconnexion du client, ou la reprise au boot a rattrapé une session
+    /// orpheline. Fin anormale, la présomption sort.
+    #[test]
+    #[serial_test::serial]
+    fn finalized_without_exit_code_counts_as_abnormal() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let f = risk_case(
+            home.path(),
+            4_000_000_000,
+            18_000_000_000,
+            Some("2026-08-09T10:05:00Z"),
+            None,
+        );
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(f.len(), 1, "{f:#?}");
+        assert_eq!(f[0].severity, Severity::Warning);
+    }
+
+    /// Le faux positif à ne surtout pas laisser passer : une session ENCORE
+    /// EN COURS n'a ni code de sortie ni fin datée, et son empreinte monte
+    /// forcément. Un `smeltr analyze --last` pendant un long run ne doit pas
+    /// annoncer une fin anormale sur une session qui se porte bien.
+    #[test]
+    #[serial_test::serial]
+    fn live_in_progress_session_yields_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        // Ni `ended`, ni `exit_code` : la forme exacte d'une session vivante.
+        let f = risk_case(home.path(), 4_000_000_000, 18_000_000_000, None, None);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert!(
+            f.is_empty(),
+            "une session en cours ne s'est pas terminée anormalement : {f:#?}"
+        );
+    }
+
+    /// Quand une cause racine est déjà établie (crash joint en amont), la
+    /// présomption mémoire se tait : un verdict prime sur une supposition.
+    #[test]
+    #[serial_test::serial]
+    fn existing_root_cause_suppresses_the_presumption() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let t = now_ns();
+        let evs = vec![
+            footprint_bytes_ev(1, t, 4242, 4_000_000_000),
+            footprint_bytes_ev(2, t + 1_000_000_000, 4242, 18_000_000_000),
+        ];
+        let dir = scoped_session(
+            home.path(),
+            4242,
+            vec!["/usr/bin/python3".into()],
+            "2026-08-09T10:00:00Z",
+            None,
+            &evs,
+        );
+        set_exit_code(&dir, Some(-1));
+
+        let mut report = empty_report();
+        report.findings.push(Finding::new(
+            Severity::Critical,
+            Category::RootCause,
+            "Recorded process crashed (SIGSEGV)",
+        ));
+        join_jetsam(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+        assert_eq!(report.findings[0].category, Category::RootCause);
     }
 }
