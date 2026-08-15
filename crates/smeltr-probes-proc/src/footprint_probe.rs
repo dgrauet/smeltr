@@ -4,7 +4,7 @@
 //! système en forkant `/usr/bin/top`, celle-ci ne cible que le processus
 //! tracé et ses descendants, et n'utilise que des syscalls.
 
-use crate::footprint::{descendants_of, list_processes, read_footprint};
+use crate::footprint::{descendants_of, list_processes, read_footprint, Footprint};
 use async_trait::async_trait;
 use smeltr_core::event::{Payload, Source};
 use smeltr_probes_core::sink::SharedSink;
@@ -15,14 +15,29 @@ use tokio_util::sync::CancellationToken;
 /// Cadence par défaut, alignée sur celle de `ProcProbe`.
 const DEFAULT_PERIOD: Duration = Duration::from_secs(2);
 
+/// Un `phys_bytes` à zéro signifie que le processus est mort (ou zombie)
+/// entre l'énumération de l'arbre et la lecture de son empreinte :
+/// `proc_pid_rusage` peut réussir sur un processus mourant tout en
+/// rapportant une empreinte nulle. Émettre ce zéro produirait une fausse
+/// mesure dans la session — indiscernable d'une vraie chute à zéro — ce qui
+/// fausserait toute analyse ultérieure (pic, pente de croissance,
+/// corrélation jetsam). On préfère l'omettre.
+fn is_meaningful(f: &Footprint) -> bool {
+    f.phys_bytes > 0
+}
+
 /// Échantillonne l'arbre enraciné en `root_pid`. Les processus disparus
-/// entre l'énumération et la lecture sont simplement omis.
+/// entre l'énumération et la lecture (ou dont l'empreinte lue est nulle,
+/// voir [`is_meaningful`]) sont simplement omis.
 pub fn sample_tree(root_pid: u32) -> Vec<Payload> {
     let all = list_processes();
     descendants_of(root_pid, &all)
         .into_iter()
         .filter_map(|node| {
             let f = read_footprint(node.pid)?;
+            if !is_meaningful(&f) {
+                return None;
+            }
             Some(Payload::ProcFootprint {
                 pid: node.pid,
                 name: node.name,
@@ -136,5 +151,21 @@ mod tests {
     #[test]
     fn sample_tree_of_dead_pid_is_empty() {
         assert!(sample_tree(0).is_empty());
+    }
+
+    #[test]
+    fn is_meaningful_rejects_zero_footprint() {
+        assert!(!is_meaningful(&Footprint {
+            phys_bytes: 0,
+            lifetime_max_bytes: 1234,
+        }));
+    }
+
+    #[test]
+    fn is_meaningful_accepts_nonzero_footprint() {
+        assert!(is_meaningful(&Footprint {
+            phys_bytes: 1,
+            lifetime_max_bytes: 1,
+        }));
     }
 }
