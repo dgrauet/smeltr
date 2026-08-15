@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.1](https://github.com/dgrauet/smeltr/compare/v0.25.0...v0.25.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **analyzer,cli,mcp:** run the crash-report join on the MCP path too ([#207](https://github.com/dgrauet/smeltr/issues/207)) ([11305f5](https://github.com/dgrauet/smeltr/commit/11305f589a9d4ffc027858f924e24fc997ebc26f))
+* **analyzer:** key the memory-death presumption on the exit code ([#205](https://github.com/dgrauet/smeltr/issues/205)) ([28cabb9](https://github.com/dgrauet/smeltr/commit/28cabb9848533ab3818cc94976b89091edf818a9))
+* **core,daemon,cli,analyzer:** keep the terminating signal, not just -1 ([#208](https://github.com/dgrauet/smeltr/issues/208)) ([a4d8193](https://github.com/dgrauet/smeltr/commit/a4d81936c223c77a3ed35990d9fb4c53afe652fb))
+
 ## [0.25.0](https://github.com/dgrauet/smeltr/compare/v0.24.2...v0.25.0) (2026-08-15)
 
 
