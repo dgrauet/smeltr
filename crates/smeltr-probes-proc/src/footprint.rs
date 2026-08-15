@@ -69,20 +69,22 @@ mod sys {
         }
 
         // Allocate buffer with some headroom (the table can grow between calls).
+        // Note: buffersize argument is in bytes, but return value is a pid count.
         let mut pids: Vec<libc::pid_t> = Vec::with_capacity(count as usize + 16);
         let buf_size = (pids.capacity() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
 
         // Second call: fill the buffer with PIDs.
         // SAFETY: pids has the capacity we allocated, and buf_size matches that capacity in bytes.
-        let bytes_written =
+        // IMPORTANT: proc_listallpids returns a PID COUNT, not a byte length.
+        let pid_count =
             unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, buf_size) };
 
-        if bytes_written <= 0 {
+        if pid_count <= 0 {
             return Vec::new();
         }
 
-        let actual_count = (bytes_written as usize) / std::mem::size_of::<libc::pid_t>();
-        // SAFETY: proc_listallpids just initialized actual_count entries.
+        let actual_count = (pid_count as usize).min(pids.capacity());
+        // SAFETY: proc_listallpids just initialized actual_count entries, clamped to capacity.
         unsafe { pids.set_len(actual_count) };
 
         let mut result = Vec::new();
@@ -125,10 +127,14 @@ mod sys {
     }
 }
 
-/// Énumère la table des processus via `sysctl(KERN_PROC_ALL)`.
+/// Énumère la table des processus via `libproc` (proc_listallpids + proc_pidinfo).
 ///
-/// Retourne un vecteur vide plutôt que d'échouer : une énumération ratée
-/// doit dégrader la sonde, pas l'arrêter.
+/// Retourne les processus que le processus appelant peut introspécter.
+/// Les processus appartenant à d'autres utilisateurs ou à root sont omis.
+/// Cela est intentionnel pour un probe lancé par un utilisateur : seule la trace
+/// tracée et sa descendance appartiennent au même utilisateur et sont ainsi
+/// énumérées. Les erreurs transientes (process mort entre les deux appels) sont
+/// dégradées silencieusement : jamais de panique, jamais d'arrêt de la sonde.
 #[cfg(target_os = "macos")]
 pub fn list_processes() -> Vec<ProcNode> {
     sys::list_processes()
@@ -243,5 +249,55 @@ mod tests {
             all.iter().any(|n| n.pid == me),
             "le processus de test doit figurer dans l'énumération"
         );
+    }
+
+    #[test]
+    fn finds_spawned_children() {
+        use std::process::Command;
+        use std::thread;
+        use std::time::Duration;
+
+        // Spawn three sleep children.
+        let mut children = vec![];
+        for _ in 0..3 {
+            let child = Command::new("/bin/sleep")
+                .arg("5")
+                .spawn()
+                .expect("spawn /bin/sleep");
+            children.push(child);
+        }
+
+        // Give the kernel a moment to register them.
+        thread::sleep(Duration::from_millis(50));
+
+        // Enumerate processes and check all children are present, but defer
+        // asserting so cleanup below always runs even on failure.
+        let all = list_processes();
+        let me = std::process::id();
+        let child_pids: Vec<u32> = children.iter().map(|c| c.id()).collect();
+
+        let mut failures: Vec<String> = Vec::new();
+        for child_pid in &child_pids {
+            match all.iter().find(|n| n.pid == *child_pid) {
+                None => failures.push(format!(
+                    "child pid {} not found in enumeration; all.len()={}",
+                    child_pid,
+                    all.len()
+                )),
+                Some(node) if node.ppid != me => failures.push(format!(
+                    "child {} ppid {} != my pid {}",
+                    child_pid, node.ppid, me
+                )),
+                Some(_) => {}
+            }
+        }
+
+        // Clean up: kill and reap the children, even if failures were recorded.
+        for mut child in children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("; "));
     }
 }
