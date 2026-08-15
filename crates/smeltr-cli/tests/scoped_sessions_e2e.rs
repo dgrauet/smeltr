@@ -130,16 +130,11 @@ fn record_emits_proc_footprint_in_scoped_session() {
         let is_ambient = matches!(meta.kind, smeltr_core::session::SessionKind::Ambient);
         for e in &events {
             if let smeltr_core::event::Payload::ProcFootprint {
-                pid,
-                name,
                 is_traced_root,
                 phys_footprint_bytes,
                 ..
             } = &e.payload
             {
-                if *phys_footprint_bytes == 0 {
-                    eprintln!("DEBUG zero footprint: pid={pid} name={name:?} is_traced_root={is_traced_root} is_ambient={is_ambient}");
-                }
                 assert!(
                     *phys_footprint_bytes > 0,
                     "une empreinte nulle n'a pas de sens"
