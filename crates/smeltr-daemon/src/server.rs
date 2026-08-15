@@ -257,9 +257,26 @@ async fn handle_msg(
             name,
             chunked,
         } => {
-            probe_runtime.attach_scoped(pid).await;
-            if let Err(e) = router.attach_scoped(pid, argv, scope_token, name, chunked) {
-                tracing::warn!(error = %e, pid = pid, "failed to open scoped session");
+            // Register the scoped session with the router BEFORE starting any
+            // probe. `SessionRouter::route` falls back to the ambient session
+            // for a pid it doesn't recognize yet, and probes (e.g.
+            // `FootprintProbe`, whose `tokio::time::interval` fires its first
+            // tick immediately) can emit within the first poll of their task
+            // — before the daemon would otherwise get around to telling the
+            // router about this pid. Doing it in this order closes that
+            // race: the router already knows the pid by the time any probe
+            // task is first polled, so no scoped sample can leak into the
+            // ambient session.
+            match router.attach_scoped(pid, argv, scope_token, name, chunked) {
+                Ok(_) => probe_runtime.attach_scoped(pid).await,
+                Err(e) => {
+                    // The session failed to open, so there is nowhere
+                    // correct to route this pid's events yet. Starting the
+                    // probes anyway would just feed the ambient session with
+                    // samples for a pid the caller believes is scoped —
+                    // leave them off rather than attach.
+                    tracing::warn!(error = %e, pid = pid, "failed to open scoped session");
+                }
             }
             DaemonToClient::Ack
         }
@@ -381,6 +398,97 @@ mod tests {
         .unwrap();
         let resp: DaemonToClient = read_msg(&mut s).await.unwrap().unwrap();
         assert!(matches!(resp, DaemonToClient::Ack));
+
+        let _ = tx.send(true);
+        probe_runtime.shutdown().await;
+    }
+
+    /// Regression test for the ambient-routing race: `FootprintProbe`'s
+    /// `tokio::time::interval` fires its first tick as soon as the probe
+    /// task is polled, which can be within the first millisecond of the
+    /// probe being spawned. If the router doesn't know the pid yet at that
+    /// point, `SessionRouter::route` falls back to the ambient session and
+    /// the sample is misrouted (observed as 20 stray `ProcFootprint` events
+    /// in ambient under full parallel test load).
+    ///
+    /// This drives `handle_msg` — the real production code path — with an
+    /// `AttachScopedProbes` message using our own pid (always resolvable by
+    /// the footprint probe) and asserts every `ProcFootprint` sample that
+    /// arrives before detach lands in the scoped session, never ambient.
+    ///
+    /// Requires a `multi_thread` runtime: on a `current_thread` runtime the
+    /// task spawned by `ProbeRuntime::attach_scoped` cannot get its first
+    /// poll until the calling task yields, so `router.attach_scoped` (fully
+    /// synchronous, no `.await` inside) always finishes first regardless of
+    /// call order — the pre-fix bug would not reproduce there. Verified by
+    /// temporarily reverting the fix: with `multi_thread`, the reverted
+    /// code fails this test 5/5 runs (a probe thread can get scheduled
+    /// before the router-registration line runs); the fixed code passes
+    /// 6/6 runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn attach_scoped_probes_registers_router_before_probes_can_emit() {
+        let _home = temp_env();
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let bus = Bus::new();
+        let router = Arc::new(SessionRouter::new(ambient.clone(), None, None));
+        let sink = Arc::new(DaemonSink {
+            router: router.clone(),
+        });
+        let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+
+        let pid = std::process::id();
+        let resp = handle_msg(
+            ClientToDaemon::AttachScopedProbes {
+                pid,
+                argv: vec!["self".into()],
+                scope_token: None,
+                name: None,
+                chunked: false,
+            },
+            &router,
+            &bus,
+            &probe_runtime,
+            &tx,
+        )
+        .await;
+        assert!(matches!(resp, DaemonToClient::Ack));
+
+        // Give the footprint probe's first tick a wide margin to fire and
+        // reach the router before we tear everything down.
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+
+        probe_runtime.detach_scoped(pid).await;
+        router.detach_scoped(pid, Some(0));
+        let ambient_id = ambient.id();
+        ambient.finalize(Some(0), "test").unwrap();
+
+        let dirs = smeltr_core::reader::list_sessions().unwrap();
+        let mut ambient_footprints = 0;
+        let mut scoped_footprints = 0;
+        for d in &dirs {
+            let meta = smeltr_core::reader::read_metadata(d).unwrap();
+            let evs = smeltr_core::reader::read_events(d).unwrap();
+            let n = evs
+                .iter()
+                .filter(|e| matches!(&e.payload, smeltr_core::event::Payload::ProcFootprint { pid: p, .. } if *p == pid))
+                .count();
+            if meta.session_id == ambient_id {
+                ambient_footprints += n;
+            } else {
+                scoped_footprints += n;
+            }
+        }
+        assert_eq!(
+            ambient_footprints, 0,
+            "footprint samples for the scoped pid leaked into the ambient session"
+        );
+        assert!(
+            scoped_footprints > 0,
+            "expected at least one footprint sample in the scoped session (probe never emitted \
+             within the wait margin — test may need a longer sleep, not a correctness signal)"
+        );
 
         let _ = tx.send(true);
         probe_runtime.shutdown().await;
