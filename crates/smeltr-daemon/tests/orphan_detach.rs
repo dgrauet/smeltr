@@ -117,6 +117,7 @@ fn clean_detach_still_finalizes_with_exit_code() {
         &ClientToDaemon::DetachScopedProbes {
             pid: 999_998,
             exit_code: Some(0),
+            term_signal: None,
         },
     )
     .unwrap();

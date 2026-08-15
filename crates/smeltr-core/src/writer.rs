@@ -244,6 +244,22 @@ impl SessionWriter {
         }
     }
 
+    /// Finalize, recording the signal that killed the child when it died by
+    /// one (#203).
+    ///
+    /// `finalize` remains the plain form; this sibling exists so the dozens of
+    /// existing call sites keep working unchanged, and only the record path —
+    /// the one place that actually observes a signal — passes it.
+    pub fn finalize_with_signal(
+        mut self,
+        exit_code: Option<i32>,
+        term_signal: Option<i32>,
+        ended_rfc3339: String,
+    ) -> std::io::Result<()> {
+        self.metadata.term_signal = term_signal;
+        self.finalize(exit_code, ended_rfc3339)
+    }
+
     pub fn finalize(
         mut self,
         exit_code: Option<i32>,

@@ -69,6 +69,14 @@ pub struct SessionMetadata {
     /// (e.g. "recovered-after-crash" set by daemon boot recovery).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
+    /// Signal that killed the recorded child, when it died by one (#203).
+    ///
+    /// `exit_code` collapses every signal death to `-1`, which cannot tell a
+    /// SIGKILL — what jetsam does — from the SIGINT of a user pressing
+    /// Ctrl-C. Diagnostics that key on "died abnormally" need the
+    /// difference, so the raw number is kept here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term_signal: Option<i32>,
 }
 
 const SESSION_NAME_MAX_LEN: usize = 200;
@@ -124,6 +132,7 @@ impl SessionMetadata {
             name,
             scope_token: None,
             end_reason: None,
+            term_signal: None,
         }
     }
 }

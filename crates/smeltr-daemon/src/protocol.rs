@@ -46,7 +46,14 @@ pub enum ClientToDaemon {
         chunked: bool,
     },
     /// Detach scoped probes for the given PID and emit a final marker.
-    DetachScopedProbes { pid: u32, exit_code: Option<i32> },
+    DetachScopedProbes {
+        pid: u32,
+        exit_code: Option<i32>,
+        /// Signal ayant tué l'enfant, quand il est mort par signal (#203).
+        /// Additif : les clients antérieurs ne l'envoient pas.
+        #[serde(default)]
+        term_signal: Option<i32>,
+    },
     /// Attach a metal-hook reader to drain the given ring file for the child PID.
     AttachMetalHook { pid: u32, ring_path: String },
     /// Detach the metal-hook reader and let final frames flush.

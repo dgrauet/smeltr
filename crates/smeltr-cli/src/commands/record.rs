@@ -220,6 +220,7 @@ pub async fn run(
                 .request(ClientToDaemon::DetachScopedProbes {
                     pid,
                     exit_code: Some(-1),
+                    term_signal: None,
                 })
                 .await;
             let _ = std::fs::remove_file(ring_path);
@@ -230,6 +231,13 @@ pub async fn run(
     // Wait for the child synchronously off the runtime worker.
     let status = tokio::task::spawn_blocking(move || child.wait()).await??;
     let exit_code = status.code().unwrap_or(-1);
+    // `exit_code` écrase toute mort par signal sur -1, ce qui ne distingue
+    // pas le SIGKILL de jetsam du SIGINT d'un Ctrl-C. On garde le numéro
+    // brut pour que les diagnostics puissent faire la différence (#203).
+    let term_signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    };
 
     // Let the probe drain remaining frames from the ring.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -243,6 +251,7 @@ pub async fn run(
         .request(ClientToDaemon::DetachScopedProbes {
             pid,
             exit_code: Some(exit_code),
+            term_signal,
         })
         .await;
 

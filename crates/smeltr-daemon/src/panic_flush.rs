@@ -173,7 +173,7 @@ mod tests {
             })
             .expect("post-mortem session dir");
         assert!(pm.path().join("panic-report.txt").exists());
-        ambient.finalize(Some(0), "test").unwrap();
+        ambient.finalize(Some(0), None, "test").unwrap();
         std::env::remove_var("SMELTR_HOME");
     }
 }

@@ -117,7 +117,7 @@ async fn handle_connection(
             "client disconnected without DetachScopedProbes; finalizing scoped session"
         );
         probe_runtime.detach_scoped(pid).await;
-        let _ = router.detach_scoped(pid, None);
+        let _ = router.detach_scoped(pid, None, None);
     }
 }
 
@@ -280,9 +280,13 @@ async fn handle_msg(
             }
             DaemonToClient::Ack
         }
-        ClientToDaemon::DetachScopedProbes { pid, exit_code } => {
+        ClientToDaemon::DetachScopedProbes {
+            pid,
+            exit_code,
+            term_signal,
+        } => {
             probe_runtime.detach_scoped(pid).await;
-            let _ = router.detach_scoped(pid, exit_code);
+            let _ = router.detach_scoped(pid, exit_code, term_signal);
             DaemonToClient::Ack
         }
         ClientToDaemon::AttachMetalHook { pid, ring_path } => {
@@ -460,9 +464,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
 
         probe_runtime.detach_scoped(pid).await;
-        router.detach_scoped(pid, Some(0));
+        router.detach_scoped(pid, Some(0), None);
         let ambient_id = ambient.id();
-        ambient.finalize(Some(0), "test").unwrap();
+        ambient.finalize(Some(0), None, "test").unwrap();
 
         let dirs = smeltr_core::reader::list_sessions().unwrap();
         let mut ambient_footprints = 0;

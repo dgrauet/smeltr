@@ -51,8 +51,8 @@ fn grandchild_emit_with_token_lands_in_scoped_session() {
         )
         .unwrap();
 
-    router.detach_scoped(1000, Some(0));
-    ambient.finalize(Some(0), "test").unwrap();
+    router.detach_scoped(1000, Some(0), None);
+    ambient.finalize(Some(0), None, "test").unwrap();
 
     let dirs = smeltr_core::reader::list_sessions().unwrap();
     let mut found_in_scoped = false;
