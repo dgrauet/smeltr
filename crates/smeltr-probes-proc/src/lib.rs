@@ -1,4 +1,5 @@
 pub mod footprint;
+pub mod footprint_probe;
 pub mod probe;
 pub mod raw;
 

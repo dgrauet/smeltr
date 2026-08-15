@@ -79,3 +79,71 @@ fn two_records_create_two_scoped_sessions() {
         .assert()
         .success();
 }
+
+/// Un `smeltr record` réel doit produire des ProcFootprint dans sa session
+/// scopée : c'est le seul test qui vérifie le routage bout en bout, de la
+/// sonde jusqu'au fichier de session.
+#[test]
+#[serial_test::serial]
+#[cfg(target_os = "macos")]
+fn record_emits_proc_footprint_in_scoped_session() {
+    let home = tempfile::tempdir().unwrap();
+    let sock = home.path().join("smeltr.sock");
+
+    let mut daemon = DaemonGuard::spawn(home.path(), &sock);
+
+    // Cadence serrée pour que `sleep 1` couvre plusieurs ticks.
+    Command::cargo_bin("smeltr")
+        .unwrap()
+        .env("SMELTR_HOME", home.path())
+        .env("SMELTR_SOCKET", &sock)
+        .env("SMELTR_FOOTPRINT_PERIOD_MS", "200")
+        .args(["record", "--no-hook", "/bin/sleep", "1"])
+        .assert()
+        .success();
+
+    daemon.stop();
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Relire toutes les sessions et compter les ProcFootprint par type.
+    let sessions_dir = home.path().join("sessions");
+    let mut scoped_root_samples = 0usize;
+    let mut ambient_samples = 0usize;
+    for entry in std::fs::read_dir(&sessions_dir).unwrap().flatten() {
+        let dir = entry.path();
+        let Ok(meta) = smeltr_core::reader::read_metadata(&dir) else {
+            continue;
+        };
+        let Ok(events) = smeltr_core::reader::read_events(&dir) else {
+            continue;
+        };
+        let is_ambient = matches!(meta.kind, smeltr_core::session::SessionKind::Ambient);
+        for e in &events {
+            if let smeltr_core::event::Payload::ProcFootprint {
+                is_traced_root,
+                phys_footprint_bytes,
+                ..
+            } = &e.payload
+            {
+                assert!(
+                    *phys_footprint_bytes > 0,
+                    "une empreinte nulle n'a pas de sens"
+                );
+                if is_ambient {
+                    ambient_samples += 1;
+                } else if *is_traced_root {
+                    scoped_root_samples += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        scoped_root_samples > 0,
+        "attendu ≥1 ProcFootprint racine dans la session scopée, eu 0"
+    );
+    assert_eq!(
+        ambient_samples, 0,
+        "la session ambiante ne doit recevoir aucun ProcFootprint"
+    );
+}
