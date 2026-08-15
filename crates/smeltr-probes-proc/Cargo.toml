@@ -18,4 +18,3 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
-serial_test = "3"
