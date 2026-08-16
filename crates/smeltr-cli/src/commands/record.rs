@@ -109,6 +109,7 @@ pub async fn run(
     no_hook: bool,
     name: Option<&str>,
     gputrace: Option<u32>,
+    gputrace_scope: Option<&str>,
 ) -> anyhow::Result<i32> {
     let mut client = Client::connect().await?;
 
@@ -116,16 +117,24 @@ pub async fn run(
     // le hook dans le processus enfant ; on décide ici de son emplacement et
     // on le consigne dans les métadonnées de session pour que
     // `get_session_summary` puisse le rendre.
-    let gputrace_target: Option<PathBuf> = match gputrace {
-        Some(n) if n > 0 && !no_hook => {
+    let gputrace_target: Option<PathBuf> = match (gputrace, gputrace_scope) {
+        // Voie scope : pilotée par le sidecar via MLX, donc indépendante du
+        // hook — elle fonctionne aussi sous `--no-hook` (#216).
+        (_, Some(_)) => {
             let dir = smeltr_home().join("gputraces");
             std::fs::create_dir_all(&dir)?;
             Some(dir.join(format!("{}.gputrace", uuid::Uuid::new_v4().simple())))
         }
-        Some(_) if no_hook => {
+        (Some(n), None) if n > 0 && !no_hook => {
+            let dir = smeltr_home().join("gputraces");
+            std::fs::create_dir_all(&dir)?;
+            Some(dir.join(format!("{}.gputrace", uuid::Uuid::new_v4().simple())))
+        }
+        (Some(_), None) if no_hook => {
             eprintln!(
-                "smeltr: --gputrace ignoré avec --no-hook : la capture est \
-                 pilotée par le hook Metal."
+                "smeltr: --gputrace ignoré avec --no-hook : la capture par \
+                 nombre de command buffers est pilotée par le hook Metal. \
+                 Utilisez --gputrace-scope, qui passe par le sidecar."
             );
             None
         }
@@ -184,6 +193,14 @@ pub async fn run(
         }
     }
 
+    if let (Some(path), Some(scope)) = (&gputrace_target, gputrace_scope) {
+        // MTL_CAPTURE_ENABLED doit être présent au DÉMARRAGE du processus :
+        // Metal la lit à l'initialisation du framework.
+        builder.env("MTL_CAPTURE_ENABLED", "1");
+        builder.env("SMELTR_GPUTRACE_SCOPE", scope);
+        builder.env("SMELTR_GPUTRACE_PATH", path);
+    }
+
     // Trigger smeltr/_autoload.py via smeltr-autoload.pth in site-packages,
     // so `python script.py` under `smeltr record` is observed without any
     // explicit `smeltr.attach()` call in user code. Unset by default → no
@@ -206,9 +223,11 @@ pub async fn run(
             // Seulement si le hook est réellement injecté : sans lui, aucune
             // capture n'aura lieu et consigner un chemin ferait promettre à
             // la session un fichier qui n'existera jamais.
-            gputrace_path: hook_decision
+            // Voie scope : pas de hook requis. Voie CB : sans hook injecté,
+            // aucune capture n'aura lieu, donc on ne promet rien.
+            gputrace_path: gputrace_target
                 .as_ref()
-                .and(gputrace_target.as_ref())
+                .filter(|_| gputrace_scope.is_some() || hook_decision.is_some())
                 .map(|p| p.to_string_lossy().into_owned()),
             pid,
             argv,

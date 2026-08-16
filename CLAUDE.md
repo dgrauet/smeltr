@@ -159,6 +159,18 @@ CBOR length-prefixed frames over a Unix socket. See
 - `SMELTR_STACK_CAPTURE=1` — opt-in: capture top 3 Python frames at each `mx.eval`
   (~1-5 µs/eval). Fills `MlxEvalEntered.stack_frames`; consumed by `smeltr origins` /
   `get_dispatch_origins`.
+- `SMELTR_GPUTRACE_SCOPE=<name>` / `SMELTR_GPUTRACE_PATH=<path>` — set ONLY by
+  `smeltr record --gputrace-scope <NAME>`. The Python sidecar wraps the named
+  `smeltr.scope(...)` in a Metal capture via `mx.metal.start_capture` /
+  `stop_capture`, writing a `.gputrace`. This is the useful window: the first
+  N command buffers of `--gputrace` fall during model load, not in the part
+  worth inspecting.
+  Because MLX drives the capture, this path needs the sidecar attached but
+  works **even with `--no-hook`** — verified on a real run. It fires **once per
+  process**: a scope inside a denoise loop would otherwise restart the capture
+  every iteration, and each bundle is gigabytes. Only explicit
+  `smeltr.scope(...)` calls are eligible; auto-wrapped `mlx.nn.Module.__call__`
+  frames are not. Mutually exclusive with `--gputrace`.
 - `SMELTR_HOOK_GPUTRACE_CBS=<n>` / `SMELTR_HOOK_GPUTRACE_PATH=<path>` — set
   ONLY by `smeltr record --gputrace <N>`; never set them by hand. The hook
   starts an `MTLCaptureManager` capture when the first command buffer is

@@ -49,12 +49,90 @@ def _emit_scope_mem_sample(at_event: str) -> None:
         pass
 
 
+# ---- capture Metal bornée par scope nommé (#216) ----
+#
+# `smeltr record --gputrace-scope <NAME>` arme une capture Metal sur le scope
+# de ce nom. La voie passe par MLX (`mx.metal.start_capture`) et non par le
+# hook : celui-ci ne connaît pas les scopes, et le ring est unidirectionnel
+# (hook vers daemon), donc le piloter depuis le daemon supposerait un canal de
+# contrôle qui n'existe pas. Passer par le sidecar évite entièrement le
+# problème — et fonctionne même sous `--no-hook`.
+#
+# `record` pose aussi MTL_CAPTURE_ENABLED=1 : Metal la lit à l'initialisation
+# du framework, on ne peut pas se l'accorder après coup.
+
+_capture_done = False
+
+
+def _reset_capture_for_tests() -> None:
+    global _capture_done
+    _capture_done = False
+
+
+def _metal_capture_api() -> Any | None:
+    """Renvoie `mx.metal` s'il expose le contrôle de capture, sinon None."""
+    try:
+        import mlx.core as mx_core
+    except ImportError:
+        return None
+    metal = getattr(mx_core, "metal", None)
+    if metal is None or not hasattr(metal, "start_capture"):
+        return None
+    return metal
+
+
+def _capture_target() -> tuple[str, str] | None:
+    """(scope visé, chemin) si la capture est armée, sinon None."""
+    name = os.environ.get("SMELTR_GPUTRACE_SCOPE")
+    path = os.environ.get("SMELTR_GPUTRACE_PATH")
+    if not name or not path:
+        return None
+    return name, path
+
+
+@contextlib.contextmanager
+def _maybe_capture(scope_name: str) -> Generator[None, None, None]:
+    """Encadre le scope visé d'une capture Metal, au plus une fois.
+
+    Une seule capture par processus : un scope dans une boucle de denoise
+    relancerait sinon la capture à chaque tour, et chaque bundle pèse des
+    gigaoctets. Aucune erreur ne remonte — l'observabilité ne doit jamais
+    casser la mesure en cours.
+    """
+    global _capture_done
+    target = _capture_target()
+    if _capture_done or target is None or target[0] != scope_name:
+        yield
+        return
+    api = _metal_capture_api()
+    if api is None:
+        yield
+        return
+
+    _capture_done = True  # même en cas d'échec : on ne réessaie pas en boucle
+    started = False
+    try:
+        api.start_capture(target[1])
+        started = True
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        if started:
+            try:
+                api.stop_capture()
+            except Exception:
+                pass
+
+
 @contextlib.contextmanager
 def _scope_cm(name: str, fields: dict[str, Any] | None = None) -> Generator[None, None, None]:
     cid = _modules._push(name, _SCOPE_CLASS_NAME, id_of=id(name), fields=fields)
     _emit_scope_mem_sample("scope_enter")
     try:
-        yield
+        with _maybe_capture(name):
+            yield
     finally:
         _emit_scope_mem_sample("scope_exit")
         _modules._pop(cid)

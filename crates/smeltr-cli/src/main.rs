@@ -181,6 +181,12 @@ enum Cmd {
         /// MTL_CAPTURE_ENABLED=1 in the child environment.
         #[arg(long, value_name = "N")]
         gputrace: Option<u32>,
+        /// Capture the Metal work of one named `smeltr.scope(...)` into a
+        /// `.gputrace`. Goes through the Python sidecar (MLX drives the
+        /// capture), so it needs the sidecar attached but works even with
+        /// `--no-hook`. Same strict opt-in as `--gputrace`.
+        #[arg(long, value_name = "SCOPE", conflicts_with = "gputrace")]
+        gputrace_scope: Option<String>,
         /// Human-readable name for the recorded session. Sets
         /// SMELTR_SESSION_NAME in the child process environment. The
         /// session metadata records the name and `list_sessions`
@@ -266,10 +272,18 @@ fn main() -> anyhow::Result<()> {
                 args,
                 no_hook,
                 gputrace,
+                gputrace_scope,
                 name,
             } => {
-                let code =
-                    commands::record::run(&cmd, &args, no_hook, name.as_deref(), gputrace).await?;
+                let code = commands::record::run(
+                    &cmd,
+                    &args,
+                    no_hook,
+                    name.as_deref(),
+                    gputrace,
+                    gputrace_scope.as_deref(),
+                )
+                .await?;
                 std::process::exit(code);
             }
         }
