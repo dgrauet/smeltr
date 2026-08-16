@@ -1052,14 +1052,23 @@ static void smeltr_gputrace_note_commit(void) {
             memory_order_acq_rel, memory_order_relaxed)) {
         return;
     }
-    @try {
-        [[MTLCaptureManager sharedCaptureManager] stopCapture];
-        smeltr_log("gputrace: stopped after %u command buffer(s): %s",
-                   n, g_gputrace_path);
-    } @catch (NSException *e) {
-        smeltr_log("gputrace: stopCapture raised %s",
-                   [[e reason] UTF8String] ?: "?");
-    }
+    // HORS du chemin de commit. Appeler `stopCapture` ici même interbloque :
+    // on est au milieu d'un `-commit` Metal, qui détient ses verrous
+    // internes, et la couche de capture veut les mêmes pour finaliser son
+    // document. Observé sur un vrai run comme sur dix matmuls : le processus
+    // reste bloqué et le bundle sort sans fichier d'index, donc illisible
+    // par Xcode. On défère sur une file globale.
+    const char *path = g_gputrace_path;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @try {
+            [[MTLCaptureManager sharedCaptureManager] stopCapture];
+            smeltr_log("gputrace: stopped after %u command buffer(s): %s",
+                       n, path);
+        } @catch (NSException *e) {
+            smeltr_log("gputrace: stopCapture raised %s",
+                       [[e reason] UTF8String] ?: "?");
+        }
+    });
 }
 
 @implementation NSObject (SmeltrMetalHook)
