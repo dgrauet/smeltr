@@ -25,6 +25,18 @@ struct Inner {
     seq: u64,
 }
 
+/// Ce qui décrit une session scopée à son ouverture. Regroupé plutôt que
+/// passé en huit paramètres : chaque capacité ajoutée en faisait pousser un
+/// de plus, et l'ordre des `Option<String>` voisins devenait un piège.
+pub struct ScopedOpts {
+    pub pid: u32,
+    pub argv: Vec<String>,
+    pub scope_token: Option<String>,
+    pub name: Option<String>,
+    pub chunked: bool,
+    pub gputrace_path: Option<String>,
+}
+
 impl ActiveSession {
     pub fn open_new() -> std::io::Result<Self> {
         Self::open_new_full(None, None)
@@ -68,19 +80,23 @@ impl ActiveSession {
     }
 
     pub fn open_scoped(
-        pid: u32,
-        argv: Vec<String>,
-        scope_token: Option<String>,
-        name: Option<String>,
+        opts: ScopedOpts,
         flight_recorder: Option<Arc<FlightRecorder>>,
         bus: Option<Bus>,
-
-        chunked: bool,
     ) -> std::io::Result<Self> {
+        let ScopedOpts {
+            pid,
+            argv,
+            scope_token,
+            name,
+            chunked,
+            gputrace_path,
+        } = opts;
         let id = SessionId::new();
         let mut meta = SessionMetadata::now_starting(id);
         meta.kind = smeltr_core::session::SessionKind::Scoped { pid, argv };
         meta.scope_token = scope_token.clone();
+        meta.gputrace_path = gputrace_path;
         if let Some(n) = name {
             meta.name = Some(n);
         }
@@ -243,13 +259,16 @@ mod tests {
     fn open_scoped_writes_scoped_metadata() {
         let _home = temp_home();
         let s = ActiveSession::open_scoped(
-            1234,
-            vec!["python".into(), "x.py".into()],
+            ScopedOpts {
+                pid: 1234,
+                argv: vec!["python".into(), "x.py".into()],
+                scope_token: None,
+                name: None,
+                chunked: false,
+                gputrace_path: None,
+            },
             None,
             None,
-            None,
-            None,
-            false,
         )
         .unwrap();
         s.finalize(Some(0), None, "test").unwrap();
@@ -325,13 +344,16 @@ mod tests {
     fn open_scoped_persists_scope_token() {
         let _h = temp_home();
         let s = ActiveSession::open_scoped(
-            4242,
-            vec!["python".into()],
-            Some("tok-XYZ".into()),
+            ScopedOpts {
+                pid: 4242,
+                argv: vec!["python".into()],
+                scope_token: Some("tok-XYZ".into()),
+                name: None,
+                chunked: false,
+                gputrace_path: None,
+            },
             None,
             None,
-            None,
-            false,
         )
         .unwrap();
         assert_eq!(s.scope_token(), Some("tok-XYZ"));
@@ -347,8 +369,19 @@ mod tests {
     #[serial]
     fn open_scoped_without_token_is_none() {
         let _h = temp_home();
-        let s =
-            ActiveSession::open_scoped(7, vec!["x".into()], None, None, None, None, false).unwrap();
+        let s = ActiveSession::open_scoped(
+            ScopedOpts {
+                pid: 7,
+                argv: vec!["x".into()],
+                scope_token: None,
+                name: None,
+                chunked: false,
+                gputrace_path: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
         assert!(s.scope_token().is_none());
     }
 
@@ -358,13 +391,16 @@ mod tests {
         let _h = temp_home();
         std::env::remove_var("SMELTR_SESSION_NAME");
         let s = ActiveSession::open_scoped(
-            4242,
-            vec!["python".into()],
-            Some("tok-T".into()),
-            Some("my-run".into()),
+            ScopedOpts {
+                pid: 4242,
+                argv: vec!["python".into()],
+                scope_token: Some("tok-T".into()),
+                name: Some("my-run".into()),
+                chunked: false,
+                gputrace_path: None,
+            },
             None,
             None,
-            false,
         )
         .unwrap();
         s.finalize(Some(0), None, "test").unwrap();
@@ -379,9 +415,19 @@ mod tests {
     fn open_scoped_without_name_falls_back_to_env() {
         let _h = temp_home();
         std::env::set_var("SMELTR_SESSION_NAME", "from-env");
-        let s =
-            ActiveSession::open_scoped(4242, vec!["python".into()], None, None, None, None, false)
-                .unwrap();
+        let s = ActiveSession::open_scoped(
+            ScopedOpts {
+                pid: 4242,
+                argv: vec!["python".into()],
+                scope_token: None,
+                name: None,
+                chunked: false,
+                gputrace_path: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
         s.finalize(Some(0), None, "test").unwrap();
         std::env::remove_var("SMELTR_SESSION_NAME");
 

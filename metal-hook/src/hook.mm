@@ -39,6 +39,24 @@ static atomic_bool    g_enabled = false;
 
 static BOOL g_op_capture_enabled = YES;  // toggled by SMELTR_HOOK_NO_OPS
 
+// --- Programmatic Metal capture (.gputrace), strict opt-in ---
+//
+// A Metal capture is expensive and must never turn itself on: both env vars
+// below are set only by `smeltr record --gputrace <N>`, which also puts
+// MTL_CAPTURE_ENABLED=1 in the child's environment (it has to be there at
+// process start — Metal reads it during framework init, so the hook cannot
+// set it for itself).
+//
+// The window is bounded by command-buffer count. Capturing a whole run is
+// unusable: a few seconds of GPU work produces gigabytes and Xcode chokes.
+// Capture starts when the first command buffer is created — before anything
+// is encoded into it — and stops once N buffers have been committed.
+static uint32_t          g_gputrace_target_cbs = 0;   // 0 = disabled
+static const char       *g_gputrace_path = NULL;
+static atomic_uint       g_gputrace_committed = 0;
+static atomic_bool       g_gputrace_started = false;
+static atomic_bool       g_gputrace_stopped = false;
+
 static BOOL g_stage_sampling_enabled = NO;
 // Backoff retry for sampling disables (#113): after sustained sample-buffer
 // alloc failures we disable sampling but schedule a retry instead of losing
@@ -958,6 +976,74 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
 /* Forward decls for lazy-install fns */
 static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
 
+/// Start the bounded Metal capture, at most once per process.
+///
+/// Called on the first command-buffer creation so the capture is armed
+/// before anything is encoded. Every failure path is non-fatal and logged:
+/// a capture that cannot start must not disturb the run being measured.
+static void smeltr_gputrace_maybe_start(id<MTLCommandBuffer> cb) {
+    if (g_gputrace_target_cbs == 0 || g_gputrace_path == NULL) return;
+    BOOL expected = NO;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_gputrace_started, &expected, YES,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        return;  // already started (or racing); only one winner arms it
+    }
+    @try {
+        MTLCaptureManager *mgr = [MTLCaptureManager sharedCaptureManager];
+        if (![mgr supportsDestination:MTLCaptureDestinationGPUTraceDocument]) {
+            smeltr_log("gputrace: MTLCaptureDestinationGPUTraceDocument "
+                       "unsupported — is MTL_CAPTURE_ENABLED=1 set?");
+            return;
+        }
+        NSString *path = [NSString stringWithUTF8String:g_gputrace_path];
+        // Metal refuses to overwrite; a stale file would silently abort the
+        // capture and leave the user with the previous run's trace.
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+
+        MTLCaptureDescriptor *desc = [[MTLCaptureDescriptor alloc] init];
+        desc.captureObject = [cb device];
+        desc.destination = MTLCaptureDestinationGPUTraceDocument;
+        desc.outputURL = [NSURL fileURLWithPath:path];
+
+        NSError *err = nil;
+        if (![mgr startCaptureWithDescriptor:desc error:&err]) {
+            smeltr_log("gputrace: startCapture failed: %s",
+                       err ? [[err localizedDescription] UTF8String] : "unknown");
+            return;
+        }
+        smeltr_log("gputrace: capturing %u command buffer(s) to %s",
+                   g_gputrace_target_cbs, g_gputrace_path);
+    } @catch (NSException *e) {
+        smeltr_log("gputrace: startCapture raised %s",
+                   [[e reason] UTF8String] ?: "?");
+    }
+}
+
+/// Stop the capture once the requested number of command buffers has been
+/// committed. Idempotent: only the thread that crosses the threshold stops.
+static void smeltr_gputrace_note_commit(void) {
+    if (g_gputrace_target_cbs == 0) return;
+    if (!atomic_load_explicit(&g_gputrace_started, memory_order_acquire)) return;
+    uint32_t n = atomic_fetch_add_explicit(&g_gputrace_committed, 1,
+                                           memory_order_relaxed) + 1;
+    if (n < g_gputrace_target_cbs) return;
+    BOOL expected = NO;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_gputrace_stopped, &expected, YES,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        return;
+    }
+    @try {
+        [[MTLCaptureManager sharedCaptureManager] stopCapture];
+        smeltr_log("gputrace: stopped after %u command buffer(s): %s",
+                   n, g_gputrace_path);
+    } @catch (NSException *e) {
+        smeltr_log("gputrace: stopCapture raised %s",
+                   [[e reason] UTF8String] ?: "?");
+    }
+}
+
 @implementation NSObject (SmeltrMetalHook)
 
 /* After exchange, calling [self smeltr_commandBuffer] from inside this method
@@ -968,6 +1054,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
     id<MTLCommandBuffer> cb = [self smeltr_commandBuffer];
     if (cb && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
         smeltr_install_cb_swizzle(cb);
+        smeltr_gputrace_maybe_start(cb);
     }
     return cb;
 }
@@ -996,6 +1083,7 @@ static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb);
             smeltr_write_cb_committed(g_ring, commit_ts, cb_id, q_id,
                 new_depth, label_c);
             smeltr_emit_device_mem_sample("cb_committed");
+            smeltr_gputrace_note_commit();
 
             // Register handlers. Capture ids by value into the blocks (they
             // become __block-stable copies).
@@ -1507,6 +1595,20 @@ static void smeltr_swizzle_device_class(void) {
                 }
             }
             smeltr_recalibration_init(d);
+            // Capture Metal programmatique : strictement opt-in, les deux
+            // variables n'étant posées que par `smeltr record --gputrace`.
+            const char *gt_n = getenv("SMELTR_HOOK_GPUTRACE_CBS");
+            const char *gt_p = getenv("SMELTR_HOOK_GPUTRACE_PATH");
+            if (gt_n && gt_p && *gt_p) {
+                long n = strtol(gt_n, NULL, 10);
+                if (n > 0 && n <= 100000) {
+                    g_gputrace_target_cbs = (uint32_t)n;
+                    g_gputrace_path = strdup(gt_p);
+                } else {
+                    smeltr_log("SMELTR_HOOK_GPUTRACE_CBS=%s ignored "
+                               "(out of range 1..100000)", gt_n);
+                }
+            }
             const char *ml = getenv("SMELTR_HOOK_ML_ENCODER");
             if (ml && strcmp(ml, "1") == 0) {
                 g_ml_encoder_enabled = YES;

@@ -34,6 +34,7 @@ fn grandchild_emit_with_token_lands_in_scoped_session() {
             Some("UUID-X".into()),
             None,
             false,
+            None,
         )
         .unwrap();
 

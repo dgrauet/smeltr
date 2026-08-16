@@ -175,6 +175,12 @@ enum Cmd {
         /// Skip the Metal hook (no DYLD_INSERT_LIBRARIES).
         #[arg(long)]
         no_hook: bool,
+        /// Capture the first N command buffers into a `.gputrace` openable
+        /// in Xcode's Metal debugger. Strict opt-in: a Metal capture costs
+        /// a great deal and capturing a whole run is unusable. Sets
+        /// MTL_CAPTURE_ENABLED=1 in the child environment.
+        #[arg(long, value_name = "N")]
+        gputrace: Option<u32>,
         /// Human-readable name for the recorded session. Sets
         /// SMELTR_SESSION_NAME in the child process environment. The
         /// session metadata records the name and `list_sessions`
@@ -259,9 +265,11 @@ fn main() -> anyhow::Result<()> {
                 cmd,
                 args,
                 no_hook,
+                gputrace,
                 name,
             } => {
-                let code = commands::record::run(&cmd, &args, no_hook, name.as_deref()).await?;
+                let code =
+                    commands::record::run(&cmd, &args, no_hook, name.as_deref(), gputrace).await?;
                 std::process::exit(code);
             }
         }

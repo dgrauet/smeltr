@@ -108,8 +108,29 @@ pub async fn run(
     args: &[String],
     no_hook: bool,
     name: Option<&str>,
+    gputrace: Option<u32>,
 ) -> anyhow::Result<i32> {
     let mut client = Client::connect().await?;
+
+    // Capture Metal programmatique (opt-in strict). Le fichier est créé par
+    // le hook dans le processus enfant ; on décide ici de son emplacement et
+    // on le consigne dans les métadonnées de session pour que
+    // `get_session_summary` puisse le rendre.
+    let gputrace_target: Option<PathBuf> = match gputrace {
+        Some(n) if n > 0 && !no_hook => {
+            let dir = smeltr_home().join("gputraces");
+            std::fs::create_dir_all(&dir)?;
+            Some(dir.join(format!("{}.gputrace", uuid::Uuid::new_v4().simple())))
+        }
+        Some(_) if no_hook => {
+            eprintln!(
+                "smeltr: --gputrace ignoré avec --no-hook : la capture est \
+                 pilotée par le hook Metal."
+            );
+            None
+        }
+        _ => None,
+    };
 
     let mut hook_decision: Option<(PathBuf, PathBuf)> = None;
     if !no_hook {
@@ -153,6 +174,14 @@ pub async fn run(
     if let Some((dylib, ring_path)) = &hook_decision {
         builder.env("DYLD_INSERT_LIBRARIES", dylib);
         builder.env("SMELTR_RING_PATH", ring_path);
+        if let (Some(path), Some(n)) = (&gputrace_target, gputrace) {
+            // MTL_CAPTURE_ENABLED doit être présent au DÉMARRAGE du
+            // processus : Metal le lit à l'initialisation du framework, le
+            // hook ne peut pas se l'accorder lui-même.
+            builder.env("MTL_CAPTURE_ENABLED", "1");
+            builder.env("SMELTR_HOOK_GPUTRACE_CBS", n.to_string());
+            builder.env("SMELTR_HOOK_GPUTRACE_PATH", path);
+        }
     }
 
     // Trigger smeltr/_autoload.py via smeltr-autoload.pth in site-packages,
@@ -174,6 +203,13 @@ pub async fn run(
         .collect();
     let resp = client
         .request(ClientToDaemon::AttachScopedProbes {
+            // Seulement si le hook est réellement injecté : sans lui, aucune
+            // capture n'aura lieu et consigner un chemin ferait promettre à
+            // la session un fichier qui n'existera jamais.
+            gputrace_path: hook_decision
+                .as_ref()
+                .and(gputrace_target.as_ref())
+                .map(|p| p.to_string_lossy().into_owned()),
             pid,
             argv,
             scope_token: Some(scope_token.clone()),

@@ -159,6 +159,19 @@ CBOR length-prefixed frames over a Unix socket. See
 - `SMELTR_STACK_CAPTURE=1` — opt-in: capture top 3 Python frames at each `mx.eval`
   (~1-5 µs/eval). Fills `MlxEvalEntered.stack_frames`; consumed by `smeltr origins` /
   `get_dispatch_origins`.
+- `SMELTR_HOOK_GPUTRACE_CBS=<n>` / `SMELTR_HOOK_GPUTRACE_PATH=<path>` — set
+  ONLY by `smeltr record --gputrace <N>`; never set them by hand. The hook
+  starts an `MTLCaptureManager` capture when the first command buffer is
+  created and stops it once N buffers have been committed, writing a
+  `.gputrace` openable in Xcode's Metal debugger. `record` also puts
+  `MTL_CAPTURE_ENABLED=1` in the child environment — Metal reads it during
+  framework init, so the hook cannot set it for itself. Strict opt-in: a
+  Metal capture is expensive and capturing a whole run is unusable (seconds
+  of GPU work produce gigabytes). The window is bounded by command-buffer
+  count only; a scope-named window would need a daemon→hook control channel,
+  which does not exist (the ring is one-way, hook→daemon). Ignored under
+  `--no-hook`, and no path is recorded in session metadata when the hook is
+  not injected.
 - `SMELTR_FOOTPRINT_PERIOD_MS=<n>` — sampling cadence for `phys_footprint`
   over the traced process tree (default 2000, aligned with the `proc` probe).
   Read by `FootprintProbe::default_period()`, which runs inside the

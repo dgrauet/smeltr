@@ -44,6 +44,10 @@ pub enum ClientToDaemon {
         /// daemon-side env remains the global default.
         #[serde(default)]
         chunked: bool,
+        /// Chemin du `.gputrace` demandé par `--gputrace`, à consigner dans
+        /// les métadonnées. Additif : les clients antérieurs ne l'envoient pas.
+        #[serde(default)]
+        gputrace_path: Option<String>,
     },
     /// Detach scoped probes for the given PID and emit a final marker.
     DetachScopedProbes {
@@ -127,6 +131,7 @@ mod tests {
             scope_token: None,
             name: None,
             chunked: false,
+            gputrace_path: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();
@@ -279,6 +284,7 @@ mod tests {
             scope_token: Some("tok-T".into()),
             name: Some("ltx2-run".into()),
             chunked: false,
+            gputrace_path: None,
         };
         let mut buf = Vec::new();
         let mut writer = std::io::Cursor::new(&mut buf);
