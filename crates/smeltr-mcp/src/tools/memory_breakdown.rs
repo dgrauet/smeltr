@@ -39,6 +39,12 @@ pub struct Response {
     /// (session antérieure à la sonde, ou run non scopé).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub process_footprint: Vec<smeltr_analyzer::footprint::ProcFootprintSummary>,
+    /// Vue de l'allocateur MLX — actif, pic, et surtout le cache : des
+    /// tampons libérés que MLX retient. Indistincts de la mémoire de travail
+    /// vus depuis Metal, d'où leur présence à côté des chiffres MTLDevice.
+    /// Absent quand le sidecar n'a rien émis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mlx_allocator: Option<smeltr_analyzer::memory::MlxAllocator>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -47,6 +53,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let timeline = params
         .include_timeline
         .then(|| smeltr_analyzer::memory::compute_memory_timeline(&events, params.bucket_seconds));
+    let mlx_allocator = smeltr_analyzer::memory::compute_mlx_allocator(&events);
     let scope_memory = compute_memory_breakdown(&events);
     let heap_memory = compute_heap_breakdown(&events);
     let process_footprint = smeltr_analyzer::footprint::compute_footprint_summary(&events);
@@ -67,6 +74,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         timeline,
         notes,
         process_footprint,
+        mlx_allocator,
     })
 }
 
@@ -272,9 +280,64 @@ mod tests {
             timeline: None,
             notes: vec![],
             process_footprint: vec![],
+            mlx_allocator: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("notes"), "json: {json}");
+    }
+
+    /// Le champ MLX sort dans la réponse PAR DÉFAUT, sans drapeau : un
+    /// chiffre derrière une option off par défaut est exactement ce qui a
+    /// rendu ltx-2-mlx#79 invisible pendant toute sa durée de vie.
+    #[test]
+    #[serial_test::serial]
+    fn mlx_allocator_is_in_the_default_response() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let id = SessionId::new();
+        let meta = SessionMetadata::now_starting(id);
+        let mut w = SessionWriter::create(meta).unwrap();
+        w.write_event(&ev(
+            1,
+            1,
+            Source::PythonSidecar,
+            Payload::MlxMemoryPoll {
+                active_bytes: 15_250_000_000,
+                peak_bytes: 15_250_000_000,
+                cache_bytes: 21_310_000_000,
+            },
+        ))
+        .unwrap();
+        w.finalize(Some(0), "x".into()).unwrap();
+
+        let resp = run(Params {
+            include_timeline: false,
+            bucket_seconds: 10,
+            session: id.short(),
+        })
+        .unwrap();
+
+        let a = resp.mlx_allocator.expect("l'allocateur MLX doit remonter");
+        assert_eq!(a.peak_cache_bytes, 21_310_000_000);
+        assert_eq!(a.peak_active_bytes, 15_250_000_000);
+        assert_eq!(a.sample_count, 1);
+    }
+
+    /// Sans échantillon MLX, le champ disparaît du JSON : la sortie des
+    /// sessions non instrumentées ne change pas d'un octet.
+    #[test]
+    fn absent_mlx_allocator_is_omitted_from_json() {
+        let resp = Response {
+            scope_memory: vec![],
+            heap_memory: vec![],
+            timeline: None,
+            notes: vec![],
+            process_footprint: vec![],
+            mlx_allocator: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("mlx_allocator"), "json: {json}");
     }
 
     #[test]
@@ -285,6 +348,7 @@ mod tests {
             timeline: None,
             notes: vec![],
             process_footprint: vec![],
+            mlx_allocator: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("process_footprint"), "json: {json}");
