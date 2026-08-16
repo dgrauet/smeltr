@@ -3,6 +3,7 @@ pub mod hook_degradation;
 pub mod lazy_eval_attribution;
 pub mod memory_pressure;
 pub mod metal_error;
+pub mod mlx_cache_growth;
 pub mod mlx_timing;
 pub mod queue_depth;
 pub mod queue_pressure;

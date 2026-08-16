@@ -149,6 +149,100 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
     out
 }
 
+/// Vue de l'allocateur MLX sur une session, agrégée depuis `MlxMemoryPoll`.
+///
+/// smeltr mesure par ailleurs au niveau Metal (`MetalDeviceMemSample`), mais
+/// MLX a son propre allocateur avec un cache : des tampons libérés par le
+/// programme et retenus par MLX. Vu depuis Metal c'est de la mémoire allouée
+/// indistincte ; vu depuis MLX, `cache_bytes` dit que c'est du cache et pas
+/// du travail. La comparaison des deux est tout l'intérêt — d'où leur
+/// présence côte à côte dans la même réponse.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MlxAllocator {
+    /// `mx.get_active_memory()` — réellement utilisé, au maximum observé.
+    pub peak_active_bytes: u64,
+    /// `mx.get_peak_memory()` — le pic tel que MLX le rapporte lui-même.
+    pub peak_reported_bytes: u64,
+    /// `mx.get_cache_memory()` — tampons libérés mais retenus, au maximum.
+    pub peak_cache_bytes: u64,
+    /// Cache au dernier échantillon : ce qui restait retenu en fin de session.
+    pub end_cache_bytes: u64,
+    pub sample_count: usize,
+}
+
+/// Agrège les `MlxMemoryPoll` d'une session. `None` si le sidecar n'en a
+/// émis aucun — session enregistrée sans lui, ou MLX absent de la cible.
+pub fn compute_mlx_allocator(events: &[Event]) -> Option<MlxAllocator> {
+    let mut out = MlxAllocator {
+        peak_active_bytes: 0,
+        peak_reported_bytes: 0,
+        peak_cache_bytes: 0,
+        end_cache_bytes: 0,
+        sample_count: 0,
+    };
+    for e in events {
+        if let Payload::MlxMemoryPoll {
+            active_bytes,
+            peak_bytes,
+            cache_bytes,
+        } = &e.payload
+        {
+            out.peak_active_bytes = out.peak_active_bytes.max(*active_bytes);
+            out.peak_reported_bytes = out.peak_reported_bytes.max(*peak_bytes);
+            out.peak_cache_bytes = out.peak_cache_bytes.max(*cache_bytes);
+            out.end_cache_bytes = *cache_bytes;
+            out.sample_count += 1;
+        }
+    }
+    (out.sample_count > 0).then_some(out)
+}
+
+#[cfg(test)]
+mod mlx_allocator_tests {
+    use super::*;
+    use smeltr_core::event::{Payload, Source};
+    use uuid::Uuid;
+
+    fn poll(ts: u64, active: u64, peak: u64, cache: u64) -> Event {
+        Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: ts,
+            session_id: Uuid::nil(),
+            source: Source::PythonSidecar,
+            pid: None,
+            seq: ts,
+            payload: Payload::MlxMemoryPoll {
+                active_bytes: active,
+                peak_bytes: peak,
+                cache_bytes: cache,
+            },
+        }
+    }
+
+    #[test]
+    fn aggregates_peaks_and_the_ending_cache() {
+        let events = vec![
+            poll(1, 4_000, 4_000, 1_000),
+            poll(2, 9_000, 9_000, 7_000),
+            poll(3, 2_000, 9_000, 3_000),
+        ];
+        let a = compute_mlx_allocator(&events).expect("des echantillons");
+        assert_eq!(a.peak_active_bytes, 9_000);
+        assert_eq!(a.peak_reported_bytes, 9_000);
+        assert_eq!(a.peak_cache_bytes, 7_000);
+        // Le cache du DERNIER echantillon, pas le pic : ce qui restait retenu.
+        assert_eq!(a.end_cache_bytes, 3_000);
+        assert_eq!(a.sample_count, 3);
+    }
+
+    /// Sans sidecar, aucun echantillon : on ne fabrique pas de zeros, on dit
+    /// qu'il n'y a rien.
+    #[test]
+    fn no_samples_yields_none() {
+        assert!(compute_mlx_allocator(&[]).is_none());
+    }
+}
+
 /// Compute per-scope heap state peak. Walks `MetalHeapAlloc/Free` to
 /// maintain `live_heaps`; on each mutation OR scope event, updates each
 /// open scope's `peak_heap_count` / `peak_heap_bytes`. Returns one entry
