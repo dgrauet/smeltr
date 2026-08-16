@@ -172,6 +172,17 @@ CBOR length-prefixed frames over a Unix socket. See
   which does not exist (the ring is one-way, hook→daemon). Ignored under
   `--no-hook`, and no path is recorded in session metadata when the hook is
   not injected.
+
+  **The traced run will very likely abort.** Verified on a real LTX-2
+  distilled run: the capture succeeds and produces a valid bundle, then the
+  process dies with SIGABRT a couple of minutes later. The backtrace is
+  unambiguous — `GPUToolsCapture -[CaptureMTLCommandBuffer
+  _preCommitWithIndex:]` → `mlx::core::gpu::check_error` → `__cxa_throw` →
+  `abort`: under the capture layer a command buffer completes with an error
+  and MLX's uncaught C++ throw terminates the process. The capture layer
+  stays installed for the whole process once `MTL_CAPTURE_ENABLED=1`, so
+  stopping the capture does not make this go away. Use `--gputrace` to
+  obtain a trace, not to complete a generation.
 - `SMELTR_FOOTPRINT_PERIOD_MS=<n>` — sampling cadence for `phys_footprint`
   over the traced process tree (default 2000, aligned with the `proc` probe).
   Read by `FootprintProbe::default_period()`, which runs inside the
