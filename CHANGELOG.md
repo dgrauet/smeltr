@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.1](https://github.com/dgrauet/smeltr/compare/v0.26.0...v0.26.1) (2026-08-16)
+
+
+### Bug Fixes
+
+* **hook:** actually arm the Metal capture, and say it aborts the run ([#212](https://github.com/dgrauet/smeltr/issues/212)) ([9bcb978](https://github.com/dgrauet/smeltr/commit/9bcb978e6e5b0633455b76e5453911b974c99c6b))
+
 ## [0.26.0](https://github.com/dgrauet/smeltr/compare/v0.25.1...v0.26.0) (2026-08-16)
 
 
