@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0](https://github.com/dgrauet/smeltr/compare/v0.25.1...v0.26.0) (2026-08-16)
+
+
+### Features
+
+* **analyzer,mcp:** surface the MLX allocator next to the Metal numbers ([#209](https://github.com/dgrauet/smeltr/issues/209)) ([7af99b9](https://github.com/dgrauet/smeltr/commit/7af99b9daae471966b4a511ce067e0db04585d0f))
+* **hook,cli,daemon,mcp:** capture a bounded .gputrace on demand ([#210](https://github.com/dgrauet/smeltr/issues/210)) ([d02ed36](https://github.com/dgrauet/smeltr/commit/d02ed367ec062e2ffe797ac6eea47c97bb1906ff))
+
 ## [0.25.1](https://github.com/dgrauet/smeltr/compare/v0.25.0...v0.25.1) (2026-08-15)
 
 
