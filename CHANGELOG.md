@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0](https://github.com/dgrauet/smeltr/compare/v0.26.2...v0.27.0) (2026-08-16)
+
+
+### Features
+
+* **python,cli:** capture a .gputrace around a named scope ([#218](https://github.com/dgrauet/smeltr/issues/218)) ([28806c8](https://github.com/dgrauet/smeltr/commit/28806c812ff42be94dc8f2551f4be9b11c3d5a41))
+
+
+### Bug Fixes
+
+* **analyzer,cli:** restore English across the repository ([#222](https://github.com/dgrauet/smeltr/issues/222)) ([c7263cf](https://github.com/dgrauet/smeltr/commit/c7263cfce90eba2d6ca29af10444299366ec5248))
+
+
+### Performance Improvements
+
+* **daemon:** lower the proc probe cadence from 2s to 5s ([#220](https://github.com/dgrauet/smeltr/issues/220)) ([2d7980b](https://github.com/dgrauet/smeltr/commit/2d7980b110fb9c38cef3c260216adcd820518418))
+
 ## [0.26.2](https://github.com/dgrauet/smeltr/compare/v0.26.1...v0.26.2) (2026-08-16)
 
 
