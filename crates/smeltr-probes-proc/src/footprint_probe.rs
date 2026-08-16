@@ -12,7 +12,10 @@ use smeltr_probes_core::{Probe, ProbeError, ProbeHealth};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// Cadence par défaut, alignée sur celle de `ProcProbe`.
+/// Default cadence. Deliberately faster than `ProcProbe`'s (5s): a tick here
+/// costs ~0.6ms of syscalls against 0.6s of forking and exec'ing `top` — a
+/// thousand times less. Nothing forces this probe to slow down, and its
+/// resolution is what yields the memory growth slope preceding a jetsam kill.
 const DEFAULT_PERIOD: Duration = Duration::from_secs(2);
 
 /// Un `phys_bytes` à zéro signifie que le processus est mort (ou zombie)
