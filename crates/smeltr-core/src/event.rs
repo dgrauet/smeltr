@@ -97,16 +97,16 @@ pub enum Payload {
         top: Vec<ProcEntry>,
         flagged: Vec<String>,
     },
-    /// Empreinte mémoire d'un processus de l'arbre tracé (#jetsam).
-    /// `phys_footprint_bytes` est la métrique sur laquelle jetsam décide de
-    /// tuer un processus — distincte de `VmSample` (système) et de la mémoire
-    /// MTLDevice (ce que le noyau ne regarde pas).
+    /// Memory footprint of one process in the traced tree (#jetsam).
+    /// `phys_footprint_bytes` is the metric jetsam decides kills on — distinct
+    /// from `VmSample` (system-wide) and from MTLDevice memory (which the
+    /// kernel does not look at).
     ProcFootprint {
         pid: u32,
         name: String,
         phys_footprint_bytes: u64,
         lifetime_max_phys_footprint_bytes: u64,
-        /// Vrai pour le processus directement lancé par `smeltr record`.
+        /// True for the process `smeltr record` launched directly.
         is_traced_root: bool,
     },
     ThermalState {
@@ -137,9 +137,9 @@ pub enum Payload {
         exception_codes: Vec<String>,
         summary: String,
     },
-    /// Le noyau a tué un processus sous pression mémoire (jetsam,
-    /// `bug_type: 298`). `footprint_bytes` est l'empreinte au moment du kill,
-    /// reconstruite depuis `rpages × pageSize`.
+    /// The kernel killed a process under memory pressure (jetsam,
+    /// `bug_type: 298`). `footprint_bytes` is the footprint at kill time,
+    /// reconstructed from `rpages * pageSize`.
     JetsamKill {
         path: String,
         killed_pid: Option<u32>,
@@ -147,10 +147,10 @@ pub enum Payload {
         footprint_bytes: u64,
         lifetime_max_bytes: u64,
         page_size: u64,
-        /// Motif rendu par le noyau : `per-process-limit` (le processus a
-        /// dépassé SA limite) vs `vm-pageshortage` (la machine manquait de
-        /// mémoire) appellent des corrections opposées. Absent des rapports
-        /// antérieurs à ce champ.
+        /// Reason as the kernel reports it: `per-process-limit` (the process
+        /// exceeded ITS OWN limit) versus `vm-pageshortage` (the machine ran
+        /// short of memory) call for opposite fixes. Absent from reports
+        /// predating this field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },

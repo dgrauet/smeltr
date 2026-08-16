@@ -64,54 +64,53 @@ pub fn detect(events: &[Event]) -> Option<SidecarAbsent> {
     })
 }
 
-/// Détectée quand la session ne contient ni capture Metal ni événement
-/// sidecar : typiquement la session ambiante du daemon, qui n'enregistre
-/// que les sondes système. Distincte de [`SidecarAbsent`], qui suppose du
-/// travail GPU capturé.
+/// Detected when the session holds neither Metal capture nor sidecar events:
+/// typically the daemon's ambient session, which records system probes only.
+/// Distinct from [`SidecarAbsent`], which presumes captured GPU work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NothingInstrumented {
-    /// Nombre total d'événements de la session (tous issus des sondes).
+    /// Total number of events in the session (all of them from probes).
     pub event_count: usize,
-    /// La session porte-t-elle des échantillons d'empreinte processus ?
+    /// Does the session carry process footprint samples?
     ///
-    /// Les sessions ambiantes n'en portent JAMAIS : leur présence prouve
-    /// qu'un processus a bien été suivi, donc qu'un run a été enregistré.
+    /// Ambient sessions NEVER carry any: their presence proves a process was
+    /// genuinely followed, hence that a run was recorded.
     pub has_proc_footprint: bool,
 }
 
 impl NothingInstrumented {
     pub fn advice(&self) -> String {
-        // Ne PAS affirmer de quelle sorte de session il s'agit quand des
-        // `ProcFootprint` sont là : `smeltr record --no-hook -- /bin/sleep 2`
-        // produit exactement cette forme dans une session SCOPÉE. Dire à
-        // quelqu'un qui vient d'enregistrer un run qu'il regarde la session
-        // ambiante — et lui conseiller d'enregistrer un run — est faux deux
-        // fois. On s'en tient à ce qui est su.
-        let suite = if self.has_proc_footprint {
-            "Un processus a bien été suivi (échantillons d'empreinte \
-             présents), mais ni le hook Metal ni le sidecar Python n'ont \
-             produit d'événement : lancé avec `--no-hook`, sur une cible non \
-             Metal, ou sans le paquet `smeltr` installé dans l'environnement \
-             Python de la cible."
+        // Do NOT assert which kind of session this is when `ProcFootprint`
+        // samples are present: `smeltr record --no-hook -- /bin/sleep 2`
+        // produces exactly this shape in a SCOPED session. Telling someone who
+        // just recorded a run that they are looking at the ambient session —
+        // and advising them to record a run — is wrong twice over. Stick to
+        // what is known.
+        let rest = if self.has_proc_footprint {
+            "A process was genuinely followed (footprint samples are present), \
+             but neither the Metal hook nor the Python sidecar produced any \
+             event: launched with `--no-hook`, against a non-Metal target, or \
+             without the `smeltr` package installed in the target's Python \
+             environment."
         } else {
-            "C'est la forme attendue de la session ambiante que le daemon \
-             ouvre à chaque démarrage. Pour analyser un run réel, \
-             enregistrez-le avec `smeltr record -- <commande>` puis ciblez-le \
-             avec `--last` ou avec le nom donné via SMELTR_SESSION_NAME."
+            "This is the expected shape of the ambient session the daemon \
+             opens at every startup. To analyze a real run, record it with \
+             `smeltr record -- <command>`, then target it with `--last` or \
+             with the name given through SMELTR_SESSION_NAME."
         };
         format!(
-            "Cette session contient {} événement(s), tous issus des sondes \
-             système : aucune capture Metal et aucun événement du sidecar \
-             Python. Il n'y a donc rien à ventiler par scope ou par module — \
-             les tableaux vides signifient « rien n'a été instrumenté », pas \
-             « rien à signaler ». {suite}",
+            "This session holds {} event(s), all of them from system probes: \
+             no Metal capture and no Python sidecar event. There is therefore \
+             nothing to break down by scope or by module — the empty arrays \
+             mean \"nothing was instrumented\", not \"nothing to report\". \
+             {rest}",
             self.event_count
         )
     }
 }
 
-/// Retourne `Some` quand la session ne contient aucun `MetalCbCompleted` et
-/// aucun événement du sidecar Python, mais au moins un événement.
+/// Returns `Some` when the session holds no `MetalCbCompleted` and no Python
+/// sidecar event, but at least one event overall.
 pub fn detect_nothing_instrumented(events: &[Event]) -> Option<NothingInstrumented> {
     if events.is_empty() {
         return None;
@@ -145,7 +144,7 @@ impl Rule for SidecarAbsentRule {
             return vec![Finding::new(
                 Severity::Info,
                 Category::ContributingFactor,
-                "Aucune charge GPU instrumentée dans cette session",
+                "No instrumented GPU workload in this session",
             )
             .with_detail(nothing.advice())];
         }
@@ -280,7 +279,7 @@ mod tests {
 
     #[test]
     fn system_only_session_is_nothing_instrumented() {
-        // Session ambiante du daemon : que des sondes système.
+        // The daemon's ambient session: system probes only.
         let events = vec![vm_sample(10), vm_sample(20)];
         let n = detect_nothing_instrumented(&events).expect("should detect");
         assert_eq!(n.event_count, 2);
@@ -322,41 +321,40 @@ mod tests {
         )
     }
 
-    /// Cette branche crée le contre-exemple de l'ancienne rédaction :
-    /// `smeltr record --no-hook -- /bin/sleep 2` produit une session SCOPÉE
-    /// ne contenant que des `ProcFootprint`. Dire à un utilisateur qui vient
-    /// d'enregistrer un run qu'il regarde la session ambiante du daemon —
-    /// et lui conseiller d'enregistrer un run — est faux deux fois.
+    /// This branch is the counter-example to the old wording:
+    /// `smeltr record --no-hook -- /bin/sleep 2` produces a SCOPED session
+    /// holding nothing but `ProcFootprint` samples. Telling a user who just
+    /// recorded a run that they are looking at the daemon's ambient session —
+    /// and advising them to record a run — is wrong twice over.
     ///
-    /// Les sessions ambiantes ne portent jamais de `ProcFootprint` : leur
-    /// présence suffit à trancher.
+    /// Ambient sessions never carry `ProcFootprint`: their presence settles it.
     #[test]
     fn a_session_with_footprint_samples_is_not_called_ambient() {
         let events = vec![proc_footprint(10), proc_footprint(20)];
         let n = detect_nothing_instrumented(&events).expect("should detect");
         let advice = n.advice();
-        assert!(!advice.contains("ambiante"), "advice: {advice}");
-        // Ce qui est réellement su reste dit.
+        assert!(!advice.contains("ambient"), "advice: {advice}");
+        // What is genuinely known still gets said.
         assert!(advice.contains("Metal"), "advice: {advice}");
         assert!(advice.contains("sidecar"), "advice: {advice}");
     }
 
-    /// Sans `ProcFootprint`, la forme reste celle de la session ambiante et
-    /// le conseil d'enregistrer un run garde son sens.
+    /// Without `ProcFootprint`, the shape remains that of the ambient session
+    /// and the advice to record a run keeps its meaning.
     #[test]
     fn a_session_without_footprint_samples_still_mentions_the_ambient_shape() {
         let n = detect_nothing_instrumented(&[vm_sample(10)]).expect("should detect");
-        assert!(n.advice().contains("ambiante"), "advice: {}", n.advice());
+        assert!(n.advice().contains("ambient"), "advice: {}", n.advice());
     }
 
     #[test]
     fn empty_session_is_not_reported() {
-        // Zéro événement : rien à dire, pas même que rien n'est instrumenté.
+        // Zero events: nothing to say, not even that nothing is instrumented.
         assert!(detect_nothing_instrumented(&[]).is_none());
     }
 
-    /// Table de vérité des trois formes, pour que personne ne les confonde
-    /// en refactorant.
+    /// Truth table of the three shapes, so nobody conflates them while
+    /// refactoring.
     #[test]
     fn the_two_detectors_are_mutually_exclusive() {
         let system_only = vec![vm_sample(10)];

@@ -13,10 +13,10 @@ pub struct Params {
 pub struct Response {
     pub report: Report,
     pub event_count: usize,
-    /// Chemin du `.gputrace` capturé, quand `smeltr record --gputrace` l'a
-    /// demandé. Ouvrable dans le débogueur Metal de Xcode, qui descend au
-    /// détail par encodeur et par shader — là où `export_session` s'arrête
-    /// au niveau op.
+    /// Path of the captured `.gputrace`, when `smeltr record --gputrace` asked
+    /// for one. Openable in Xcode's Metal debugger, which goes down to
+    /// per-encoder and per-shader detail — where `export_session` stops at the
+    /// op level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gputrace_path: Option<String>,
 }
@@ -25,9 +25,9 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let dir = resolve_session(&params.session)?;
     let events = smeltr_core::reader::read_events(&dir)?;
     let mut report = smeltr_analyzer::analyze(&events);
-    // Mêmes jointures que `smeltr analyze` : un verdict de crash doit sortir
-    // par les deux surfaces, sinon le MCP substitue la présomption de mort
-    // mémoire à un crash bien réel (#204).
+    // Same joins as `smeltr analyze`: a crash verdict must surface through
+    // both, otherwise the MCP layer substitutes the memory-death presumption
+    // for a perfectly real crash (#204).
     smeltr_analyzer::crash_join::join_crash(&mut report, &dir);
     smeltr_analyzer::crash_join::join_jetsam(&mut report, &dir);
     let gputrace_path = smeltr_core::reader::read_metadata(&dir)
@@ -94,10 +94,11 @@ mod tests {
         assert!(matches!(r, Err(ToolError::NotFound(_))));
     }
 
-    /// #204 : le MCP doit rendre le verdict d'un crash, comme `smeltr
-    /// analyze`. Avant, la jointure ne vivait que dans la CLI : le MCP ne
-    /// disait rien du crash, et depuis #201 il lui substituait la présomption
-    /// de mort mémoire — dire quelque chose d'inexact étant pire que se taire.
+    /// #204: the MCP layer must surface a crash verdict, like `smeltr analyze`
+    /// does. The join used to live in the CLI only, so the MCP said nothing
+    /// about the crash — and since #201 it substituted the memory-death
+    /// presumption, saying something inaccurate being worse than staying
+    /// silent.
     #[test]
     #[serial_test::serial]
     fn crash_verdict_reaches_the_mcp_surface() {
@@ -114,8 +115,8 @@ mod tests {
             argv: vec!["/usr/bin/python3".into()],
         };
         let mut w = SessionWriter::create(meta).unwrap();
-        // Un événement daté maintenant borne la fenêtre sur le présent, donc
-        // sur la mtime du rapport qu'on écrit juste après.
+        // An event stamped now bounds the window on the present, hence on the
+        // mtime of the report written just below.
         w.write_event(&Event {
             ts_mono_ns: 1,
             ts_wall_ns: std::time::SystemTime::now()

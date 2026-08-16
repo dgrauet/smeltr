@@ -49,17 +49,17 @@ def _emit_scope_mem_sample(at_event: str) -> None:
         pass
 
 
-# ---- capture Metal bornée par scope nommé (#216) ----
+# ---- Metal capture bounded by a named scope (#216) ----
 #
-# `smeltr record --gputrace-scope <NAME>` arme une capture Metal sur le scope
-# de ce nom. La voie passe par MLX (`mx.metal.start_capture`) et non par le
-# hook : celui-ci ne connaît pas les scopes, et le ring est unidirectionnel
-# (hook vers daemon), donc le piloter depuis le daemon supposerait un canal de
-# contrôle qui n'existe pas. Passer par le sidecar évite entièrement le
-# problème — et fonctionne même sous `--no-hook`.
+# `smeltr record --gputrace-scope <NAME>` arms a Metal capture on the scope of
+# that name. The path goes through MLX (`mx.metal.start_capture`) rather than
+# the hook: the hook does not know about scopes, and the ring is one-way (hook
+# to daemon), so driving it from the daemon would require a control channel
+# that does not exist. Going through the sidecar avoids the problem entirely —
+# and works under `--no-hook` too.
 #
-# `record` pose aussi MTL_CAPTURE_ENABLED=1 : Metal la lit à l'initialisation
-# du framework, on ne peut pas se l'accorder après coup.
+# `record` also sets MTL_CAPTURE_ENABLED=1: Metal reads it during framework
+# init, so it cannot be granted after the fact.
 
 _capture_done = False
 
@@ -70,7 +70,7 @@ def _reset_capture_for_tests() -> None:
 
 
 def _metal_capture_api() -> Any | None:
-    """Renvoie `mx.metal` s'il expose le contrôle de capture, sinon None."""
+    """Return `mx.metal` if it exposes capture control, else None."""
     try:
         import mlx.core as mx_core
     except ImportError:
@@ -82,7 +82,7 @@ def _metal_capture_api() -> Any | None:
 
 
 def _capture_target() -> tuple[str, str] | None:
-    """(scope visé, chemin) si la capture est armée, sinon None."""
+    """(targeted scope, path) if the capture is armed, else None."""
     name = os.environ.get("SMELTR_GPUTRACE_SCOPE")
     path = os.environ.get("SMELTR_GPUTRACE_PATH")
     if not name or not path:
@@ -92,12 +92,12 @@ def _capture_target() -> tuple[str, str] | None:
 
 @contextlib.contextmanager
 def _maybe_capture(scope_name: str) -> Generator[None, None, None]:
-    """Encadre le scope visé d'une capture Metal, au plus une fois.
+    """Bracket the targeted scope with a Metal capture, at most once.
 
-    Une seule capture par processus : un scope dans une boucle de denoise
-    relancerait sinon la capture à chaque tour, et chaque bundle pèse des
-    gigaoctets. Aucune erreur ne remonte — l'observabilité ne doit jamais
-    casser la mesure en cours.
+    One capture per process: a scope inside a denoise loop would otherwise
+    restart the capture on every iteration, and each bundle weighs gigabytes.
+    No error escapes — observability must never break the measurement under
+    way.
     """
     global _capture_done
     target = _capture_target()
@@ -109,7 +109,7 @@ def _maybe_capture(scope_name: str) -> Generator[None, None, None]:
         yield
         return
 
-    _capture_done = True  # même en cas d'échec : on ne réessaie pas en boucle
+    _capture_done = True  # set even on failure: no retrying in a loop
     started = False
     try:
         api.start_capture(target[1])

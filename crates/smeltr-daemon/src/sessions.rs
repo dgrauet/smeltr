@@ -25,9 +25,9 @@ struct Inner {
     seq: u64,
 }
 
-/// Ce qui décrit une session scopée à son ouverture. Regroupé plutôt que
-/// passé en huit paramètres : chaque capacité ajoutée en faisait pousser un
-/// de plus, et l'ordre des `Option<String>` voisins devenait un piège.
+/// What describes a scoped session at open time. Grouped rather than passed as
+/// eight parameters: every capability added grew the list by one more, and the
+/// ordering of adjacent `Option<String>`s was becoming a trap.
 pub struct ScopedOpts {
     pub pid: u32,
     pub argv: Vec<String>,
