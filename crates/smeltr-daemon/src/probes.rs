@@ -39,8 +39,16 @@ impl ProbeRuntime {
         sup.add(Box::new(smeltr_probes_vm::VmProbe::new(
             Duration::from_secs(1),
         )));
+        // 5s, not 2: one tick forks and execs `top -l 1`, measured at 0.6s on
+        // this machine. At 2s the probe burned 30.8% of a core continuously for
+        // the whole length of every recording; at 5s, 12.3%. Two thirds of the
+        // available saving is taken here — going slower buys only a few more
+        // points while making the TUI process panel, which consumes these
+        // samples live, correspondingly less responsive. Detection loses
+        // nothing: `system_pressure` looks for sustained conditions (a runaway
+        // `diagnosticservicesd`), never a two-second spike.
         sup.add(Box::new(smeltr_probes_proc::ProcProbe::new(
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             10,
         )));
         sup.add(Box::new(smeltr_probes_thermal::ThermalProbe::new(
