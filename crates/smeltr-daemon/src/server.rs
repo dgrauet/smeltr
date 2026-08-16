@@ -256,6 +256,7 @@ async fn handle_msg(
             scope_token,
             name,
             chunked,
+            gputrace_path,
         } => {
             // Register the scoped session with the router BEFORE starting any
             // probe. `SessionRouter::route` falls back to the ambient session
@@ -267,7 +268,7 @@ async fn handle_msg(
             // race: the router already knows the pid by the time any probe
             // task is first polled, so no scoped sample can leak into the
             // ambient session.
-            match router.attach_scoped(pid, argv, scope_token, name, chunked) {
+            match router.attach_scoped(pid, argv, scope_token, name, chunked, gputrace_path) {
                 Ok(_) => probe_runtime.attach_scoped(pid).await,
                 Err(e) => {
                     // The session failed to open, so there is nowhere
@@ -450,6 +451,7 @@ mod tests {
                 scope_token: None,
                 name: None,
                 chunked: false,
+                gputrace_path: None,
             },
             &router,
             &bus,

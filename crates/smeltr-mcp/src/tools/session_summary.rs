@@ -13,6 +13,12 @@ pub struct Params {
 pub struct Response {
     pub report: Report,
     pub event_count: usize,
+    /// Chemin du `.gputrace` capturé, quand `smeltr record --gputrace` l'a
+    /// demandé. Ouvrable dans le débogueur Metal de Xcode, qui descend au
+    /// détail par encodeur et par shader — là où `export_session` s'arrête
+    /// au niveau op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gputrace_path: Option<String>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -24,9 +30,13 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     // mémoire à un crash bien réel (#204).
     smeltr_analyzer::crash_join::join_crash(&mut report, &dir);
     smeltr_analyzer::crash_join::join_jetsam(&mut report, &dir);
+    let gputrace_path = smeltr_core::reader::read_metadata(&dir)
+        .ok()
+        .and_then(|m| m.gputrace_path);
     Ok(Response {
         report,
         event_count: events.len(),
+        gputrace_path,
     })
 }
 

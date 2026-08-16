@@ -65,6 +65,7 @@ fn client_death_without_detach_finalizes_scoped_session() {
                 scope_token: Some("orphan-test-token".into()),
                 name: None,
                 chunked: false,
+                gputrace_path: None,
             },
         )
         .unwrap();
@@ -108,6 +109,7 @@ fn clean_detach_still_finalizes_with_exit_code() {
             scope_token: None,
             name: None,
             chunked: false,
+            gputrace_path: None,
         },
     )
     .unwrap();
