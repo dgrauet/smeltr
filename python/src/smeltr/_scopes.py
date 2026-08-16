@@ -125,6 +125,7 @@ def _maybe_capture(scope_name: str) -> Generator[None, None, None]:
             except Exception:
                 pass
 
+
 @contextlib.contextmanager
 def _scope_cm(name: str, fields: dict[str, Any] | None = None) -> Generator[None, None, None]:
     cid = _modules._push(name, _SCOPE_CLASS_NAME, id_of=id(name), fields=fields)
