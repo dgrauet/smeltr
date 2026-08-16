@@ -1,8 +1,8 @@
-//! Sonde d'empreinte mémoire de l'arbre du processus tracé.
+//! Memory footprint probe over the traced process tree.
 //!
-//! Contrairement à [`crate::probe::ProcProbe`], qui échantillonne le top 50
-//! système en forkant `/usr/bin/top`, celle-ci ne cible que le processus
-//! tracé et ses descendants, et n'utilise que des syscalls.
+//! Unlike [`crate::probe::ProcProbe`], which samples the system-wide top 50 by
+//! forking `/usr/bin/top`, this one targets only the traced process and its
+//! descendants, and uses nothing but syscalls.
 
 use crate::footprint::{descendants_of, list_processes, read_footprint, Footprint};
 use async_trait::async_trait;
@@ -18,20 +18,19 @@ use tokio_util::sync::CancellationToken;
 /// resolution is what yields the memory growth slope preceding a jetsam kill.
 const DEFAULT_PERIOD: Duration = Duration::from_secs(2);
 
-/// Un `phys_bytes` à zéro signifie que le processus est mort (ou zombie)
-/// entre l'énumération de l'arbre et la lecture de son empreinte :
-/// `proc_pid_rusage` peut réussir sur un processus mourant tout en
-/// rapportant une empreinte nulle. Émettre ce zéro produirait une fausse
-/// mesure dans la session — indiscernable d'une vraie chute à zéro — ce qui
-/// fausserait toute analyse ultérieure (pic, pente de croissance,
-/// corrélation jetsam). On préfère l'omettre.
+/// A zero `phys_bytes` means the process died (or turned zombie) between the
+/// tree enumeration and the footprint read: `proc_pid_rusage` can succeed on a
+/// dying process while reporting a null footprint. Emitting that zero would put
+/// a false measurement in the session — indistinguishable from a genuine drop
+/// to zero — skewing every later analysis (peak, growth slope, jetsam
+/// correlation). We would rather omit it.
 fn is_meaningful(f: &Footprint) -> bool {
     f.phys_bytes > 0
 }
 
-/// Échantillonne l'arbre enraciné en `root_pid`. Les processus disparus
-/// entre l'énumération et la lecture (ou dont l'empreinte lue est nulle,
-/// voir [`is_meaningful`]) sont simplement omis.
+/// Samples the tree rooted at `root_pid`. Processes that vanish between the
+/// enumeration and the read (or whose footprint reads as zero, see
+/// [`is_meaningful`]) are simply omitted.
 pub fn sample_tree(root_pid: u32) -> Vec<Payload> {
     let all = list_processes();
     descendants_of(root_pid, &all)
@@ -62,8 +61,8 @@ impl FootprintProbe {
         Self { pid, period }
     }
 
-    /// Cadence par défaut, surchargeable par `SMELTR_FOOTPRINT_PERIOD_MS`.
-    /// Une valeur illisible ou nulle retombe sur la valeur par défaut.
+    /// Default cadence, overridable through `SMELTR_FOOTPRINT_PERIOD_MS`.
+    /// An unparseable or zero value falls back to the default.
     pub fn default_period() -> Duration {
         std::env::var("SMELTR_FOOTPRINT_PERIOD_MS")
             .ok()
@@ -97,8 +96,8 @@ impl Probe for FootprintProbe {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = interval.tick() => {}
             }
-            // Un arbre vide signifie que le processus tracé a disparu : on
-            // continue à ticker, c'est au daemon de détacher la sonde.
+            // An empty tree means the traced process is gone: keep ticking,
+            // detaching the probe is the daemon's job.
             for payload in sample_tree(self.pid) {
                 sink.emit(Source::Proc, Some(self.pid), payload);
             }
@@ -145,10 +144,10 @@ mod tests {
             ..
         } = &payloads[0]
         else {
-            panic!("attendu ProcFootprint, eu {:?}", payloads[0]);
+            panic!("expected ProcFootprint, got {:?}", payloads[0]);
         };
         assert_eq!(*pid, me);
-        assert!(*is_traced_root, "la racine doit être marquée");
+        assert!(*is_traced_root, "the root must be marked");
         assert!(*phys_footprint_bytes > 0);
     }
 
@@ -173,13 +172,13 @@ mod tests {
         }));
     }
 
-    /// Mesure le coût d'un tick complet. Lancer avec :
+    /// Measures the cost of one full tick. Run with:
     ///   cargo test -p smeltr-probes-proc cost_of_one_tick -- --ignored --nocapture
     #[test]
-    #[ignore = "mesure de coût, pas une assertion de correction"]
+    #[ignore = "cost measurement, not a correctness assertion"]
     fn cost_of_one_tick() {
         let me = std::process::id();
-        // Chauffe.
+        // Warm up.
         let _ = sample_tree(me);
 
         let iters = 50;
@@ -190,14 +189,14 @@ mod tests {
         }
         let per_tick = t0.elapsed() / iters;
 
-        // Coût isolé de l'énumération, qui domine attendu.
+        // Isolated cost of the enumeration, expected to dominate.
         let t1 = std::time::Instant::now();
         for _ in 0..iters {
             let _ = list_processes();
         }
         let per_list = t1.elapsed() / iters;
 
-        // Coût isolé d'une lecture d'empreinte.
+        // Isolated cost of a single footprint read.
         let t2 = std::time::Instant::now();
         for _ in 0..iters {
             let _ = read_footprint(me);

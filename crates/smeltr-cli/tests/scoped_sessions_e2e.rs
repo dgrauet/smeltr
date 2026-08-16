@@ -80,9 +80,9 @@ fn two_records_create_two_scoped_sessions() {
         .success();
 }
 
-/// Un `smeltr record` réel doit produire des ProcFootprint dans sa session
-/// scopée : c'est le seul test qui vérifie le routage bout en bout, de la
-/// sonde jusqu'au fichier de session.
+/// A real `smeltr record` must produce ProcFootprint samples in its scoped
+/// session: this is the only test covering routing end to end, from the probe
+/// down to the session file.
 #[test]
 #[serial_test::serial]
 #[cfg(target_os = "macos")]
@@ -154,11 +154,11 @@ fn record_emits_proc_footprint_in_scoped_session() {
     // weaken this back to `> 0`.
     assert!(
         scoped_root_samples >= 5,
-        "attendu ≥5 ProcFootprint racine (cadence 200ms sur ~2s), eu {scoped_root_samples} \
-         — la cadence par défaut (2s) n'en produirait qu'~1"
+        "expected >=5 root ProcFootprint samples (200ms cadence over ~2s), got \
+         {scoped_root_samples} — the default cadence would yield only ~1"
     );
     assert_eq!(
         ambient_samples, 0,
-        "la session ambiante ne doit recevoir aucun ProcFootprint"
+        "the ambient session must receive no ProcFootprint at all"
     );
 }

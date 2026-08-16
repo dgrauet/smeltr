@@ -1,29 +1,28 @@
-//! Lecture de `phys_footprint` par processus via `proc_pid_rusage`.
+//! Per-process `phys_footprint` reads through `proc_pid_rusage`.
 //!
-//! `ri_phys_footprint` est la métrique sur laquelle jetsam décide de tuer un
-//! processus sous macOS. Ni `VmSample` (échelle système) ni `ProcTop` (CPU
-//! seulement) ne la donnent, et la mémoire MTLDevice n'est pas ce que le
-//! noyau regarde.
+//! `ri_phys_footprint` is the metric jetsam decides kills on under macOS.
+//! Neither `VmSample` (system-wide) nor `ProcTop` (CPU only) yields it, and
+//! MTLDevice memory is not what the kernel looks at.
 
-/// Empreinte mémoire d'un processus, telle que le noyau la comptabilise.
+/// A process's memory footprint, as the kernel accounts for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Footprint {
-    /// `ri_phys_footprint` — empreinte courante en octets.
+    /// `ri_phys_footprint` — current footprint in bytes.
     pub phys_bytes: u64,
-    /// `ri_lifetime_max_phys_footprint` — maximum atteint sur la vie du
-    /// processus, en octets.
+    /// `ri_lifetime_max_phys_footprint` — maximum reached over the process's
+    /// lifetime, in bytes.
     pub lifetime_max_bytes: u64,
 }
 
-/// Lit l'empreinte d'un PID. Retourne `None` si le processus a disparu,
-/// n'est pas interrogeable, ou si l'appel échoue pour toute autre raison —
-/// l'observabilité ne doit jamais casser la mesure en cours.
+/// Reads one PID's footprint. Returns `None` when the process is gone, cannot
+/// be introspected, or the call fails for any other reason — observability
+/// must never break the measurement under way.
 #[cfg(target_os = "macos")]
 pub fn read_footprint(pid: u32) -> Option<Footprint> {
     let mut ri = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
-    // SAFETY: `ri` est une allocation valide et alignée de la taille attendue
-    // pour RUSAGE_INFO_V4. libc type le buffer `*mut *mut c_void` alors que le
-    // noyau y écrit la struct elle-même, d'où le cast.
+    // SAFETY: `ri` is a valid, aligned allocation of the size RUSAGE_INFO_V4
+    // expects. libc types the buffer as `*mut *mut c_void` while the kernel
+    // writes the struct itself into it, hence the cast.
     let rc = unsafe {
         libc::proc_pid_rusage(
             pid as libc::c_int,
@@ -47,7 +46,7 @@ pub fn read_footprint(_pid: u32) -> Option<Footprint> {
     None
 }
 
-/// Une entrée de la table des processus, réduite à ce dont on a besoin.
+/// One process-table entry, reduced to what we need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcNode {
     pub pid: u32,
@@ -130,14 +129,15 @@ mod sys {
     }
 }
 
-/// Énumère la table des processus via `libproc` (proc_listallpids + proc_pidinfo).
+/// Enumerates the process table through `libproc` (proc_listallpids +
+/// proc_pidinfo).
 ///
-/// Retourne les processus que le processus appelant peut introspécter.
-/// Les processus appartenant à d'autres utilisateurs ou à root sont omis.
-/// Cela est intentionnel pour un probe lancé par un utilisateur : seule la trace
-/// tracée et sa descendance appartiennent au même utilisateur et sont ainsi
-/// énumérées. Les erreurs transientes (process mort entre les deux appels) sont
-/// dégradées silencieusement : jamais de panique, jamais d'arrêt de la sonde.
+/// Returns the processes the calling process can introspect. Processes owned
+/// by other users or by root are omitted. That is intentional for a
+/// user-launched probe: only the traced process and its descendants share the
+/// same owner, and those are exactly what gets enumerated. Transient errors (a
+/// process dying between the two calls) degrade silently: never a panic, never
+/// a probe shutdown.
 #[cfg(target_os = "macos")]
 pub fn list_processes() -> Vec<ProcNode> {
     sys::list_processes()
@@ -148,8 +148,8 @@ pub fn list_processes() -> Vec<ProcNode> {
     Vec::new()
 }
 
-/// Retourne `root` et toute sa descendance, racine en première position.
-/// Vide si `root` n'est pas dans `all`.
+/// Returns `root` and all its descendants, root in first position. Empty when
+/// `root` is not in `all`.
 pub fn descendants_of(root: u32, all: &[ProcNode]) -> Vec<ProcNode> {
     let Some(root_node) = all.iter().find(|n| n.pid == root) else {
         return Vec::new();
@@ -159,8 +159,8 @@ pub fn descendants_of(root: u32, all: &[ProcNode]) -> Vec<ProcNode> {
     let mut frontier = vec![root];
     while let Some(parent) = frontier.pop() {
         for child in all.iter().filter(|n| n.ppid == parent) {
-            // `seen` borne le parcours : un cycle ppid fabriqué par un
-            // instantané incohérent ne doit pas boucler.
+            // `seen` bounds the walk: a ppid cycle manufactured by an
+            // inconsistent snapshot must not loop forever.
             if seen.insert(child.pid) {
                 out.push(child.clone());
                 frontier.push(child.pid);
@@ -195,8 +195,8 @@ mod tests {
 
     #[test]
     fn dead_pid_returns_none() {
-        // PID 0 n'est pas interrogeable via proc_pid_rusage : doit dégrader
-        // proprement, pas paniquer.
+        // PID 0 cannot be queried through proc_pid_rusage: this must degrade
+        // cleanly rather than panic.
         assert!(read_footprint(0).is_none());
     }
 
@@ -240,24 +240,24 @@ mod tests {
         assert!(descendants_of(999, &all).is_empty());
     }
 
-    /// Un cycle ppid ne doit pas boucler à l'infini. Ça n'arrive pas sur un
-    /// système sain, mais l'énumération est faite sur un instantané non
-    /// atomique : deux lectures incohérentes peuvent en fabriquer un.
+    /// A ppid cycle must not loop forever. It does not happen on a healthy
+    /// system, but the enumeration runs over a non-atomic snapshot: two
+    /// inconsistent reads can manufacture one.
     #[test]
     fn ppid_cycle_terminates() {
         let all = vec![node(100, 101, "a"), node(101, 100, "b")];
         let tree = descendants_of(100, &all);
-        assert!(tree.len() <= 2, "boucle infinie évitée");
+        assert!(tree.len() <= 2, "infinite loop avoided");
     }
 
     #[test]
     fn lists_real_processes_including_self() {
         let all = list_processes();
-        assert!(all.len() > 1, "attendu > 1 processus, eu {}", all.len());
+        assert!(all.len() > 1, "expected > 1 process, got {}", all.len());
         let me = std::process::id();
         assert!(
             all.iter().any(|n| n.pid == me),
-            "le processus de test doit figurer dans l'énumération"
+            "the test process must appear in the enumeration"
         );
     }
 

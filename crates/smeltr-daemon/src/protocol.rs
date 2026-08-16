@@ -44,8 +44,8 @@ pub enum ClientToDaemon {
         /// daemon-side env remains the global default.
         #[serde(default)]
         chunked: bool,
-        /// Chemin du `.gputrace` demandé par `--gputrace`, à consigner dans
-        /// les métadonnées. Additif : les clients antérieurs ne l'envoient pas.
+        /// Path of the `.gputrace` requested by `--gputrace`, to be recorded in
+        /// the metadata. Additive: older clients do not send it.
         #[serde(default)]
         gputrace_path: Option<String>,
     },
@@ -53,8 +53,8 @@ pub enum ClientToDaemon {
     DetachScopedProbes {
         pid: u32,
         exit_code: Option<i32>,
-        /// Signal ayant tué l'enfant, quand il est mort par signal (#203).
-        /// Additif : les clients antérieurs ne l'envoient pas.
+        /// Signal that killed the child, when it died by signal (#203).
+        /// Additive: older clients do not send it.
         #[serde(default)]
         term_signal: Option<i32>,
     },

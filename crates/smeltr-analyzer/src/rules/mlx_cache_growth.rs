@@ -1,35 +1,34 @@
-//! Le cache de l'allocateur MLX retient plus que le travail réel.
+//! The MLX allocator cache retains more than the real working set.
 //!
-//! smeltr mesure par ailleurs au niveau Metal, où un tampon libéré par le
-//! programme mais retenu par MLX est indistinct de la mémoire de travail.
-//! `mx.get_cache_memory()` fait la différence, et c'est celui qui compte :
-//! un composant qui élargit une limite de cache posée en amont fait gonfler
-//! le cache sans que rien ne le signale (ltx-2-mlx#79 — 8 à 21 Go pendant le
-//! denoise).
+//! smeltr also measures at the Metal level, where a buffer the program freed
+//! but MLX kept is indistinguishable from working memory.
+//! `mx.get_cache_memory()` tells them apart, and that is the one that matters:
+//! a component widening a cache limit set upstream inflates the cache with
+//! nothing to flag it (ltx-2-mlx#79 — 8 to 21 GB during the denoise).
 //!
-//! La règle compare deux **pics**, pas un ratio instantané. Entre deux
-//! `mx.eval` l'actif frôle zéro alors que le cache reste plein : mesuré sur
-//! le store réel, le rapport cache/actif à un instant donné monte jusqu'à
-//! plusieurs centaines de millions, ce qui n'apprend rien. Comparer le pic
-//! de cache au pic d'actif répond en revanche à la bonne question — MLX
-//! retient-il plus que ce que le programme a jamais utilisé ?
+//! The rule compares two **peaks**, not an instantaneous ratio. Between two
+//! `mx.eval` calls the active figure grazes zero while the cache stays full:
+//! measured against the real store, the cache-to-active ratio at a given
+//! instant climbs into the hundreds of millions, which teaches nothing.
+//! Comparing peak cache against peak active does answer the right question —
+//! is MLX retaining more than the program ever used?
 
 use crate::finding::{Category, EvidenceRef, Finding, Severity};
 use crate::rule::Rule;
 use smeltr_core::event::{Event, Payload};
 
-/// Rapport pic-cache / pic-actif à partir duquel on signale.
+/// Peak-cache over peak-active ratio at which we raise a finding.
 ///
-/// Calibré sur les 83 sessions du store local portant des `MlxMemoryPoll` :
-/// 13 dépassent 1.0, dont le cluster ltx-2-mlx#79 entre 1.40 et 1.49. À 1.25
-/// la règle retient 9 sessions (11 %) — le cluster #79 garde une marge
-/// confortable, et les cas marginaux à 1.09 et 1.12 sont écartés. Les
-/// sessions silencieuses incluent des caches PLUS gros (27,6 Go) avec un
-/// actif plus grand encore : du cache proportionnel au travail, légitime.
+/// Calibrated against the 83 sessions in the local store carrying
+/// `MlxMemoryPoll` samples: 13 exceed 1.0, including the ltx-2-mlx#79 cluster
+/// between 1.40 and 1.49. At 1.25 the rule keeps 9 sessions (11%) — the #79
+/// cluster retains a comfortable margin, and the marginal cases at 1.09 and
+/// 1.12 are excluded. The silent sessions include BIGGER caches (27.6 GB) with
+/// a larger active figure still: cache proportional to the work, legitimately.
 const CACHE_TO_ACTIVE_RATIO: f64 = 1.25;
 
-/// Plancher absolu, pour ne rien dire des petits runs où le rapport n'a pas
-/// de sens. Ce n'est pas un seuil de gravité : c'est un anti-bruit.
+/// Absolute floor, so we say nothing about small runs where the ratio is
+/// meaningless. This is not a severity threshold: it is noise suppression.
 const MIN_CACHE_BYTES: u64 = 1_000_000_000;
 
 pub struct MlxCacheGrowthRule;
@@ -73,17 +72,16 @@ impl Rule for MlxCacheGrowthRule {
         vec![Finding::new(
             Severity::Warning,
             Category::ContributingFactor,
-            "Le cache de l'allocateur MLX dépasse la mémoire réellement utilisée",
+            "The MLX allocator cache exceeds the memory actually in use",
         )
         .with_detail(format!(
-            "Le cache MLX a atteint {:.2} Go alors que la mémoire active n'a \
-             jamais dépassé {:.2} Go (×{:.2}). Ce sont des tampons libérés par \
-             le programme et retenus par MLX : depuis Metal ils sont \
-             indistincts de la mémoire de travail, ce qui fait passer le \
-             problème pour un besoin réel. Vérifiez qu'aucun composant \
-             n'élargit une limite de cache posée en amont — \
-             `mx.set_cache_limit()` — et, si la mémoire est contrainte, \
-             envisagez `mx.clear_cache()` entre les étapes.",
+            "The MLX cache reached {:.2} GB while active memory never went \
+             above {:.2} GB (x{:.2}). These are buffers the program freed and \
+             MLX kept: seen from Metal they are indistinguishable from working \
+             memory, which makes the problem look like a genuine requirement. \
+             Check that no component widens a cache limit set upstream — \
+             `mx.set_cache_limit()` — and, if memory is tight, consider \
+             `mx.clear_cache()` between stages.",
             gb(peak_cache),
             gb(peak_active),
             ratio
@@ -91,7 +89,7 @@ impl Rule for MlxCacheGrowthRule {
         .with_evidence(EvidenceRef {
             seq: at_peak.seq,
             ts_mono_ns: at_peak.ts_mono_ns,
-            description: format!("pic de cache {:.2} Go", gb(peak_cache)),
+            description: format!("cache peak {:.2} GB", gb(peak_cache)),
         })]
     }
 }
@@ -114,8 +112,8 @@ mod tests {
         )
     }
 
-    /// La signature de ltx-2-mlx#79, telle qu'observée dans le store :
-    /// 21,31 Go de cache pour 15,25 Go d'actif.
+    /// The ltx-2-mlx#79 signature, as observed in the store: 21.31 GB of cache
+    /// against 15.25 GB of active memory.
     #[test]
     fn cache_above_active_is_reported() {
         let events = vec![
@@ -129,9 +127,9 @@ mod tests {
         assert!(f[0].detail.contains("15.25"), "detail: {}", f[0].detail);
     }
 
-    /// Du cache proportionnel au travail est légitime, même très gros — le
-    /// cas des sessions silencieuses du store, jusqu'à 27,6 Go de cache pour
-    /// 49,5 Go d'actif.
+    /// Cache proportional to the work is legitimate, even when very large —
+    /// the case of the store's silent sessions, up to 27.6 GB of cache against
+    /// 49.5 GB of active memory.
     #[test]
     fn cache_below_active_is_not_reported() {
         let events = vec![
@@ -141,27 +139,27 @@ mod tests {
         assert!(MlxCacheGrowthRule.check(&events).is_empty());
     }
 
-    /// Juste sous le seuil : on se tait. Épingle le seuil calibré.
+    /// Just below the threshold: we stay silent. Pins the calibrated value.
     #[test]
     fn a_ratio_below_the_threshold_is_not_reported() {
-        let events = vec![poll(1, 8_530_000_000, 9_260_000_000)]; // ×1.09
+        let events = vec![poll(1, 8_530_000_000, 9_260_000_000)]; // x1.09
         assert!(MlxCacheGrowthRule.check(&events).is_empty());
     }
 
-    /// Le plancher anti-bruit : un petit run au rapport élevé ne dit rien.
+    /// The noise floor: a small run with a high ratio says nothing.
     #[test]
     fn a_small_cache_is_not_reported() {
-        let events = vec![poll(1, 10_000_000, 100_000_000)]; // ×10 mais 100 Mo
+        let events = vec![poll(1, 10_000_000, 100_000_000)]; // x10 but 100 MB
         assert!(MlxCacheGrowthRule.check(&events).is_empty());
     }
 
-    /// Sans échantillon MLX — session sans sidecar — la règle se tait.
+    /// With no MLX samples — a session without the sidecar — the rule is quiet.
     #[test]
     fn no_samples_yields_nothing() {
         assert!(MlxCacheGrowthRule.check(&[]).is_empty());
     }
 
-    /// Un actif resté nul ne permet aucun rapport : on ne divise pas.
+    /// An active figure that stayed at zero allows no ratio: we do not divide.
     #[test]
     fn a_zero_active_yields_nothing() {
         let events = vec![poll(1, 0, 5_000_000_000)];

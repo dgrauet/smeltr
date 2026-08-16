@@ -113,13 +113,12 @@ pub async fn run(
 ) -> anyhow::Result<i32> {
     let mut client = Client::connect().await?;
 
-    // Capture Metal programmatique (opt-in strict). Le fichier est créé par
-    // le hook dans le processus enfant ; on décide ici de son emplacement et
-    // on le consigne dans les métadonnées de session pour que
-    // `get_session_summary` puisse le rendre.
+    // Programmatic Metal capture (strict opt-in). The file is created by the
+    // hook inside the child process; here we decide where it goes and record
+    // that in the session metadata so `get_session_summary` can surface it.
     let gputrace_target: Option<PathBuf> = match (gputrace, gputrace_scope) {
-        // Voie scope : pilotée par le sidecar via MLX, donc indépendante du
-        // hook — elle fonctionne aussi sous `--no-hook` (#216).
+        // Scope path: driven by the sidecar through MLX, hence independent of
+        // the hook — it works under `--no-hook` too (#216).
         (_, Some(_)) => {
             let dir = smeltr_home().join("gputraces");
             std::fs::create_dir_all(&dir)?;
@@ -132,9 +131,9 @@ pub async fn run(
         }
         (Some(_), None) if no_hook => {
             eprintln!(
-                "smeltr: --gputrace ignoré avec --no-hook : la capture par \
-                 nombre de command buffers est pilotée par le hook Metal. \
-                 Utilisez --gputrace-scope, qui passe par le sidecar."
+                "smeltr: --gputrace ignored under --no-hook: command-buffer \
+                 bounded capture is driven by the Metal hook. Use \
+                 --gputrace-scope instead, which goes through the sidecar."
             );
             None
         }
@@ -184,9 +183,9 @@ pub async fn run(
         builder.env("DYLD_INSERT_LIBRARIES", dylib);
         builder.env("SMELTR_RING_PATH", ring_path);
         if let (Some(path), Some(n)) = (&gputrace_target, gputrace) {
-            // MTL_CAPTURE_ENABLED doit être présent au DÉMARRAGE du
-            // processus : Metal le lit à l'initialisation du framework, le
-            // hook ne peut pas se l'accorder lui-même.
+            // MTL_CAPTURE_ENABLED must be present at process STARTUP: Metal
+            // reads it during framework init, so the hook cannot grant it to
+            // itself.
             builder.env("MTL_CAPTURE_ENABLED", "1");
             builder.env("SMELTR_HOOK_GPUTRACE_CBS", n.to_string());
             builder.env("SMELTR_HOOK_GPUTRACE_PATH", path);
@@ -194,8 +193,8 @@ pub async fn run(
     }
 
     if let (Some(path), Some(scope)) = (&gputrace_target, gputrace_scope) {
-        // MTL_CAPTURE_ENABLED doit être présent au DÉMARRAGE du processus :
-        // Metal la lit à l'initialisation du framework.
+        // MTL_CAPTURE_ENABLED must be present at process STARTUP: Metal reads
+        // it during framework init.
         builder.env("MTL_CAPTURE_ENABLED", "1");
         builder.env("SMELTR_GPUTRACE_SCOPE", scope);
         builder.env("SMELTR_GPUTRACE_PATH", path);
@@ -220,11 +219,9 @@ pub async fn run(
         .collect();
     let resp = client
         .request(ClientToDaemon::AttachScopedProbes {
-            // Seulement si le hook est réellement injecté : sans lui, aucune
-            // capture n'aura lieu et consigner un chemin ferait promettre à
-            // la session un fichier qui n'existera jamais.
-            // Voie scope : pas de hook requis. Voie CB : sans hook injecté,
-            // aucune capture n'aura lieu, donc on ne promet rien.
+            // Scope path: no hook required. CB path: without the hook injected
+            // no capture happens, so we promise nothing — recording a path
+            // there would have the session promise a file that never exists.
             gputrace_path: gputrace_target
                 .as_ref()
                 .filter(|_| gputrace_scope.is_some() || hook_decision.is_some())
@@ -286,9 +283,9 @@ pub async fn run(
     // Wait for the child synchronously off the runtime worker.
     let status = tokio::task::spawn_blocking(move || child.wait()).await??;
     let exit_code = status.code().unwrap_or(-1);
-    // `exit_code` écrase toute mort par signal sur -1, ce qui ne distingue
-    // pas le SIGKILL de jetsam du SIGINT d'un Ctrl-C. On garde le numéro
-    // brut pour que les diagnostics puissent faire la différence (#203).
+    // `exit_code` collapses every signal death to -1, which cannot tell a
+    // jetsam SIGKILL from a Ctrl-C SIGINT. Keep the raw number so diagnostics
+    // can tell them apart (#203).
     let term_signal = {
         use std::os::unix::process::ExitStatusExt;
         status.signal()

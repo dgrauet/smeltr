@@ -1,23 +1,24 @@
-//! Agrégation par PID des échantillons `ProcFootprint`.
+//! Per-PID aggregation of `ProcFootprint` samples.
 
 use smeltr_core::event::{Event, Payload};
 use std::collections::HashMap;
 
-/// Empreinte agrégée d'un processus de l'arbre tracé, sur toute la session.
+/// Aggregated footprint of one process in the traced tree, over the whole
+/// session.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcFootprintSummary {
     pub pid: u32,
     pub name: String,
-    /// Plus grande empreinte observée par la sonde.
+    /// Largest footprint the probe observed.
     pub peak_bytes: u64,
-    /// Plus grand `ri_lifetime_max_phys_footprint` rapporté par le noyau —
-    /// peut dépasser `peak_bytes` si un pic est passé entre deux échantillons.
+    /// Largest `ri_lifetime_max_phys_footprint` the kernel reported — it can
+    /// exceed `peak_bytes` when a spike fell between two samples.
     pub lifetime_max_bytes: u64,
     pub is_traced_root: bool,
     pub sample_count: usize,
 }
 
-/// Agrège les `ProcFootprint` par PID, trié par pic décroissant.
+/// Aggregates `ProcFootprint` samples by PID, sorted by descending peak.
 pub fn compute_footprint_summary(events: &[Event]) -> Vec<ProcFootprintSummary> {
     let mut by_pid: HashMap<u32, ProcFootprintSummary> = HashMap::new();
     for e in events {

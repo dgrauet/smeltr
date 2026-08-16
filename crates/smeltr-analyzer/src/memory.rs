@@ -149,29 +149,28 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
     out
 }
 
-/// Vue de l'allocateur MLX sur une session, agrégée depuis `MlxMemoryPoll`.
+/// The MLX allocator's view of a session, aggregated from `MlxMemoryPoll`.
 ///
-/// smeltr mesure par ailleurs au niveau Metal (`MetalDeviceMemSample`), mais
-/// MLX a son propre allocateur avec un cache : des tampons libérés par le
-/// programme et retenus par MLX. Vu depuis Metal c'est de la mémoire allouée
-/// indistincte ; vu depuis MLX, `cache_bytes` dit que c'est du cache et pas
-/// du travail. La comparaison des deux est tout l'intérêt — d'où leur
-/// présence côte à côte dans la même réponse.
+/// smeltr also measures at the Metal level (`MetalDeviceMemSample`), but MLX
+/// has its own allocator with a cache: buffers the program freed and MLX kept.
+/// Seen from Metal that is undifferentiated allocated memory; seen from MLX,
+/// `cache_bytes` says it is cache rather than working set. Comparing the two
+/// is the whole point — hence their presence side by side in one response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MlxAllocator {
-    /// `mx.get_active_memory()` — réellement utilisé, au maximum observé.
+    /// `mx.get_active_memory()` — genuinely in use, at the observed maximum.
     pub peak_active_bytes: u64,
-    /// `mx.get_peak_memory()` — le pic tel que MLX le rapporte lui-même.
+    /// `mx.get_peak_memory()` — the peak as MLX itself reports it.
     pub peak_reported_bytes: u64,
-    /// `mx.get_cache_memory()` — tampons libérés mais retenus, au maximum.
+    /// `mx.get_cache_memory()` — freed but retained buffers, at the maximum.
     pub peak_cache_bytes: u64,
-    /// Cache au dernier échantillon : ce qui restait retenu en fin de session.
+    /// Cache at the last sample: what was still retained when the session ended.
     pub end_cache_bytes: u64,
     pub sample_count: usize,
 }
 
-/// Agrège les `MlxMemoryPoll` d'une session. `None` si le sidecar n'en a
-/// émis aucun — session enregistrée sans lui, ou MLX absent de la cible.
+/// Aggregates a session's `MlxMemoryPoll` samples. `None` when the sidecar
+/// emitted none — recorded without it, or MLX absent from the target.
 pub fn compute_mlx_allocator(events: &[Event]) -> Option<MlxAllocator> {
     let mut out = MlxAllocator {
         peak_active_bytes: 0,

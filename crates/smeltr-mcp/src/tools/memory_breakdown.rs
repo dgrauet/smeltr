@@ -30,19 +30,19 @@ pub struct Response {
     /// Present when `include_timeline` was requested (#182).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<smeltr_analyzer::memory::MemTimeline>,
-    /// Pourquoi les ventilations sont vides, quand elles le sont. Absent du
-    /// JSON dès qu'il y a quelque chose à ventiler.
+    /// Why the breakdowns are empty, when they are. Absent from the JSON as
+    /// soon as there is anything to break down.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
-    /// Empreinte mémoire par processus de l'arbre tracé — la métrique sur
-    /// laquelle jetsam décide. Absent quand la sonde n'a rien enregistré
-    /// (session antérieure à la sonde, ou run non scopé).
+    /// Per-process memory footprint over the traced tree — the metric jetsam
+    /// decides on. Absent when the probe recorded nothing (session predating
+    /// the probe, or an unscoped run).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub process_footprint: Vec<smeltr_analyzer::footprint::ProcFootprintSummary>,
-    /// Vue de l'allocateur MLX — actif, pic, et surtout le cache : des
-    /// tampons libérés que MLX retient. Indistincts de la mémoire de travail
-    /// vus depuis Metal, d'où leur présence à côté des chiffres MTLDevice.
-    /// Absent quand le sidecar n'a rien émis.
+    /// The MLX allocator's view — active, peak, and above all the cache:
+    /// buffers MLX retains after they were freed. Indistinguishable from
+    /// working memory when seen from Metal, hence their presence next to the
+    /// MTLDevice figures. Absent when the sidecar emitted nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mlx_allocator: Option<smeltr_analyzer::memory::MlxAllocator>,
 }
@@ -185,7 +185,7 @@ mod tests {
         let id = SessionId::new();
         let meta = SessionMetadata::now_starting(id);
         let mut w = SessionWriter::create(meta).unwrap();
-        // Session ambiante : que des sondes système.
+        // Ambient session: system probes only.
         w.write_event(&ev(
             1,
             1,
@@ -217,8 +217,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn instrumented_breakdown_has_no_notes() {
-        // Réutilise la session du test memory_breakdown_returns_scope_and_heap :
-        // dès qu'il y a des scopes, il n'y a rien à expliquer.
+        // Reuses the session from memory_breakdown_returns_scope_and_heap: as
+        // soon as scopes exist there is nothing to explain.
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_HOME", home.path());
         std::env::remove_var("SMELTR_SESSION_NAME");
@@ -270,8 +270,8 @@ mod tests {
         assert!(resp.notes.is_empty(), "notes: {:?}", resp.notes);
     }
 
-    /// `notes` vide ne doit pas apparaître du tout dans le JSON : la sortie
-    /// des sessions instrumentées ne change pas d'un octet.
+    /// An empty `notes` must not appear in the JSON at all: the output of
+    /// instrumented sessions does not change by a single byte.
     #[test]
     fn empty_notes_are_omitted_from_json() {
         let resp = Response {
@@ -286,9 +286,9 @@ mod tests {
         assert!(!json.contains("notes"), "json: {json}");
     }
 
-    /// Le champ MLX sort dans la réponse PAR DÉFAUT, sans drapeau : un
-    /// chiffre derrière une option off par défaut est exactement ce qui a
-    /// rendu ltx-2-mlx#79 invisible pendant toute sa durée de vie.
+    /// The MLX field ships in the response BY DEFAULT, behind no flag: a
+    /// number hidden behind an option that is off by default is exactly what
+    /// kept ltx-2-mlx#79 invisible for its entire lifetime.
     #[test]
     #[serial_test::serial]
     fn mlx_allocator_is_in_the_default_response() {
@@ -324,8 +324,8 @@ mod tests {
         assert_eq!(a.sample_count, 1);
     }
 
-    /// Sans échantillon MLX, le champ disparaît du JSON : la sortie des
-    /// sessions non instrumentées ne change pas d'un octet.
+    /// With no MLX samples the field vanishes from the JSON: the output of
+    /// uninstrumented sessions does not change by a single byte.
     #[test]
     fn absent_mlx_allocator_is_omitted_from_json() {
         let resp = Response {

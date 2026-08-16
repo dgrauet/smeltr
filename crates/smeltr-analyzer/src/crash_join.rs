@@ -109,7 +109,7 @@ pub fn crash_finding(j: &CrashJoin) -> Finding {
     Finding::new(Severity::Critical, Category::RootCause, title).with_detail(detail)
 }
 
-/// Un kill jetsam joint rétroactivement à la session.
+/// A jetsam kill joined retroactively to the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JetsamJoin {
     pub path: String,
@@ -117,19 +117,18 @@ pub struct JetsamJoin {
     pub killed_name: String,
     pub footprint_bytes: u64,
     pub lifetime_max_bytes: u64,
-    /// Motif rendu par le noyau, quand il le donne.
+    /// Reason as the kernel reports it, when it gives one.
     pub reason: Option<String>,
 }
 
-/// Répertoires où macOS dépose ses rapports de diagnostic.
+/// Directories where macOS drops its diagnostic reports.
 ///
-/// Le répertoire SYSTÈME vient en premier : c'est là que les
-/// `JetsamEvent-*.ips` sont écrits, contrairement aux rapports de crash
-/// ordinaires qui vont dans le répertoire utilisateur. Ni la sonde ni la
-/// jointure de crash ne regardaient le répertoire système — sans ça la
-/// fonctionnalité ne se déclenche jamais.
+/// The SYSTEM directory comes first: that is where `JetsamEvent-*.ips` files
+/// are written, unlike ordinary crash reports which land in the user
+/// directory. Neither the probe nor the crash join used to look at the system
+/// directory — without it the feature never fires.
 ///
-/// `SMELTR_DIAGNOSTIC_REPORTS_DIR` remplace toute la liste, pour les tests.
+/// `SMELTR_DIAGNOSTIC_REPORTS_DIR` replaces the whole list, for tests.
 pub fn diagnostic_reports_dirs() -> Vec<std::path::PathBuf> {
     if let Some(over) = std::env::var_os("SMELTR_DIAGNOSTIC_REPORTS_DIR") {
         return vec![std::path::PathBuf::from(over)];
@@ -141,33 +140,31 @@ pub fn diagnostic_reports_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// Deux noms de processus désignent-ils plausiblement le même processus ?
+/// Do two process names plausibly designate the same process?
 ///
-/// Comparaison par PRÉFIXE, pas par égalité : les deux côtés tronquent
-/// différemment. `pbi_comm` (d'où viennent les noms de `ProcFootprint`) fait
-/// 16 octets — `MAXCOMLEN` — tandis que le `name` d'un rapport jetsam va
-/// jusqu'à ~32 (observé sur cette machine :
-/// `"com.apple.Virtualization.Virtual"`, 32 caractères). Exiger l'égalité
-/// rejetterait précisément les noms longs.
+/// PREFIX comparison, not equality: the two sides truncate differently.
+/// `pbi_comm` (where `ProcFootprint` names come from) is 16 bytes —
+/// `MAXCOMLEN` — while a jetsam report's `name` runs up to ~32 (observed on
+/// this machine: `"com.apple.Virtualization.Virtual"`, 32 characters).
+/// Requiring equality would reject precisely the long names.
 ///
-/// Un nom vide n'apporte aucune information et ne prouve donc rien.
+/// An empty name carries no information and therefore proves nothing.
 pub fn names_compatible(a: &str, b: &str) -> bool {
     let n = a.len().min(b.len());
     n > 0 && a.as_bytes()[..n] == b.as_bytes()[..n]
 }
 
-/// Cherche dans `dirs` un rapport jetsam nommant l'un de `pids`, dont le
-/// mtime tombe dans `[wall_start_ns, wall_end_ns + grace_ns]`. Retourne le
-/// plus récent.
+/// Searches `dirs` for a jetsam report naming one of `pids`, whose mtime falls
+/// within `[wall_start_ns, wall_end_ns + grace_ns]`. Returns the most recent.
 ///
-/// `pids` contient le PID scopé ET tout PID observé dans les échantillons
-/// d'empreinte : sous `uv run` / `poetry run` / `python -m`, le processus
-/// qui meurt est un petit-enfant au PID différent (#31).
+/// `pids` holds the scoped PID AND every PID seen in the footprint samples:
+/// under `uv run` / `poetry run` / `python -m`, the process that dies is a
+/// grandchild with a different PID (#31).
 ///
-/// Le triple filtre PID + fenêtre + nom est ce qui empêche d'attribuer au run
-/// analysé un kill jetsam d'un processus sans rapport avec lui. `known_names`
-/// liste les noms connus du processus tracé ; vide, la garde de nom ne
-/// s'applique pas et on retombe sur PID + fenêtre.
+/// The triple filter PID + window + name is what prevents attributing some
+/// unrelated process's jetsam kill to the run under analysis. `known_names`
+/// lists the traced process's known names; when empty the name guard does not
+/// apply and we fall back to PID + window.
 pub fn find_jetsam_report(
     dirs: &[std::path::PathBuf],
     pids: &[u32],
@@ -214,9 +211,9 @@ pub fn find_jetsam_report(
             let Some(matched_pid) = killed_pid.filter(|k| pids.contains(k)) else {
                 continue;
             };
-            // Garde de nom : le PID seul ne suffit pas, macOS les recycle.
-            // Elle ne s'applique que si les DEUX côtés donnent un nom —
-            // sinon rejeter ferait rater le kill qu'on cherche.
+            // Name guard: the PID alone is not enough, macOS recycles them.
+            // It applies only when BOTH sides give a name — rejecting
+            // otherwise would miss the very kill we are looking for.
             if !known_names.is_empty()
                 && !killed_name.is_empty()
                 && !known_names
@@ -244,52 +241,48 @@ pub fn find_jetsam_report(
 
 /// Transforme un kill joint en cause racine.
 pub fn jetsam_finding(j: &JetsamJoin) -> Finding {
-    // Go décimal (1e9), pas Gio binaire — cohérent avec la façon dont macOS
-    // et les rapports jetsam eux-mêmes expriment les empreintes mémoire.
+    // Decimal GB (1e9), not binary GiB — consistent with how macOS and the
+    // jetsam reports themselves express memory footprints.
     let gb = |b: u64| b as f64 / 1_000_000_000.0;
-    // `per-process-limit` et `vm-pageshortage` appellent des corrections
-    // opposées : réduire l'empreinte du run vs libérer la machine. Le motif
-    // est dans le rapport ; le taire, c'est jeter la réponse à la question
-    // même que cette fonctionnalité existe pour trancher.
-    let motif = match j.reason.as_deref() {
-        Some("per-process-limit") => {
-            " Motif : `per-process-limit` — le processus a dépassé SA propre \
-             limite, indépendamment de l'état du reste de la machine."
-                .to_string()
-        }
-        Some("vm-pageshortage") => {
-            " Motif : `vm-pageshortage` — c'est la machine entière qui manquait \
-             de mémoire ; le run n'est pas forcément le fautif."
-                .to_string()
-        }
-        Some(other) => format!(" Motif rendu par le noyau : `{other}`."),
+    // `per-process-limit` and `vm-pageshortage` call for opposite fixes:
+    // shrink the run's footprint versus free up the machine. The reason sits
+    // in the report; withholding it throws away the answer to the very
+    // question this feature exists to settle.
+    let reason = match j.reason.as_deref() {
+        Some("per-process-limit") => " Reason: `per-process-limit` — the process exceeded ITS OWN \
+             limit, regardless of the state of the rest of the machine."
+            .to_string(),
+        Some("vm-pageshortage") => " Reason: `vm-pageshortage` — the whole machine was short of \
+             memory; the run is not necessarily at fault."
+            .to_string(),
+        Some(other) => format!(" Reason as the kernel reports it: `{other}`."),
         None => String::new(),
     };
     Finding::new(
         Severity::Critical,
         Category::RootCause,
-        "Le noyau a tué le processus enregistré sous pression mémoire (jetsam)",
+        "The kernel killed the recorded process under memory pressure (jetsam)",
     )
     .with_detail(format!(
-        "jetsam a tué le PID {} ({}) avec une empreinte de {:.2} Go \
-         (maximum de vie {:.2} Go).{} C'est `phys_footprint` qui décide, pas la \
-         mémoire MTLDevice : un run peut tenir dans le budget GPU et se faire \
-         tuer quand même. Le processus disparaît sans traceback ni exception — \
-         ce finding est la seule trace de la décision.\n    rapport : {}",
+        "jetsam killed PID {} ({}) at a footprint of {:.2} GB (lifetime \
+         maximum {:.2} GB).{} `phys_footprint` is what decides, not MTLDevice \
+         memory: a run can fit within the GPU budget and still be killed. The \
+         process vanishes with no traceback and no exception — this finding is \
+         the only trace of the decision.\n    report: {}",
         j.killed_pid,
         j.killed_name,
         gb(j.footprint_bytes),
         gb(j.lifetime_max_bytes),
-        motif,
+        reason,
         j.path
     ))
 }
 
-/// Joint un éventuel kill jetsam au rapport, en tête des findings.
+/// Joins a possible jetsam kill to the report, at the head of the findings.
 ///
-/// Appelée à la fois par `smeltr analyze` et par le MCP `get_session_summary` :
-/// un chiffre qu'on ne peut pas interroger depuis une session Claude ne sert à
-/// rien. Sans effet sur les sessions ambiantes (pas de PID à joindre).
+/// Called both by `smeltr analyze` and by the MCP `get_session_summary`: a
+/// number you cannot query from a Claude session is useless. No effect on
+/// ambient sessions (no PID to join on).
 pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
     let Ok(meta) = smeltr_core::reader::read_metadata(dir) else {
         return;
@@ -304,15 +297,15 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
 
     let end_ns = window_end_ns(&meta, &events);
 
-    // PID candidats : le PID scopé PLUS tout PID vu dans les échantillons
-    // d'empreinte, qui couvrent tout l'arbre tracé. Sous `uv run` /
-    // `poetry run` / `python -m` — le flux normal du projet — le processus
-    // qui meurt est un petit-enfant au PID différent de l'enfant lancé
-    // (#31) : s'en tenir au PID scopé rendait le silence dans le cas même
-    // que la fonctionnalité vise.
+    // Candidate PIDs: the scoped PID PLUS every PID seen in the footprint
+    // samples, which cover the whole traced tree. Under `uv run` /
+    // `poetry run` / `python -m` — this project's normal flow — the process
+    // that dies is a grandchild whose PID differs from the spawned child's
+    // (#31): sticking to the scoped PID produced silence in the very case the
+    // feature targets.
     //
-    // Noms connus, pour la garde de nom : le basename d'argv[0] et tout nom
-    // vu dans ces mêmes échantillons.
+    // Known names, for the name guard: the basename of argv[0] plus every name
+    // seen in those same samples.
     let mut pids: Vec<u32> = vec![*pid];
     let mut known_names: Vec<String> = argv
         .first()
@@ -336,11 +329,10 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
         }
     }
 
-    // Volontairement PAS de garde sur meta.exit_code (contrairement au join
-    // de crash) : un processus tué par jetsam n'a pas de code de sortie
-    // propre, mais le shell parent peut en rapporter un — on ne veut pas
-    // rater le kill pour ça. Le triple filtre PID + fenêtre + nom suffit à
-    // éviter les faux positifs.
+    // Deliberately NO guard on meta.exit_code (unlike the crash join): a
+    // process killed by jetsam has no clean exit code, but the parent shell
+    // may report one — we do not want to miss the kill over that. The triple
+    // filter PID + window + name is enough to avoid false positives.
     if let Some(j) = find_jetsam_report(
         &diagnostic_reports_dirs(),
         &pids,
@@ -353,24 +345,22 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
         return;
     }
 
-    // Pas de rapport joignable : reste la présomption, et seulement ici.
-    // La suppression est structurelle — on n'atteint ce point que faute de
-    // verdict — plutôt qu'une vérification séparée qu'on pourrait oublier.
+    // No joinable report: the presumption remains, and only here. The
+    // suppression is structural — this point is reached only for want of a
+    // verdict — rather than a separate check somebody could forget.
     if let Some(f) = presume_memory_death(&meta, &events, report) {
         report.findings.push(f);
     }
 }
 
-/// Borne haute de la fenêtre wall-clock d'une session, pour joindre un
-/// rapport écrit après coup.
+/// Upper bound of a session's wall-clock window, for joining a report written
+/// after the fact.
 ///
-/// Un kill (jetsam comme crash) empêche souvent le client `record` de
-/// finaliser proprement (#143) : à défaut d'`ended_rfc3339`, on borne au
-/// dernier événement écrit. Laisser courir jusqu'à MAINTENANT rendrait la
-/// fenêtre large de plusieurs semaines sur une vieille session non
-/// finalisée — et il ne resterait alors qu'un PID que macOS recycle pour
-/// garder le verdict. Repli sur maintenant seulement s'il n'y a aucun
-/// événement à dater.
+/// A kill (jetsam or crash alike) often stops the `record` client from
+/// finalizing cleanly (#143): lacking `ended_rfc3339`, we bound on the last
+/// event written. Letting it run to NOW would make the window weeks wide on an
+/// old unfinalized session — leaving only a PID, which macOS recycles, to hold
+/// the verdict. Fall back to now only when there is no event to date.
 fn window_end_ns(meta: &smeltr_core::session::SessionMetadata, events: &[Event]) -> u64 {
     meta.ended_rfc3339
         .as_deref()
@@ -385,17 +375,17 @@ fn window_end_ns(meta: &smeltr_core::session::SessionMetadata, events: &[Event])
         .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp_nanos() as u64)
 }
 
-/// Joint un éventuel rapport de crash à la session, en tête des findings.
+/// Joins a possible crash report to the session, at the head of the findings.
 ///
-/// Jumeau de [`join_jetsam`], appelé depuis `smeltr analyze` **et** depuis le
-/// MCP `get_session_summary`. Avant #204 ce travail vivait dans `analyze.rs`
-/// et n'existait donc qu'en CLI : le MCP ne rendait jamais le verdict d'un
-/// crash, et depuis #201 il lui substituait la présomption de mort mémoire —
-/// dire quelque chose d'inexact étant pire que se taire.
+/// Twin of [`join_jetsam`], called from `smeltr analyze` **and** from the MCP
+/// `get_session_summary`. Before #204 this work lived in `analyze.rs` and thus
+/// existed only in the CLI: the MCP never surfaced a crash verdict, and since
+/// #201 it substituted the memory-death presumption for it — saying something
+/// inaccurate being worse than staying silent.
 ///
-/// La fenêtre passe par [`window_end_ns`], donc une session jamais finalisée
-/// est couverte elle aussi ; l'ancien bloc exigeait `ended_rfc3339` et sautait
-/// silencieusement ce cas, y compris en CLI.
+/// The window goes through [`window_end_ns`], so a session that was never
+/// finalized is covered too; the old block required `ended_rfc3339` and
+/// silently skipped that case, in the CLI as well.
 pub fn join_crash(report: &mut crate::report::Report, dir: &Path) {
     let Ok(meta) = smeltr_core::reader::read_metadata(dir) else {
         return;
@@ -403,9 +393,9 @@ pub fn join_crash(report: &mut crate::report::Report, dir: &Path) {
     let smeltr_core::session::SessionKind::Scoped { pid, .. } = &meta.kind else {
         return;
     };
-    // Une sortie propre n'est pas un crash. Garde volontairement absente de
-    // `join_jetsam` (un kill jetsam peut laisser le shell rapporter un code
-    // propre), mais légitime ici : ReportCrash n'écrit rien sur un exit 0.
+    // A clean exit is not a crash. This guard is deliberately absent from
+    // `join_jetsam` (a jetsam kill can still let the shell report a clean
+    // code), but legitimate here: ReportCrash writes nothing on an exit 0.
     if meta.exit_code == Some(0) {
         return;
     }
@@ -425,63 +415,59 @@ pub fn join_crash(report: &mut crate::report::Report, dir: &Path) {
     }
 }
 
-/// Signaux d'arrêt demandés par l'utilisateur ou par un superviseur. Écrits
-/// en dur plutôt qu'importés de `libc` : l'analyzer lit des sessions qui
-/// peuvent venir d'une autre machine, et ces deux numéros sont fixés par
-/// POSIX.
+/// Stop signals requested by the user or by a supervisor. Hard-coded rather
+/// than imported from `libc`: the analyzer reads sessions that may come from
+/// another machine, and both numbers are fixed by POSIX.
 const SIGINT: i32 = 2;
 const SIGTERM: i32 = 15;
 
-/// Croissance minimale entre le premier et le dernier échantillon pour
-/// qualifier une pente. Facteur, pas seuil absolu : on ne prétend pas savoir
-/// à partir de quelle taille le noyau frappe, et la limite jetsam par
-/// processus n'est de toute façon pas interrogeable sans droits particuliers.
+/// Minimum growth between the first and last sample to qualify as a slope. A
+/// factor, not an absolute threshold: we do not pretend to know at what size
+/// the kernel strikes, and the per-process jetsam limit is not queryable
+/// without special privileges anyway.
 const RISE_FACTOR: f64 = 2.0;
 
-/// Présume une mort par pression mémoire quand aucun rapport n'est joignable.
+/// Presumes a memory-pressure death when no report can be joined.
 ///
-/// Trois conditions, toutes nécessaires :
+/// Three conditions, all necessary:
 ///
-/// 1. **La session s'est terminée, et anormalement.** C'est le code de sortie
-///    qui le dit, pas le flux d'événements : `finalize()` écrit `SessionEnded`
-///    même quand l'enfant a été tué, parce que le client `record` survit au
-///    kill et détache proprement (#201). `Some(-1)` vient de
-///    `status.code().unwrap_or(-1)` et signifie « tué par un signal ». Une
-///    sortie propre (`Some(0)`) comme un échec ordinaire (`Some(1)`) sont
-///    exclus.
+/// 1. **The session ended, and ended abnormally.** The exit code says so, not
+///    the event stream: `finalize()` writes `SessionEnded` even when the child
+///    was killed, because the `record` client survives the kill and detaches
+///    cleanly (#201). `Some(-1)` comes from `status.code().unwrap_or(-1)` and
+///    means "killed by a signal". A clean exit (`Some(0)`) and an ordinary
+///    failure (`Some(1)`) are both excluded.
 ///
-///    Le cas `None` demande une garde supplémentaire. Il couvre deux formes
-///    de fin anormale — le daemon a finalisé sur déconnexion du client, ou la
-///    reprise au boot a rattrapé une session orpheline — mais aussi une
-///    session **encore en cours**, dont le code de sortie n'existe pas
-///    encore. Sans distinction, un `smeltr analyze --last` pendant un long
-///    run annoncerait une fin anormale sur une session qui se porte bien.
-///    Or tout chemin de finalisation écrit `ended_rfc3339` : `finalize()` le
-///    pose avec le code de sortie (`writer.rs`), et la reprise au boot le
-///    pose aussi (`recovery.rs`). Son absence signifie donc exactement
-///    « session vivante », et c'est ce qu'on exclut.
-/// 2. **L'empreinte montait.** Le premier échantillon est le tout premier tic
-///    de la sonde, avant que l'enfant ait exec'é sa charge, donc la pente
-///    seule ne prouve rien — d'où la condition 1.
-/// 3. **Aucune cause racine n'est déjà établie.** Un SIGSEGV donne aussi
-///    `-1` ; s'il a été joint en amont, le verdict prime sur la supposition.
+///    The `None` case needs an extra guard. It covers two shapes of abnormal
+///    ending — the daemon finalized on client disconnect, or boot recovery
+///    caught an orphaned session — but also a session **still running**, whose
+///    exit code does not exist yet. Without the distinction, a `smeltr analyze
+///    --last` during a long run would announce an abnormal ending on a session
+///    that is doing fine. Every finalization path writes `ended_rfc3339`:
+///    `finalize()` sets it along with the exit code (`writer.rs`), and boot
+///    recovery sets it too (`recovery.rs`). Its absence therefore means
+///    exactly "session alive", and that is what we exclude.
+/// 2. **The footprint was rising.** The first sample is the probe's very first
+///    tick, before the child has exec'd its workload, so the slope alone
+///    proves nothing — hence condition 1.
+/// 3. **No root cause is already established.** A SIGSEGV also yields `-1`; if
+///    one was joined upstream, the verdict outranks the guess.
 fn presume_memory_death(
     meta: &smeltr_core::session::SessionMetadata,
     events: &[Event],
     report: &crate::report::Report,
 ) -> Option<Finding> {
-    // Un arrêt demandé par l'utilisateur n'est pas une mort mémoire. Ctrl-C
-    // envoie SIGINT à tout le groupe de processus au premier plan, et un run
-    // long franchit toujours le facteur de croissance : sans cette garde, le
-    // geste normal pour interrompre une inférence produirait une présomption
-    // de pression mémoire (#203).
+    // A user-requested stop is not a memory death. Ctrl-C sends SIGINT to the
+    // whole foreground process group, and a long run always clears the growth
+    // factor: without this guard, the normal gesture for interrupting an
+    // inference would produce a memory-pressure presumption (#203).
     if matches!(meta.term_signal, Some(SIGINT) | Some(SIGTERM)) {
         return None;
     }
     let ended_abnormally = match meta.exit_code {
         Some(-1) => true,
-        // Pas de code de sortie : fin anormale seulement si la session est
-        // bel et bien terminée. Sinon elle est en cours — voir ci-dessus.
+        // No exit code: abnormal ending only if the session really has ended.
+        // Otherwise it is still running — see above.
         None => meta.ended_rfc3339.is_some(),
         _ => false,
     };
@@ -513,43 +499,43 @@ fn presume_memory_death(
         return None;
     }
 
-    // Go décimal (1e9), comme `jetsam_finding` : macOS et les rapports jetsam
-    // expriment les empreintes ainsi, et deux findings sur le même fait dans
-    // deux unités différentes ne se comparent pas.
+    // Decimal GB (1e9), like `jetsam_finding`: macOS and the jetsam reports
+    // express footprints that way, and two findings about the same fact in two
+    // different units do not compare.
     let gb = |b: u64| b as f64 / 1_000_000_000.0;
     Some(
         Finding::new(
             Severity::Warning,
             Category::ContributingFactor,
-            "L'empreinte mémoire montait et la session s'est terminée anormalement",
+            "Memory footprint was rising and the session ended abnormally",
         )
         .with_detail(format!(
-            "L'empreinte du processus tracé est passée de {:.2} à {:.2} Go, \
-             et la session ne s'est pas terminée proprement, sans qu'aucun \
-             rapport jetsam ne soit joignable. Une mort par pression mémoire \
-             est possible : le processus disparaît alors sans traceback ni \
-             exception. Vérifiez /Library/Logs/DiagnosticReports pour un \
-             JetsamEvent-*.ips postérieur à la session — il peut être écrit \
-             après coup. Ceci est une présomption, pas un verdict.",
+            "The traced process's footprint went from {:.2} to {:.2} GB, and \
+             the session did not end cleanly, with no jetsam report joinable. \
+             A memory-pressure death is possible: the process then vanishes \
+             with no traceback and no exception. Check \
+             /Library/Logs/DiagnosticReports for a JetsamEvent-*.ips later \
+             than the session — it can be written after the fact. This is a \
+             presumption, not a verdict.",
             gb(first),
             gb(last)
         ))
         .with_evidence(EvidenceRef {
             seq: first_ev.seq,
             ts_mono_ns: first_ev.ts_mono_ns,
-            description: format!("empreinte initiale {:.2} Go", gb(first)),
+            description: format!("initial footprint {:.2} GB", gb(first)),
         })
         .with_evidence(EvidenceRef {
             seq: last_ev.seq,
             ts_mono_ns: last_ev.ts_mono_ns,
-            description: format!("dernière empreinte {:.2} Go", gb(last)),
+            description: format!("last footprint {:.2} GB", gb(last)),
         }),
     )
 }
 
-/// Même parsing que `analyze.rs` : les timestamps des métadonnées sont du
-/// vrai wall-clock, contrairement aux `ts_wall_ns` des événements qui
-/// dérivent de l'horloge monotone et s'arrêtent en veille (#153).
+/// Same parsing as `analyze.rs`: metadata timestamps are true wall-clock,
+/// unlike the events' `ts_wall_ns` which derive from the monotonic clock and
+/// stop during sleep (#153).
 pub fn rfc3339_unix_ns(s: &str) -> Option<u64> {
     use time::format_description::well_known::Rfc3339;
     let t = time::OffsetDateTime::parse(s, &Rfc3339).ok()?;
@@ -643,12 +629,12 @@ mod tests {
         .expect("no join");
         assert_eq!(j.killed_pid, 4242);
         assert_eq!(j.killed_name, "python");
-        // 1 310 720 pages × 16 Ko = 21,47 Go — la signature du bug ltx-2-mlx #74.
+        // 1,310,720 pages * 16 KB = 21.47 GB — the signature of ltx-2-mlx #74.
         assert_eq!(j.footprint_bytes, 1_310_720 * 16_384);
     }
 
-    /// Le garde-fou contre la fausse cause racine : un kill jetsam d'un AUTRE
-    /// processus ne doit jamais être attribué au run analysé.
+    /// The guard against a false root cause: ANOTHER process's jetsam kill must
+    /// never be attributed to the run under analysis.
     #[test]
     fn does_not_join_jetsam_report_of_another_pid() {
         let tmp = tempfile::tempdir().unwrap();
@@ -666,14 +652,14 @@ mod tests {
         .is_none());
     }
 
-    /// Second garde-fou : hors de la fenêtre wall-clock, pas de jointure.
+    /// Second guard: outside the wall-clock window, no join.
     #[test]
     fn does_not_join_jetsam_report_outside_window() {
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("JetsamEvent-2026-08-09-123716.ips");
         std::fs::write(&f, JETSAM).unwrap();
         let (start, _end) = window_around(&f);
-        // Fenêtre fermée bien avant l'écriture du fichier.
+        // Window closed well before the file was written.
         assert!(find_jetsam_report(
             &[tmp.path().to_path_buf()],
             &[4242],
@@ -685,7 +671,7 @@ mod tests {
         .is_none());
     }
 
-    /// Un rapport de crash ordinaire n'est pas un rapport jetsam.
+    /// An ordinary crash report is not a jetsam report.
     #[test]
     fn regular_crash_report_is_not_joined_as_jetsam() {
         let tmp = tempfile::tempdir().unwrap();
@@ -703,9 +689,9 @@ mod tests {
         .is_none());
     }
 
-    /// Le répertoire SYSTÈME doit être dans la liste : c'est là que macOS
-    /// écrit les JetsamEvent-*.ips. Vérifié sur la machine : 0 fichier jetsam
-    /// dans ~/Library/Logs/DiagnosticReports, 1 dans /Library/Logs/DiagnosticReports.
+    /// The SYSTEM directory must be in the list: that is where macOS writes
+    /// JetsamEvent-*.ips. Verified on the machine: 0 jetsam files in
+    /// ~/Library/Logs/DiagnosticReports, 1 in /Library/Logs/DiagnosticReports.
     #[test]
     #[serial_test::serial]
     fn jetsam_dirs_include_the_system_directory() {
@@ -732,8 +718,8 @@ mod tests {
         assert_eq!(f.category, Category::RootCause);
         assert!(f.detail.contains("21"), "detail: {}", f.detail);
         assert!(f.detail.contains("jetsam") || f.title.contains("jetsam"));
-        // Le POURQUOI du kill doit être rendu : c'est la question à laquelle
-        // la fonctionnalité existe pour répondre.
+        // The WHY of the kill must be surfaced: it is the question this
+        // feature exists to answer.
         assert!(
             f.detail.contains("per-process-limit"),
             "detail: {}",
@@ -741,8 +727,8 @@ mod tests {
         );
     }
 
-    /// Sans motif rendu par le noyau, le finding reste lisible : pas de
-    /// « Motif : None » ni de phrase amputée.
+    /// With no kernel-reported reason the finding stays readable: no
+    /// "Reason: None" and no truncated sentence.
     #[test]
     fn jetsam_finding_without_a_reason_stays_clean() {
         let j = JetsamJoin {
@@ -754,7 +740,7 @@ mod tests {
             reason: None,
         };
         let f = jetsam_finding(&j);
-        assert!(!f.detail.contains("Motif"), "detail: {}", f.detail);
+        assert!(!f.detail.contains("Reason"), "detail: {}", f.detail);
         assert!(!f.detail.contains("None"), "detail: {}", f.detail);
     }
 
@@ -769,9 +755,9 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
 
-        // La session démarre avant que le rapport jetsam ne soit écrit,
-        // comme dans la vraie chronologie (#153) : le kill puis le rapport
-        // arrivent après le début de la session.
+        // The session starts before the jetsam report is written, as in the
+        // real chronology (#153): the kill, then the report, both land after
+        // the session began.
         let id = SessionId::new();
         let mut meta = SessionMetadata::now_starting(id);
         meta.kind = SessionKind::Scoped {
@@ -800,9 +786,9 @@ mod tests {
         assert_eq!(report.findings[0].category, Category::RootCause);
     }
 
-    /// Construit une session scopée sur disque : métadonnées (départ, fin,
-    /// argv) et flux d'événements maîtrisés, ce qu'aucun helper existant ne
-    /// permet — `SessionWriter::create` date toujours le départ à maintenant.
+    /// Builds a scoped session on disk with controlled metadata (start, end,
+    /// argv) and event stream, which no existing helper allows —
+    /// `SessionWriter::create` always dates the start to now.
     fn scoped_session(
         home: &Path,
         pid: u32,
@@ -814,7 +800,7 @@ mod tests {
         use smeltr_core::session::{SessionId, SessionKind, SessionMetadata};
         use smeltr_core::writer::SessionWriter;
 
-        // SMELTR_HOME est déjà positionné par l'appelant (test #[serial]).
+        // SMELTR_HOME is already set by the caller (a #[serial] test).
         let _ = home;
         let id = SessionId::new();
         let mut meta = SessionMetadata::now_starting(id);
@@ -827,7 +813,7 @@ mod tests {
         w.flush().unwrap();
         drop(w);
 
-        // Réécrit les horodatages APRÈS coup : le writer impose "maintenant".
+        // Rewrite the timestamps AFTERWARDS: the writer forces "now".
         let mut meta = smeltr_core::reader::read_metadata(&dir).unwrap();
         meta.started_rfc3339 = started.to_string();
         meta.ended_rfc3339 = ended.map(str::to_string);
@@ -863,10 +849,10 @@ mod tests {
         time::OffsetDateTime::now_utc().unix_timestamp_nanos() as u64
     }
 
-    /// Le bord non borné : une session jamais finalisée — exactement ce que
-    /// jetsam produit — voyait sa fenêtre courir jusqu'à MAINTENANT. Une
-    /// session de mai analysée aujourd'hui avale ainsi tout rapport jetsam
-    /// des semaines suivantes, sur la seule foi d'un PID que macOS recycle.
+    /// The unbounded edge: a session that was never finalized — exactly what
+    /// jetsam produces — used to have its window run all the way to NOW. A May
+    /// session analyzed today would thus swallow every jetsam report of the
+    /// following weeks, on the sole strength of a PID that macOS recycles.
     #[test]
     #[serial_test::serial]
     fn unfinalized_session_does_not_swallow_a_much_later_report() {
@@ -875,8 +861,8 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
 
-        // Dernier événement il y a une heure ; la session n'a jamais été
-        // finalisée (pas d'`ended_rfc3339`), comme après un kill jetsam.
+        // Last event an hour ago; the session was never finalized (no
+        // `ended_rfc3339`), as after a jetsam kill.
         let hour_ago = now_ns().saturating_sub(3_600_000_000_000);
         let dir = scoped_session(
             home.path(),
@@ -887,8 +873,8 @@ mod tests {
             &[footprint_ev(1, hour_ago, 4242, "python", true)],
         );
 
-        // Le rapport, lui, est écrit MAINTENANT : bien après la fin réelle
-        // de la session.
+        // The report itself is written NOW: well after the session really
+        // ended.
         let f = reports.path().join("JetsamEvent-2026-08-09-123716.ips");
         std::fs::write(&f, JETSAM).unwrap();
 
@@ -902,13 +888,13 @@ mod tests {
 
         assert!(
             report.findings.is_empty(),
-            "fenêtre non bornée : {:#?}",
+            "unbounded window: {:#?}",
             report.findings
         );
     }
 
-    /// Le repli borné reste utile : un rapport écrit juste après le dernier
-    /// événement d'une session non finalisée doit toujours être joint.
+    /// The bounded fallback stays useful: a report written right after the last
+    /// event of an unfinalized session must still be joined.
     #[test]
     #[serial_test::serial]
     fn unfinalized_session_still_joins_a_report_written_right_after() {
@@ -939,8 +925,8 @@ mod tests {
         assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
     }
 
-    /// Le PID seul ne suffit pas : macOS les recycle. Quand les deux côtés
-    /// donnent un nom et qu'ils divergent, pas de jointure.
+    /// The PID alone is not enough: macOS recycles them. When both sides give
+    /// a name and the names diverge, no join.
     #[test]
     #[serial_test::serial]
     fn name_mismatch_rejects_the_join() {
@@ -949,8 +935,8 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
 
-        // Le rapport nomme "python" ; cette session-là est un run ruby qui
-        // a simplement réutilisé le PID 4242.
+        // The report names "python"; this session is a ruby run that simply
+        // reused PID 4242.
         let dir = scoped_session(
             home.path(),
             4242,
@@ -972,15 +958,15 @@ mod tests {
 
         assert!(
             report.findings.is_empty(),
-            "nom incompatible joint quand même : {:#?}",
+            "incompatible name joined anyway: {:#?}",
             report.findings
         );
     }
 
-    /// Les deux côtés tronquent différemment : `pbi_comm` fait 16 octets
-    /// (MAXCOMLEN), le `name` d'un rapport jetsam ~32 (observé sur cette
-    /// machine : "com.apple.Virtualization.Virtual", 32 caractères). Comparer
-    /// à égalité rejetterait le vrai cas — on compare par préfixe.
+    /// The two sides truncate differently: `pbi_comm` is 16 bytes (MAXCOMLEN),
+    /// a jetsam report's `name` runs to ~32 (observed on this machine:
+    /// "com.apple.Virtualization.Virtual", 32 characters). Comparing for
+    /// equality would reject the real case — we compare by prefix.
     #[test]
     fn truncated_names_match_by_prefix() {
         assert!(names_compatible(
@@ -989,13 +975,13 @@ mod tests {
         ));
         assert!(names_compatible("python", "python"));
         assert!(!names_compatible("ruby", "python"));
-        // Un nom vide n'apporte aucune information : il ne prouve rien.
+        // An empty name carries no information: it proves nothing.
         assert!(!names_compatible("", "python"));
     }
 
-    /// Sans nom d'un côté, on ne rejette pas : PID + fenêtre restent les
-    /// gardes, comme avant. Rejeter ferait rater le kill que la
-    /// fonctionnalité existe pour attraper.
+    /// With no name on one side we do not reject: PID + window remain the
+    /// guards, as before. Rejecting would miss the very kill this feature
+    /// exists to catch.
     #[test]
     #[serial_test::serial]
     fn missing_name_falls_back_to_pid_and_window() {
@@ -1004,7 +990,7 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
 
-        // Ni argv ni ProcFootprint : aucun nom côté session.
+        // Neither argv nor ProcFootprint: no name on the session side.
         let dir = scoped_session(
             home.path(),
             4242,
@@ -1031,12 +1017,11 @@ mod tests {
         assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
     }
 
-    /// Le cas normal du projet, pas un cas limite : sous `uv run` /
-    /// `poetry run` / `python -m`, le processus qui meurt est un
-    /// petit-enfant dont le PID diffère de celui de l'enfant lancé — c'est
-    /// la raison d'être de `SMELTR_SCOPE_TOKEN` (#31). Le rapport jetsam
-    /// nomme le petit-enfant ; ne regarder que le PID scopé rendait le
-    /// silence exactement dans le cas visé.
+    /// This project's normal case, not an edge case: under `uv run` /
+    /// `poetry run` / `python -m`, the process that dies is a grandchild whose
+    /// PID differs from the spawned child's — that is what `SMELTR_SCOPE_TOKEN`
+    /// exists for (#31). The jetsam report names the grandchild; looking only
+    /// at the scoped PID produced silence in exactly the targeted case.
     #[test]
     #[serial_test::serial]
     fn joins_a_grandchild_pid_seen_in_footprint_samples() {
@@ -1045,8 +1030,8 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
 
-        // La session est scopée sur le lanceur (`uv`, PID 9999) ; le vrai
-        // travail — et le kill — est sur le petit-enfant python 4242.
+        // The session is scoped on the launcher (`uv`, PID 9999); the real
+        // work — and the kill — is on the python grandchild 4242.
         let dir = scoped_session(
             home.path(),
             9999,
@@ -1077,8 +1062,8 @@ mod tests {
         );
     }
 
-    /// Élargir aux PID observés ne doit pas ouvrir la porte : un PID que la
-    /// session n'a jamais vu reste sans jointure.
+    /// Widening to observed PIDs must not open the floodgates: a PID the
+    /// session never saw still gets no join.
     #[test]
     #[serial_test::serial]
     fn an_unobserved_pid_still_does_not_join() {
@@ -1125,9 +1110,9 @@ mod tests {
         assert!(f.detail.contains("/x/Python.ips"));
     }
 
-    // ---- présomption de mort mémoire (#201) ----
+    // ---- memory-death presumption (#201) ----
 
-    /// Variante de `footprint_ev` avec une empreinte choisie.
+    /// Variant of `footprint_ev` with a chosen footprint.
     fn footprint_bytes_ev(
         seq: u64,
         ts_wall_ns: u64,
@@ -1159,7 +1144,7 @@ mod tests {
         smeltr_core::session::write_metadata(dir, &meta).unwrap();
     }
 
-    /// Comme `risk_case`, mais en précisant le signal ayant tué l'enfant.
+    /// Like `risk_case`, but specifying the signal that killed the child.
     fn risk_case_signal(home: &Path, sig: Option<i32>) -> Vec<Finding> {
         let t = now_ns();
         let evs = vec![
@@ -1189,8 +1174,8 @@ mod tests {
         }
     }
 
-    /// Prépare une session scopée avec empreinte, fin et code de sortie
-    /// choisis, puis joint. Retourne les findings produits.
+    /// Prepares a scoped session with chosen footprint, ending and exit code,
+    /// then joins. Returns the findings produced.
     fn risk_case(
         home: &Path,
         first: u64,
@@ -1217,8 +1202,8 @@ mod tests {
         report.findings
     }
 
-    /// LE cas que #201 rouvre : l'enfant est tué par un signal, aucun rapport
-    /// jetsam n'est joignable, et l'empreinte montait. La présomption sort.
+    /// THE case #201 reopens: the child is killed by a signal, no jetsam
+    /// report is joinable, and the footprint was rising. The presumption fires.
     #[test]
     #[serial_test::serial]
     fn killed_by_signal_with_rising_footprint_yields_the_presumption() {
@@ -1234,15 +1219,15 @@ mod tests {
         assert_eq!(f[0].severity, Severity::Warning);
         assert_eq!(f[0].category, Category::ContributingFactor);
         assert!(
-            f[0].detail.contains("possible") || f[0].detail.contains("peut"),
-            "le ton doit rester une présomption : {}",
+            f[0].detail.contains("possible") || f[0].detail.contains("presumption"),
+            "the wording must stay a presumption: {}",
             f[0].detail
         );
     }
 
-    /// Le défaut d'origine : un run SAIN qui alloue beaucoup et se termine
-    /// proprement ne doit rien produire. C'est ce que la première version
-    /// de la règle faisait crier sur tous les runs.
+    /// The original defect: a HEALTHY run that allocates heavily and ends
+    /// cleanly must produce nothing. That is what the rule's first version
+    /// shouted about on every run.
     #[test]
     #[serial_test::serial]
     fn clean_exit_with_rising_footprint_yields_nothing() {
@@ -1263,7 +1248,7 @@ mod tests {
         assert!(f.is_empty(), "un run sain ne doit rien produire : {f:#?}");
     }
 
-    /// Un programme qui échoue normalement (exit 1) n'est pas une mort mémoire.
+    /// A program failing normally (exit 1) is not a memory death.
     #[test]
     #[serial_test::serial]
     fn ordinary_failure_exit_yields_nothing() {
@@ -1284,7 +1269,7 @@ mod tests {
         assert!(f.is_empty(), "{f:#?}");
     }
 
-    /// Empreinte plate + mort par signal : rien à présumer côté mémoire.
+    /// Flat footprint plus a signal death: nothing to presume about memory.
     #[test]
     #[serial_test::serial]
     fn killed_by_signal_without_rising_footprint_yields_nothing() {
@@ -1299,9 +1284,9 @@ mod tests {
         assert!(f.is_empty(), "{f:#?}");
     }
 
-    /// Sans code de sortie mais AVEC une fin datée : le daemon a finalisé sur
-    /// déconnexion du client, ou la reprise au boot a rattrapé une session
-    /// orpheline. Fin anormale, la présomption sort.
+    /// No exit code but WITH a dated ending: the daemon finalized on client
+    /// disconnect, or boot recovery caught an orphaned session. Abnormal
+    /// ending, so the presumption fires.
     #[test]
     #[serial_test::serial]
     fn finalized_without_exit_code_counts_as_abnormal() {
@@ -1323,10 +1308,10 @@ mod tests {
         assert_eq!(f[0].severity, Severity::Warning);
     }
 
-    /// #204 : la jointure de crash doit couvrir une session JAMAIS finalisée.
-    /// L'ancien bloc de `analyze.rs` exigeait `ended_rfc3339` et sautait donc
-    /// silencieusement ce cas, y compris en CLI — alors que c'est exactement
-    /// la forme que produit une mort brutale.
+    /// #204: the crash join must cover a session that was NEVER finalized. The
+    /// old block in `analyze.rs` required `ended_rfc3339` and therefore
+    /// silently skipped this case, in the CLI too — while that is exactly the
+    /// shape a violent death produces.
     #[test]
     #[serial_test::serial]
     fn join_crash_covers_a_never_finalized_session() {
@@ -1335,8 +1320,8 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
 
-        // Un événement daté maintenant : c'est lui qui borne la fenêtre en
-        // l'absence de `ended_rfc3339`.
+        // An event stamped now: it is what bounds the window in the absence of
+        // `ended_rfc3339`.
         let evs = vec![footprint_ev(1, now_ns(), 11672, "python3", true)];
         let dir = scoped_session(
             home.path(),
@@ -1358,8 +1343,7 @@ mod tests {
         assert!(report.findings[0].title.contains("crashed"));
     }
 
-    /// Une sortie propre n'est pas un crash : garde conservée depuis
-    /// `analyze.rs`.
+    /// A clean exit is not a crash: guard carried over from `analyze.rs`.
     #[test]
     #[serial_test::serial]
     fn join_crash_skips_a_clean_exit() {
@@ -1387,9 +1371,9 @@ mod tests {
         assert!(report.findings.is_empty(), "{:#?}", report.findings);
     }
 
-    /// Un crash prime sur la présomption mémoire : `join_crash` pose la cause
-    /// racine, que `presume_memory_death` voit ensuite et respecte. C'est le
-    /// scénario que le chemin MCP misattribuait avant #204.
+    /// A crash outranks the memory presumption: `join_crash` sets the root
+    /// cause, which `presume_memory_death` then sees and honors. This is the
+    /// scenario the MCP path misattributed before #204.
     #[test]
     #[serial_test::serial]
     fn a_crash_suppresses_the_memory_presumption() {
@@ -1403,10 +1387,10 @@ mod tests {
             footprint_bytes_ev(1, t, 11672, 4_000_000_000),
             footprint_bytes_ev(2, t + 1_000_000_000, 11672, 18_000_000_000),
         ];
-        // `ended` absent : la fenêtre se borne au dernier événement, daté de
-        // maintenant, donc elle couvre la mtime du rapport qu'on vient
-        // d'écrire. Une date de fin figée dans le passé le mettrait hors
-        // fenêtre et le test testerait autre chose.
+        // `ended` absent: the window bounds on the last event, stamped now, so
+        // it covers the mtime of the report written just below. An end date
+        // frozen in the past would put it out of window and the test would be
+        // testing something else.
         let dir = scoped_session(
             home.path(),
             11672,
@@ -1426,16 +1410,16 @@ mod tests {
         assert_eq!(
             report.findings.len(),
             1,
-            "le crash doit primer, sans présomption ajoutée : {:#?}",
+            "the crash must win, with no presumption added: {:#?}",
             report.findings
         );
         assert_eq!(report.findings[0].category, Category::RootCause);
     }
 
-    /// #203 : un Ctrl-C est un arrêt demandé, pas une mort mémoire. C'est le
-    /// geste normal pour interrompre une inférence qui traîne, et un run long
-    /// franchit toujours le facteur de croissance — sans cette garde, arrêter
-    /// volontairement un run produirait une présomption de pression mémoire.
+    /// #203: a Ctrl-C is a requested stop, not a memory death. It is the normal
+    /// gesture for interrupting an inference that drags on, and a long run
+    /// always clears the growth factor — without this guard, deliberately
+    /// stopping a run would produce a memory-pressure presumption.
     #[test]
     #[serial_test::serial]
     fn sigint_is_a_requested_stop_not_a_memory_death() {
@@ -1447,10 +1431,10 @@ mod tests {
         let f = risk_case_signal(home.path(), Some(2)); // SIGINT
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
 
-        assert!(f.is_empty(), "un Ctrl-C ne doit rien présumer : {f:#?}");
+        assert!(f.is_empty(), "a Ctrl-C must presume nothing: {f:#?}");
     }
 
-    /// SIGTERM a la même nature : arrêt demandé par un superviseur.
+    /// SIGTERM has the same nature: a stop requested by a supervisor.
     #[test]
     #[serial_test::serial]
     fn sigterm_is_a_requested_stop_too() {
@@ -1465,8 +1449,8 @@ mod tests {
         assert!(f.is_empty(), "{f:#?}");
     }
 
-    /// SIGKILL reste une mort subie : c'est ce que fait jetsam, la présomption
-    /// doit sortir. C'est l'autre moitié de la discrimination.
+    /// SIGKILL remains a death suffered: that is what jetsam does, so the
+    /// presumption must fire. This is the other half of the discrimination.
     #[test]
     #[serial_test::serial]
     fn sigkill_still_yields_the_presumption() {
@@ -1482,8 +1466,8 @@ mod tests {
         assert_eq!(f[0].severity, Severity::Warning);
     }
 
-    /// Sessions antérieures à #203 : `term_signal` absent. On ne doit pas
-    /// perdre le signal pour autant — le comportement retombe sur `exit_code`.
+    /// Sessions predating #203: `term_signal` is absent. We must not lose the
+    /// signal for that — the behavior falls back to `exit_code`.
     #[test]
     #[serial_test::serial]
     fn a_session_without_a_recorded_signal_still_works() {
@@ -1498,10 +1482,10 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:#?}");
     }
 
-    /// Le faux positif à ne surtout pas laisser passer : une session ENCORE
-    /// EN COURS n'a ni code de sortie ni fin datée, et son empreinte monte
-    /// forcément. Un `smeltr analyze --last` pendant un long run ne doit pas
-    /// annoncer une fin anormale sur une session qui se porte bien.
+    /// The false positive to keep out at all costs: a session STILL RUNNING has
+    /// neither exit code nor dated ending, and its footprint necessarily
+    /// rises. A `smeltr analyze --last` during a long run must not announce an
+    /// abnormal ending on a session that is doing fine.
     #[test]
     #[serial_test::serial]
     fn live_in_progress_session_yields_nothing() {
@@ -1510,18 +1494,18 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
 
-        // Ni `ended`, ni `exit_code` : la forme exacte d'une session vivante.
+        // Neither `ended` nor `exit_code`: the exact shape of a live session.
         let f = risk_case(home.path(), 4_000_000_000, 18_000_000_000, None, None);
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
 
         assert!(
             f.is_empty(),
-            "une session en cours ne s'est pas terminée anormalement : {f:#?}"
+            "a running session has not ended abnormally: {f:#?}"
         );
     }
 
-    /// Quand une cause racine est déjà établie (crash joint en amont), la
-    /// présomption mémoire se tait : un verdict prime sur une supposition.
+    /// When a root cause is already established (a crash joined upstream), the
+    /// memory presumption stays quiet: a verdict outranks a guess.
     #[test]
     #[serial_test::serial]
     fn existing_root_cause_suppresses_the_presumption() {

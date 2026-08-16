@@ -11,7 +11,7 @@ macOS: 26.5 (25F71)
 MLX version: 0.31.2
 Python: 3.10.20
 
-## Task 0 — Pré-flight
+## Task 0 — Pre-flight
 
 - [x] cargo build --workspace --release: OK
 - [x] make -C metal-hook clean all: OK
