@@ -77,7 +77,7 @@ pub struct SessionMetadata {
     /// difference, so the raw number is kept here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub term_signal: Option<i32>,
-    /// Chemin du `.gputrace` capturé, quand `--gputrace` l'a demandé.
+    /// Path of the captured `.gputrace`, when `--gputrace` asked for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gputrace_path: Option<String>,
 }

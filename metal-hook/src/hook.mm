@@ -55,7 +55,7 @@ static uint32_t          g_gputrace_target_cbs = 0;   // 0 = disabled
 static const char       *g_gputrace_path = NULL;
 static atomic_uint       g_gputrace_committed = 0;
 static atomic_bool       g_gputrace_armed = false;   // tentative faite
-static atomic_bool       g_gputrace_started = false; // capture réellement en cours
+static atomic_bool       g_gputrace_started = false; // capture actually running
 static atomic_bool       g_gputrace_stopped = false;
 
 static BOOL g_stage_sampling_enabled = NO;
@@ -1003,14 +1003,14 @@ static void smeltr_gputrace_maybe_start(id<MTLCommandBuffer> cb) {
         [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
 
         MTLCaptureDescriptor *desc = [[MTLCaptureDescriptor alloc] init];
-        // `g_device`, et surtout PAS `[cb device]` ni `[cb commandQueue]`.
-        // Le hook swizzle sous la couche de capture : ces deux-là rendent les
-        // objets BRUTS (AGXG14SDevice, AGXG14XFamilyCommandQueue), auxquels
-        // Metal envoie `traceStream` — sélecteur inconnu, capture avortée.
-        // `g_device` vient de `MTLCreateSystemDefaultDevice()`, qui sous
-        // MTL_CAPTURE_ENABLED rend bien l'enveloppe CaptureMTLDevice. Le
-        // descripteur EXIGE un objet : l'omettre échoue sur « Capture Object
-        // property is not set ».
+        // `g_device`, and emphatically NOT `[cb device]` or `[cb commandQueue]`.
+        // The hook swizzles below the capture layer: those two return the RAW
+        // objects (AGXG14SDevice, AGXG14XFamilyCommandQueue), to which Metal
+        // sends `traceStream` — unknown selector, capture aborted. `g_device`
+        // comes from `MTLCreateSystemDefaultDevice()`, which under
+        // MTL_CAPTURE_ENABLED does return the CaptureMTLDevice wrapper. The
+        // descriptor REQUIRES an object: omitting it fails with "Capture Object
+        // property is not set".
         (void)cb;
         if (!g_device) {
             smeltr_log("gputrace: no device cached, cannot capture");
@@ -1026,9 +1026,9 @@ static void smeltr_gputrace_maybe_start(id<MTLCommandBuffer> cb) {
                        err ? [[err localizedDescription] UTF8String] : "unknown");
             return;
         }
-        // Seulement maintenant : un `started` posé avant de savoir si
-        // startCapture a réussi faisait annoncer un arrêt de capture qui
-        // n'avait jamais commencé.
+        // Only now: setting `started` before knowing whether startCapture
+        // succeeded made the hook announce the stop of a capture that had
+        // never begun.
         atomic_store_explicit(&g_gputrace_started, true, memory_order_release);
         smeltr_log("gputrace: capturing %u command buffer(s) to %s",
                    g_gputrace_target_cbs, g_gputrace_path);
@@ -1052,12 +1052,12 @@ static void smeltr_gputrace_note_commit(void) {
             memory_order_acq_rel, memory_order_relaxed)) {
         return;
     }
-    // HORS du chemin de commit. Appeler `stopCapture` ici même interbloque :
-    // on est au milieu d'un `-commit` Metal, qui détient ses verrous
-    // internes, et la couche de capture veut les mêmes pour finaliser son
-    // document. Observé sur un vrai run comme sur dix matmuls : le processus
-    // reste bloqué et le bundle sort sans fichier d'index, donc illisible
-    // par Xcode. On défère sur une file globale.
+    // OFF the commit path. Calling `stopCapture` right here deadlocks: we are
+    // in the middle of a Metal `-commit`, which holds its internal locks, and
+    // the capture layer wants the same ones to finalize its document. Observed
+    // on a real run as well as on ten matmuls: the process hangs and the
+    // bundle comes out with no index file, hence unreadable by Xcode. Defer to
+    // a global queue.
     const char *path = g_gputrace_path;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         @try {
@@ -1374,8 +1374,8 @@ static void smeltr_gputrace_note_commit(void) {
 static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb) {
     // Armer ici et pas dans le swizzle de -commandBuffer : MLX obtient ses
     // command buffers par -commandBufferWithDescriptor:, un chemin distinct.
-    // Cette fonction est le point de passage obligé des trois chemins, donc
-    // le seul endroit où l'armement est sûr de s'exécuter.
+    // This function is the choke point of all three paths, hence the only
+    // place where arming is guaranteed to run.
     smeltr_gputrace_maybe_start(cb);
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -1626,8 +1626,8 @@ static void smeltr_swizzle_device_class(void) {
                 }
             }
             smeltr_recalibration_init(d);
-            // Capture Metal programmatique : strictement opt-in, les deux
-            // variables n'étant posées que par `smeltr record --gputrace`.
+            // Programmatic Metal capture: strictly opt-in, both variables
+            // being set only by `smeltr record --gputrace`.
             const char *gt_n = getenv("SMELTR_HOOK_GPUTRACE_CBS");
             const char *gt_p = getenv("SMELTR_HOOK_GPUTRACE_PATH");
             if (gt_n && gt_p && *gt_p) {

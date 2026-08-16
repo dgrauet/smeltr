@@ -23,9 +23,9 @@ fn build_report(dir: &std::path::Path) -> Result<smeltr_analyzer::report::Report
         report.session_short = Some(meta.session_id.short());
     }
 
-    // Les deux jointures rétroactives (#153, #200) vivent dans l'analyzer et
-    // sont appelées à l'identique par le MCP : les avoir ici seulement, c'est
-    // ce qui privait `get_session_summary` du verdict de crash (#204).
+    // Both retroactive joins (#153, #200) live in the analyzer and are called
+    // identically by the MCP layer: having them here only is what deprived
+    // `get_session_summary` of the crash verdict (#204).
     smeltr_analyzer::crash_join::join_crash(&mut report, dir);
     smeltr_analyzer::crash_join::join_jetsam(&mut report, dir);
 

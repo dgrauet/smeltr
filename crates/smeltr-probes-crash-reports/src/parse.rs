@@ -66,29 +66,27 @@ struct JetsamProcess {
     rpages: Option<u64>,
     #[serde(default, rename = "lifetimeMax")]
     lifetime_max: Option<u64>,
-    /// Motif du kill. Présent sur la seule entrée que le noyau a tuée.
+    /// Kill reason. Present on the one entry the kernel actually killed.
     #[serde(default)]
     reason: Option<String>,
-    /// Délai entre le franchissement de la limite et le kill. Second
-    /// marqueur de victime : rien ne garantit que macOS émette toujours les
-    /// deux ensemble.
+    /// Delay between crossing the limit and the kill. Second victim marker:
+    /// nothing guarantees macOS always emits both together.
     #[serde(default, rename = "killDelta")]
     kill_delta: Option<u64>,
 }
 
-/// Extrait le processus tué d'un rapport jetsam.
+/// Extracts the killed process from a jetsam report.
 ///
-/// La victime est l'entrée qui porte un marqueur de kill (`reason` et/ou
-/// `killDelta`). Le tableau `processes` est un instantané de TOUTE la
-/// machine — 908 entrées sur le rapport réel de celle-ci, dont une seule
-/// marquée. `largestProcess` nomme le plus gros processus vivant, pas la
-/// victime : s'en servir attribuait le kill d'un démon de fond au run MLX
-/// analysé, précisément parce qu'un run MLX est le plus gros processus de
-/// la machine.
+/// The victim is the entry carrying a kill marker (`reason` and/or
+/// `killDelta`). The `processes` array is a snapshot of the WHOLE machine —
+/// 908 entries in this machine's real report, exactly one of them marked.
+/// `largestProcess` names the largest live process, not the victim: using it
+/// attributed a background daemon's kill to the MLX run under analysis,
+/// precisely because an MLX run is the largest process on the machine.
 ///
-/// Sans marqueur, on retourne `None`. Pas de repli : un rapport dont on ne
-/// sait pas lire la victime doit produire le silence, jamais une hypothèse
-/// habillée en cause racine Critical.
+/// With no marker we return `None`. No fallback: a report whose victim we
+/// cannot read must produce silence, never a guess dressed up as a Critical
+/// root cause.
 fn parse_jetsam(body_text: &str, path: &str) -> Option<Payload> {
     let body: JetsamBody = serde_json::from_str(body_text).ok()?;
     let page_size = body
@@ -119,9 +117,9 @@ pub fn parse_ips(content: &str, path: &str) -> Option<Payload> {
     // thousands of lines on macOS 15/26 (#151).
     let (header_line, body_text) = content.split_once('\n')?;
 
-    // Un rapport jetsam n'a ni `exception` ni `termination` : sans ce
-    // branchement il se désérialise en un CrashReportEmitted entièrement
-    // vide, ce qui est pire qu'un rejet.
+    // A jetsam report has neither `exception` nor `termination`: without this
+    // branch it deserializes into an entirely empty CrashReportEmitted, which
+    // is worse than a rejection.
     if let Ok(jh) = serde_json::from_str::<JetsamHeader>(header_line) {
         if jh.bug_type.as_deref() == Some("298") {
             return parse_jetsam(body_text, path);
@@ -254,23 +252,23 @@ mod tests {
         assert_eq!(killed_pid, Some(4242));
         assert_eq!(killed_name, "python");
         assert_eq!(page_size, 16384);
-        // 1 310 720 pages × 16 Ko = 21,47 Go — la signature du bug ltx-2-mlx #74.
+        // 1,310,720 pages * 16 KB = 21.47 GB — the signature of ltx-2-mlx #74.
         assert_eq!(footprint_bytes, 1_310_720 * 16_384);
         assert_eq!(lifetime_max_bytes, 1_400_000 * 16_384);
-        // Le POURQUOI du kill : c'est toute la raison d'être de la
-        // fonctionnalité, et il est dans le rapport pour rien si on le jette.
+        // The WHY of the kill: it is the whole point of the feature, and it
+        // sits in the report for nothing if we throw it away.
         assert_eq!(reason.as_deref(), Some("per-process-limit"));
     }
 
-    /// Régression du bug le plus grave de cette branche : `largestProcess`
-    /// nomme le plus gros processus de la MACHINE, pas la victime. Vérifié
-    /// sur le rapport réel de cette machine (908 entrées) : une seule entrée
-    /// porte `reason`/`killDelta` (`knowledgeconstructiond`, 1002 pages),
-    /// tandis que `largestProcess` vaut `com.apple.Virtualization.Virtual`
-    /// (119 425 pages, ni `reason` ni `killDelta` — pas tué).
+    /// Regression for the gravest bug on this branch: `largestProcess` names
+    /// the largest process on the MACHINE, not the victim. Verified against
+    /// this machine's real report (908 entries): exactly one entry carries
+    /// `reason`/`killDelta` (`knowledgeconstructiond`, 1002 pages), while
+    /// `largestProcess` reads `com.apple.Virtualization.Virtual` (119,425
+    /// pages, neither `reason` nor `killDelta` — not killed).
     ///
-    /// Sans ce test, un run MLX sain — qui EST le plus gros processus de la
-    /// machine — se voyait attribuer le kill d'un démon de fond quelconque.
+    /// Without this test, a healthy MLX run — which IS the largest process on
+    /// the machine — got attributed the kill of some background daemon.
     #[test]
     fn victim_is_the_entry_carrying_a_kill_marker_not_the_largest_process() {
         let report = r#"{"bug_type":"298"}
@@ -301,10 +299,10 @@ mod tests {
         assert_eq!(reason.as_deref(), Some("per-process-limit"));
     }
 
-    /// Sans marqueur de kill, aucune victime identifiable : on se tait. Pas
-    /// de repli sur `largestProcess` ni sur le max de `rpages` — une
-    /// hypothèse rendue avec l'autorité d'un verdict Critical est pire que
-    /// le silence.
+    /// With no kill marker there is no identifiable victim, so we stay silent.
+    /// No fallback on `largestProcess`, none on the `rpages` maximum — a guess
+    /// delivered with the authority of a Critical verdict is worse than
+    /// silence.
     #[test]
     fn jetsam_report_without_a_kill_marker_yields_none() {
         let report = r#"{"bug_type":"298"}
@@ -320,8 +318,8 @@ mod tests {
         assert!(parse_ips(report, "/x/jetsam.ips").is_none());
     }
 
-    /// `killDelta` seul suffit : les deux champs marquent le kill, et rien
-    /// ne garantit que macOS les émette toujours ensemble.
+    /// `killDelta` alone is enough: both fields mark the kill, and nothing
+    /// guarantees macOS always emits them together.
     #[test]
     fn kill_delta_alone_marks_the_victim() {
         let report = r#"{"bug_type":"298"}
@@ -345,10 +343,10 @@ mod tests {
         assert_eq!(reason, None);
     }
 
-    /// Régression : avant ce correctif, un rapport jetsam se désérialisait
-    /// silencieusement en un CrashReportEmitted entièrement vide, ce qui est
-    /// pire qu'un rejet — la session disait qu'un rapport existait sans rien
-    /// en dire. Ce test épingle que ça ne peut plus arriver.
+    /// Regression: before this fix a jetsam report silently deserialized into
+    /// an entirely empty CrashReportEmitted, which is worse than a rejection —
+    /// the session claimed a report existed while saying nothing about it.
+    /// This test pins that it can no longer happen.
     #[test]
     fn jetsam_report_is_never_an_empty_crash_report() {
         let p = parse_ips(JETSAM, "/x/jetsam.ips").expect("parse failed");

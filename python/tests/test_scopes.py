@@ -96,16 +96,16 @@ def test_decorator_rejects_async_generator():
         scope("bad")(async_gen)
 
 
-# ---- capture Metal par scope nommé (#216) ----
+# ---- Metal capture by named scope (#216) ----
 
 
 @pytest.fixture
 def _capture_env(monkeypatch, tmp_path):
-    """Arme la capture sur le scope `cible`, dans un chemin jetable."""
+    """Arm the capture on the `target` scope, into a throwaway path."""
     from smeltr import _scopes
 
     path = tmp_path / "run.gputrace"
-    monkeypatch.setenv("SMELTR_GPUTRACE_SCOPE", "cible")
+    monkeypatch.setenv("SMELTR_GPUTRACE_SCOPE", "target")
     monkeypatch.setenv("SMELTR_GPUTRACE_PATH", str(path))
     _scopes._reset_capture_for_tests()
     yield path
@@ -113,7 +113,7 @@ def _capture_env(monkeypatch, tmp_path):
 
 
 class _FakeMetal:
-    """Double de `mx.metal`, pour ne pas déclencher de vraie capture."""
+    """Stand-in for `mx.metal`, so no real capture is triggered."""
 
     def __init__(self):
         self.started = []
@@ -132,7 +132,7 @@ def test_capture_starts_and_stops_on_the_named_scope(_capture_env, monkeypatch):
     fake = _FakeMetal()
     monkeypatch.setattr(_scopes, "_metal_capture_api", lambda: fake)
 
-    with scope("cible"):
+    with scope("target"):
         assert fake.started == [str(_capture_env)]
         assert fake.stopped == 0
     assert fake.stopped == 1
@@ -151,14 +151,14 @@ def test_capture_ignores_other_scopes(_capture_env, monkeypatch):
 
 
 def test_capture_fires_once_even_if_the_scope_repeats(_capture_env, monkeypatch):
-    """Un scope dans une boucle ne doit pas relancer la capture à chaque tour."""
+    """A scope in a loop must not restart the capture on every iteration."""
     from smeltr import _scopes
 
     fake = _FakeMetal()
     monkeypatch.setattr(_scopes, "_metal_capture_api", lambda: fake)
 
     for _ in range(3):
-        with scope("cible"):
+        with scope("target"):
             pass
     assert len(fake.started) == 1
     assert fake.stopped == 1
@@ -171,13 +171,13 @@ def test_capture_stops_even_when_the_body_raises(_capture_env, monkeypatch):
     monkeypatch.setattr(_scopes, "_metal_capture_api", lambda: fake)
 
     with pytest.raises(ValueError):
-        with scope("cible"):
+        with scope("target"):
             raise ValueError("boom")
     assert fake.stopped == 1
 
 
 def test_a_failing_capture_never_breaks_user_code(_capture_env, monkeypatch):
-    """L'observabilité ne doit jamais casser la mesure en cours."""
+    """Observability must never break the measurement under way."""
     from smeltr import _scopes
 
     class _Broken:
@@ -185,12 +185,12 @@ def test_a_failing_capture_never_breaks_user_code(_capture_env, monkeypatch):
             raise RuntimeError("MTL_CAPTURE_ENABLED absent")
 
         def stop_capture(self):
-            raise RuntimeError("rien à arrêter")
+            raise RuntimeError("nothing to stop")
 
     monkeypatch.setattr(_scopes, "_metal_capture_api", lambda: _Broken())
 
     executed = []
-    with scope("cible"):
+    with scope("target"):
         executed.append(True)
     assert executed == [True]
 
@@ -205,6 +205,6 @@ def test_no_capture_without_the_env_vars(monkeypatch):
     fake = _FakeMetal()
     monkeypatch.setattr(_scopes, "_metal_capture_api", lambda: fake)
 
-    with scope("cible"):
+    with scope("target"):
         pass
     assert fake.started == []
