@@ -54,7 +54,8 @@ static BOOL g_op_capture_enabled = YES;  // toggled by SMELTR_HOOK_NO_OPS
 static uint32_t          g_gputrace_target_cbs = 0;   // 0 = disabled
 static const char       *g_gputrace_path = NULL;
 static atomic_uint       g_gputrace_committed = 0;
-static atomic_bool       g_gputrace_started = false;
+static atomic_bool       g_gputrace_armed = false;   // tentative faite
+static atomic_bool       g_gputrace_started = false; // capture réellement en cours
 static atomic_bool       g_gputrace_stopped = false;
 
 static BOOL g_stage_sampling_enabled = NO;
@@ -985,9 +986,9 @@ static void smeltr_gputrace_maybe_start(id<MTLCommandBuffer> cb) {
     if (g_gputrace_target_cbs == 0 || g_gputrace_path == NULL) return;
     BOOL expected = NO;
     if (!atomic_compare_exchange_strong_explicit(
-            &g_gputrace_started, &expected, YES,
+            &g_gputrace_armed, &expected, YES,
             memory_order_acq_rel, memory_order_relaxed)) {
-        return;  // already started (or racing); only one winner arms it
+        return;  // already attempted (or racing); only one winner arms it
     }
     @try {
         MTLCaptureManager *mgr = [MTLCaptureManager sharedCaptureManager];
@@ -1002,7 +1003,20 @@ static void smeltr_gputrace_maybe_start(id<MTLCommandBuffer> cb) {
         [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
 
         MTLCaptureDescriptor *desc = [[MTLCaptureDescriptor alloc] init];
-        desc.captureObject = [cb device];
+        // `g_device`, et surtout PAS `[cb device]` ni `[cb commandQueue]`.
+        // Le hook swizzle sous la couche de capture : ces deux-là rendent les
+        // objets BRUTS (AGXG14SDevice, AGXG14XFamilyCommandQueue), auxquels
+        // Metal envoie `traceStream` — sélecteur inconnu, capture avortée.
+        // `g_device` vient de `MTLCreateSystemDefaultDevice()`, qui sous
+        // MTL_CAPTURE_ENABLED rend bien l'enveloppe CaptureMTLDevice. Le
+        // descripteur EXIGE un objet : l'omettre échoue sur « Capture Object
+        // property is not set ».
+        (void)cb;
+        if (!g_device) {
+            smeltr_log("gputrace: no device cached, cannot capture");
+            return;
+        }
+        desc.captureObject = g_device;
         desc.destination = MTLCaptureDestinationGPUTraceDocument;
         desc.outputURL = [NSURL fileURLWithPath:path];
 
@@ -1012,6 +1026,10 @@ static void smeltr_gputrace_maybe_start(id<MTLCommandBuffer> cb) {
                        err ? [[err localizedDescription] UTF8String] : "unknown");
             return;
         }
+        // Seulement maintenant : un `started` posé avant de savoir si
+        // startCapture a réussi faisait annoncer un arrêt de capture qui
+        // n'avait jamais commencé.
+        atomic_store_explicit(&g_gputrace_started, true, memory_order_release);
         smeltr_log("gputrace: capturing %u command buffer(s) to %s",
                    g_gputrace_target_cbs, g_gputrace_path);
     } @catch (NSException *e) {
@@ -1054,7 +1072,6 @@ static void smeltr_gputrace_note_commit(void) {
     id<MTLCommandBuffer> cb = [self smeltr_commandBuffer];
     if (cb && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
         smeltr_install_cb_swizzle(cb);
-        smeltr_gputrace_maybe_start(cb);
     }
     return cb;
 }
@@ -1346,6 +1363,11 @@ static void smeltr_gputrace_note_commit(void) {
 @end
 
 static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb) {
+    // Armer ici et pas dans le swizzle de -commandBuffer : MLX obtient ses
+    // command buffers par -commandBufferWithDescriptor:, un chemin distinct.
+    // Cette fonction est le point de passage obligé des trois chemins, donc
+    // le seul endroit où l'armement est sûr de s'exécuter.
+    smeltr_gputrace_maybe_start(cb);
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class cbcls = object_getClass(cb);
