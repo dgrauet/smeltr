@@ -7,9 +7,10 @@ pub mod rules;
 
 pub mod breakdown;
 pub use breakdown::{
-    aggregate_ops_flat, apply_op_group_by, compute as compute_breakdown, render_chrome_trace,
-    render_ops_flat, render_table, BreakdownError, Diagnostics, ModuleBreakdown, OpAttribution,
-    OpFlatRow, OpGroupBy,
+    aggregate_ops_flat, apply_op_group_by, compute as compute_breakdown, degraded_advice,
+    prune_by_field_filter, render_chrome_trace, render_ops_flat, render_table, AttributionGap,
+    BreakdownError, BreakdownNotices, Diagnostics, ModuleBreakdown, OpAttribution, OpFlatRow,
+    OpGroupBy,
 };
 
 pub mod crash_join;

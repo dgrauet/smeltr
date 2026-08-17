@@ -426,6 +426,96 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     })
 }
 
+/// Everything a breakdown consumer must warn about before showing the tree.
+///
+/// The CLI and the `get_inference_breakdown` MCP tool each used to assemble
+/// this list themselves, and had already drifted: the CLI flagged degraded
+/// op sampling (#165) while the MCP tool stayed silent about it, so an agent
+/// reading the tool output had no way to know the op numbers were partial.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BreakdownNotices {
+    /// Op-timing sampling auto-disabled this many times (#165). Non-zero
+    /// means per-op GPU numbers are incomplete over those spans.
+    pub sampling_disable_episodes: usize,
+    /// Why the tree is mostly `<unscoped>`, and what to do about it.
+    /// The two causes are mutually exclusive — no sidecar implies no eval
+    /// windows at all, so the lazy-eval detector cannot fire.
+    pub attribution_gap: Option<AttributionGap>,
+}
+
+/// Why a breakdown tree is mostly `<unscoped>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttributionGap {
+    /// #163: a fully-lazy pipeline evaluates its whole graph in one
+    /// `mx.eval` made outside any module forward.
+    LazyEval(String),
+    /// #178: Metal work was captured but the Python sidecar never attached.
+    SidecarAbsent(String),
+}
+
+impl AttributionGap {
+    pub fn advice(&self) -> &str {
+        match self {
+            Self::LazyEval(a) | Self::SidecarAbsent(a) => a,
+        }
+    }
+}
+
+impl BreakdownNotices {
+    pub fn detect(events: &[Event]) -> Self {
+        Self {
+            sampling_disable_episodes: crate::diff::sampling_disable_episodes(events),
+            attribution_gap: crate::rules::lazy_eval_attribution::detect(events)
+                .map(|gap| AttributionGap::LazyEval(gap.advice()))
+                .or_else(|| {
+                    crate::rules::sidecar_absent::detect(events)
+                        .map(|absent| AttributionGap::SidecarAbsent(absent.advice()))
+                }),
+        }
+    }
+
+    /// One-line warning that per-op numbers are partial, when they are.
+    pub fn degraded_advice(&self) -> Option<String> {
+        degraded_advice(self.sampling_disable_episodes)
+    }
+}
+
+/// One-line warning that per-op numbers are partial over `episodes` spans
+/// where op-timing sampling auto-disabled (#165). `None` when it never did.
+pub fn degraded_advice(episodes: usize) -> Option<String> {
+    (episodes > 0).then(|| {
+        format!(
+            "op-level numbers partial: sampling disabled {episodes} time(s) after \
+             sustained alloc failures (GPU op timing degraded)"
+        )
+    })
+}
+
+/// Prune every node whose own `fields` do not match `filter` and whose
+/// descendants do not either. A node matches when its `fields` map is a
+/// superset of `filter` (every key present with an equal value); ancestors
+/// of a match are retained so the tree stays connected.
+///
+/// Returns whether the node itself, or anything beneath it, matched.
+pub fn prune_by_field_filter(
+    node: &mut ModuleBreakdown,
+    filter: &std::collections::BTreeMap<String, smeltr_core::event::FieldValue>,
+) -> bool {
+    // Recurse first so child match info is up-to-date.
+    let mut any_child_matches = false;
+    let mut kept = Vec::with_capacity(node.children.len());
+    for mut child in std::mem::take(&mut node.children) {
+        if prune_by_field_filter(&mut child, filter) {
+            any_child_matches = true;
+            kept.push(child);
+        }
+    }
+    node.children = kept;
+
+    let self_matches = filter.iter().all(|(k, v)| node.fields.get(k) == Some(v));
+    self_matches || any_child_matches
+}
+
 /// Render a flat table sorted by gpu_ns_subtree descending.
 pub fn render_table(
     root: &ModuleBreakdown,
