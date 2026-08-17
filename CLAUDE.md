@@ -44,9 +44,10 @@ Project: Metal/MLX observability tool for macOS Apple Silicon.
   Update BOTH `metal-hook/src/ring.c` (C writer used by the dylib) AND
   `crates/smeltr-metal-ring/src/writer.rs` (Rust writer used by the daemon) — independent
   implementations of the same byte layout.
-- **Session ref resolution**: `smeltr_mcp::types::resolve_session(arg)` accepts short id (8 hex
-  suffix), full UUID, or `SessionMetadata.name` (most-recent-wins on collision). Use it in every
-  new tool that takes a session. CLI subcommands take `<SESSION> | --last` (mutually exclusive,
+- **Session ref resolution**: `smeltr_core::session_resolve::resolve_session(arg)` accepts short
+  id (8 hex suffix), full UUID, or `SessionMetadata.name` (most-recent-wins on collision). Use it
+  in every new tool that takes a session; `smeltr_mcp::types::resolve_session` is a thin wrapper
+  that only maps the error onto `ToolError`. CLI subcommands take `<SESSION> | --last` (mutually exclusive,
   clap `required_unless_present`/`conflicts_with`) resolved via
   `smeltr_cli::session_resolver::resolve_arg` — `--last` = most recent non-ambient session.
 - **New MCP tool**: file in `crates/smeltr-mcp/src/tools/<name>.rs` with `Params`/`Response`/`run`,
