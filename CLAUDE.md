@@ -66,13 +66,22 @@ Project: Metal/MLX observability tool for macOS Apple Silicon.
   transitive `Eq` impl on `Event`/`ClientToDaemon`) must be removed. `PartialEq`
   is enough for tests; verify nothing uses Payload as a HashMap/HashSet key
   (`git grep "HashMap<.*Payload"` etc.).
-- **Async-grace in window-based analyzers**: when correlating `MlxEvalEntered/
-  MlxEvalReturned` or `ModuleEntered/ModuleReturned` windows with `MetalCbOps`
-  or `MetalDeviceMemSample` events, extend the `t_out` (or keep the scope alive
-  in a `draining` list) by `ASYNC_GRACE_NS = 500_000_000` ns. MLX returns from
-  `mx.eval` before the GPU CBs complete (~5 ms eval, ~30-300 ms CB) — without
-  the grace, attribution silently drops most events. See `breakdown.rs`,
-  `dispatch_origins.rs`, `memory.rs` for the canonical pattern.
+- **Window-based analyzers**: never rebuild eval or scope windows by hand —
+  use `smeltr_analyzer::windows` (`eval_windows`, `scope_windows`,
+  `ScopeSweep`, `ASYNC_GRACE_NS`). MLX returns from `mx.eval` before the GPU
+  CBs complete (~5 ms eval, ~30-300 ms CB), so windows carry a 500 ms grace
+  tail; without it attribution silently drops most events. Four modules used
+  to reimplement this and had already diverged (`memory.rs` closed scopes by
+  stack position instead of call id, misattributing on any orphan return).
+  A scope closes the call its `ModuleReturned` *names*, never the stack top.
+  `memory.rs` still accumulates per-sample into a `draining` list rather than
+  matching windows — a different shape for a different question — but it
+  takes `ASYNC_GRACE_NS` from the same place.
+- **Display formatting**: `smeltr_core::fmt` owns `binary_bytes` (GiB/MiB/KiB,
+  for tables), `decimal_gb` (GB, for jetsam prose and GPU-budget figures the
+  user compares against Apple's spec sheet), `truncate` (char-safe) and
+  `basename`. Do not add a local copy — five had drifted, three mislabelling
+  gibibytes as "GB" and one panicking on non-ASCII input.
 
 ## Build
 
