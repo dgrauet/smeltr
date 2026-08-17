@@ -102,7 +102,7 @@ fn resolve_id(s: &str) -> anyhow::Result<SessionId> {
     }
     // Same resolution as every other session arg (short id, full UUID, or
     // SessionMetadata.name — #164).
-    let dir = smeltr_mcp::types::resolve_session(s)
+    let dir = smeltr_core::session_resolve::resolve_session(s)
         .map_err(|e| anyhow::anyhow!("could not resolve session id `{s}`: {e}"))?;
     Ok(read_metadata(&dir)?.session_id)
 }

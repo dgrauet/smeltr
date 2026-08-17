@@ -10,7 +10,7 @@ use std::path::PathBuf;
 ///
 /// Resolution order:
 /// 1. If `id` is given, resolve it like every other session arg
-///    (`smeltr_mcp::types::resolve_session`: short id, full UUID, or
+///    (`smeltr_core::session_resolve::resolve_session`: short id, full UUID, or
 ///    `SessionMetadata.name` — #116).
 /// 2. Else if `prefer_post_mortem` is true, look for a `post-mortem-` dir first.
 /// 3. Else if `include_ambient` is true, return the newest session of any kind.
@@ -21,7 +21,7 @@ pub fn resolve(
     include_ambient: bool,
 ) -> Result<PathBuf> {
     if let Some(id) = id {
-        return smeltr_mcp::types::resolve_session(&id)
+        return smeltr_core::session_resolve::resolve_session(&id)
             .map_err(|e| anyhow!("could not resolve session {id:?}: {e}"));
     }
     let sessions = list_sessions().context("listing sessions")?;

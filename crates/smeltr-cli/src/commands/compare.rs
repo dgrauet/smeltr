@@ -8,7 +8,7 @@ use smeltr_analyzer::diff::{
 };
 use smeltr_core::fmt::{binary_bytes, truncate};
 use smeltr_core::reader::read_events;
-use smeltr_mcp::types::resolve_session;
+use smeltr_core::session_resolve::resolve_session;
 
 pub fn run(session_a: &str, session_b: Option<&str>, last: bool, top: usize) -> anyhow::Result<()> {
     let dir_a = resolve_session(session_a)

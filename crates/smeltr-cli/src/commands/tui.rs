@@ -48,7 +48,7 @@ fn socket_path() -> PathBuf {
 fn resolve_session(arg: &str) -> Result<PathBuf> {
     // Same resolution as every other session arg (dir name, short id, full
     // UUID, or SessionMetadata.name — #164).
-    smeltr_mcp::types::resolve_session(arg)
+    smeltr_core::session_resolve::resolve_session(arg)
         .map_err(|e| anyhow!("session matching {arg:?} not found: {e}"))
 }
 

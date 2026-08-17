@@ -57,7 +57,7 @@ fn named_scoped_session_is_persisted_and_resolvable() {
     );
 
     // 3. The MCP-level resolver finds it too.
-    let mcp_resolved = smeltr_mcp::resolve_session("my-named-run").unwrap();
+    let mcp_resolved = smeltr_core::session_resolve::resolve_session("my-named-run").unwrap();
     let scoped_dir = dirs
         .iter()
         .find(|d| {
