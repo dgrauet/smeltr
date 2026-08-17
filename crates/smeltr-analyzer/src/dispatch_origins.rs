@@ -7,8 +7,8 @@
 use crate::op_kinds::resolve_kind;
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, OpSample, Payload};
+use smeltr_core::fmt::basename;
 use std::collections::HashMap;
-use std::path::Path;
 
 const ASYNC_GRACE_NS: u64 = 500_000_000; // 500 ms — mirrors breakdown.rs
 
@@ -159,13 +159,6 @@ pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
 
 fn find_window(evals: &[EvalWindow], ts: u64) -> Option<&EvalWindow> {
     evals.iter().rev().find(|w| w.t_in <= ts && ts <= w.t_out)
-}
-
-fn basename(path: &str) -> &str {
-    Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
 }
 
 fn op_kind(op: &OpSample) -> String {

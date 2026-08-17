@@ -6,6 +6,7 @@ use ratatui::prelude::*;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline};
+use smeltr_core::fmt::binary_bytes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -284,17 +285,29 @@ fn render_metal_cbs(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderC
 fn render_memory(frame: &mut Frame, area: Rect, state: &UiState, ctx: RenderCtx) {
     let mut lines: Vec<Line> = Vec::new();
     if let Some(m) = &state.mlx_memory {
-        lines.push(Line::from(format!("MLX active  {}", human(m.active_bytes))));
-        lines.push(Line::from(format!("MLX peak    {}", human(m.peak_bytes))));
-        lines.push(Line::from(format!("MLX cache   {}", human(m.cache_bytes))));
+        lines.push(Line::from(format!(
+            "MLX active  {}",
+            binary_bytes(m.active_bytes)
+        )));
+        lines.push(Line::from(format!(
+            "MLX peak    {}",
+            binary_bytes(m.peak_bytes)
+        )));
+        lines.push(Line::from(format!(
+            "MLX cache   {}",
+            binary_bytes(m.cache_bytes)
+        )));
     } else {
         lines.push(Line::from("(no MLX memory poll yet)"));
     }
     if let Some(v) = &state.vm_sample {
-        lines.push(Line::from(format!("VM wired    {}", human(v.wired_bytes))));
+        lines.push(Line::from(format!(
+            "VM wired    {}",
+            binary_bytes(v.wired_bytes)
+        )));
         lines.push(Line::from(format!(
             "VM swap     {}",
-            human(v.swap_used_bytes)
+            binary_bytes(v.swap_used_bytes)
         )));
         lines.push(Line::from(format!(
             "VM page-out {:.1}/s",
@@ -418,21 +431,6 @@ fn is_flagged(name: &str) -> bool {
         "syslogd",
     ];
     FLAGGED.iter().any(|f| name.contains(f))
-}
-
-fn human(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.0} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, OpSample, Payload};
+use smeltr_core::fmt::truncate;
 use std::collections::HashMap;
 
 /// Reserved qualname for time not attributable to any module call.
@@ -580,18 +581,6 @@ pub fn render_table(
         ));
     }
     out
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max - 1).collect();
-        format!("{truncated}...")
-    }
 }
 
 /// Chrome Trace Event Format: array of "complete" (ph=X) events.

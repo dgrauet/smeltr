@@ -6,6 +6,7 @@ use smeltr_analyzer::diff::{
     diff_memory, diff_origins, diff_sessions, sampling_disable_episodes, MemoryDelta, OpDelta,
     OriginDelta, ScopeAggregate, ScopeDelta, SessionDiff,
 };
+use smeltr_core::fmt::{binary_bytes, truncate};
 use smeltr_core::reader::read_events;
 use smeltr_mcp::types::resolve_session;
 
@@ -102,8 +103,8 @@ fn render_memory_deltas(out: &mut String, rows: &[MemoryDelta], top: usize) {
         out.push_str(&format!(
             "{:<48} {:>14} {:>14} {:>16}\n",
             truncate(&r.qualname, 48),
-            fmt_bytes(r.a_peak_bytes),
-            fmt_bytes(r.b_peak_bytes),
+            binary_bytes(r.a_peak_bytes),
+            binary_bytes(r.b_peak_bytes),
             fmt_delta_bytes(r.delta_bytes, r.delta_pct),
         ));
     }
@@ -112,21 +113,6 @@ fn render_memory_deltas(out: &mut String, rows: &[MemoryDelta], top: usize) {
     }
     if rows.is_empty() {
         out.push_str("(no memory deltas)\n");
-    }
-}
-
-fn fmt_bytes(b: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if b >= GB {
-        format!("{:.2} GB", b as f64 / GB as f64)
-    } else if b >= MB {
-        format!("{:.2} MB", b as f64 / MB as f64)
-    } else if b >= KB {
-        format!("{:.2} KB", b as f64 / KB as f64)
-    } else {
-        format!("{b} B")
     }
 }
 
@@ -139,7 +125,7 @@ fn fmt_delta_bytes(bytes: i64, pct: Option<f64>) -> String {
         ""
     };
     let abs = bytes.unsigned_abs();
-    let formatted = fmt_bytes(abs);
+    let formatted = binary_bytes(abs);
     match pct {
         Some(p) => format!("{sign}{formatted} ({p:+.1}%)"),
         None => format!("{sign}{formatted} (n/a)"),
@@ -229,16 +215,6 @@ fn fmt_delta(ns: i64, pct: Option<f64>) -> String {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out = s.chars().take(max - 1).collect::<String>();
-        out.push('…');
-        out
-    }
-}
-
 #[cfg(test)]
 #[test]
 fn truncate_counts_chars_not_bytes() {
@@ -324,8 +300,8 @@ mod tests {
         }];
         let s = render(&empty_diff(), &memory, &[], 20, (0, 0));
         assert!(s.contains("MEMORY DELTAS"));
-        assert!(s.contains("1.86 GB"));
-        assert!(s.contains("953.67 MB"));
+        assert!(s.contains("1.86 GiB"));
+        assert!(s.contains("953.7 MiB"));
         assert!(s.contains("-50.0%"));
     }
 

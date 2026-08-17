@@ -3,6 +3,7 @@
 use crate::session_resolver::resolve_arg;
 use anyhow::Context;
 use smeltr_analyzer::dispatch_origins::{compute_dispatch_origins, DispatchOrigin};
+use smeltr_core::fmt::truncate;
 use smeltr_core::reader::read_events;
 
 /// `session`/`last` exclusivity is enforced by clap (`--last` conflicts with
@@ -47,16 +48,6 @@ pub(crate) fn render(rows: &[DispatchOrigin], top: usize, degraded: usize) -> St
 
 fn fmt_secs(ns: u64) -> String {
     format!("{:.3}s", ns as f64 / 1_000_000_000.0)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out = s.chars().take(max - 1).collect::<String>();
-        out.push('…');
-        out
-    }
 }
 
 #[cfg(test)]

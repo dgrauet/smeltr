@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 use smeltr_core::event::{Event, Payload, ProbeHealthState, ProcEntry};
+use smeltr_core::fmt::{basename, truncate};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const HOT_KERNELS_WINDOW_NS: u64 = 30 * 1_000_000_000;
@@ -397,18 +398,6 @@ impl MetalQueueState {
             .min_by_key(|(_, ts)| *ts)
             .map(|(cb, ts)| (*cb, *ts));
     }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..n])
-    }
-}
-
-fn basename(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 #[cfg(test)]
