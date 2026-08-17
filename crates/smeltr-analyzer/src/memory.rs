@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 /// Async grace window: Metal CB-committed/completed events arrive up to
 /// ~500 ms after the Python scope that triggered them has already returned.
-const ASYNC_GRACE_NS: u64 = 500_000_000;
+use crate::windows::ASYNC_GRACE_NS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ScopeMemory {
@@ -43,6 +43,7 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
         last: u64,
     }
     struct OpenScope {
+        call_id: u64,
         qualname: String,
         accum: Accum,
     }
@@ -91,14 +92,24 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
         }
 
         match &ev.payload {
-            Payload::ModuleEntered { qualname, .. } => {
+            Payload::ModuleEntered {
+                module_call_id,
+                qualname,
+                ..
+            } => {
                 stack.push(OpenScope {
+                    call_id: *module_call_id,
                     qualname: qualname.clone(),
                     accum: Accum::default(),
                 });
             }
-            Payload::ModuleReturned { .. } => {
-                if let Some(open) = stack.pop() {
+            Payload::ModuleReturned { module_call_id } => {
+                // Close the call this return names, not whatever sits on
+                // top: an orphan return (Entered lost, counted as
+                // `malformed_returns` by breakdown.rs) would otherwise
+                // evict a live scope and drop all its later samples.
+                if let Some(pos) = stack.iter().rposition(|s| s.call_id == *module_call_id) {
+                    let open = stack.remove(pos);
                     draining.push(DrainingScope {
                         qualname: open.qualname,
                         accum: open.accum,
@@ -256,6 +267,7 @@ pub fn compute_heap_breakdown(events: &[Event]) -> Vec<HeapMemory> {
         peak_bytes: u64,
     }
     struct OpenHeapScope {
+        call_id: u64,
         qualname: String,
         accum: HeapAccum,
     }
@@ -330,15 +342,21 @@ pub fn compute_heap_breakdown(events: &[Event]) -> Vec<HeapMemory> {
         }
 
         match &ev.payload {
-            Payload::ModuleEntered { qualname, .. } => {
+            Payload::ModuleEntered {
+                module_call_id,
+                qualname,
+                ..
+            } => {
                 stack.push(OpenHeapScope {
+                    call_id: *module_call_id,
                     qualname: qualname.clone(),
                     accum: HeapAccum::default(),
                 });
                 update_open_scopes_heap(&mut stack, &mut draining, &live_heaps, ev.ts_mono_ns);
             }
-            Payload::ModuleReturned { .. } => {
-                if let Some(open) = stack.pop() {
+            Payload::ModuleReturned { module_call_id } => {
+                if let Some(pos) = stack.iter().rposition(|s| s.call_id == *module_call_id) {
+                    let open = stack.remove(pos);
                     draining.push(DrainingHeapScope {
                         qualname: open.qualname,
                         accum: open.accum,
@@ -662,6 +680,52 @@ mod tests {
             );
         }
     }
+
+    /// An orphan `ModuleReturned` -- one whose `Entered` never reached the
+    /// session -- must not close an unrelated live scope. `breakdown.rs`
+    /// counts exactly this shape as `malformed_returns`, so it happens on
+    /// real sessions; here it used to pop `outer` off the stack, sending it
+    /// to draining a second too early and losing every later sample.
+    #[test]
+    fn orphan_return_does_not_close_a_live_scope() {
+        const S: u64 = 1_000_000_000;
+        let evs = vec![
+            enter(1, 0, "outer"),
+            sample(2, S, 100),
+            ret(3, 2 * S, 99), // never entered
+            sample(4, 3 * S, 900),
+            ret(5, 4 * S, 1),
+        ];
+        let out = compute_memory_breakdown(&evs);
+        let outer = out
+            .iter()
+            .find(|s| s.qualname == "outer")
+            .expect("outer scope");
+        assert_eq!(
+            outer.peak_bytes, 900,
+            "orphan return closed `outer` early: {out:?}"
+        );
+    }
+
+    /// Returns that arrive out of nesting order must close the call they
+    /// name, not whatever happens to sit on top of the stack.
+    #[test]
+    fn out_of_order_return_closes_the_named_call() {
+        const S: u64 = 1_000_000_000;
+        let evs = vec![
+            enter(1, 0, "outer"),
+            enter(2, S, "inner"),
+            ret(3, 2 * S, 1), // closes `outer`, not `inner`
+            sample(4, 3 * S, 700),
+            ret(5, 4 * S, 2),
+        ];
+        let out = compute_memory_breakdown(&evs);
+        let inner = out
+            .iter()
+            .find(|s| s.qualname == "inner")
+            .expect("inner scope");
+        assert_eq!(inner.peak_bytes, 700, "the wrong scope was closed: {out:?}");
+    }
 }
 
 /// A contiguous span of `MetalDeviceMemSample`s at or above the pressure
@@ -694,7 +758,7 @@ impl MemWindow {
 /// `merge_gap_ns` are merged (#183 — one aggregated percentage hid the fact
 /// that VOID's "115%" was two unrelated windows, transition + decode).
 pub fn over_budget_windows(events: &[Event], threshold: f64, merge_gap_ns: u64) -> Vec<MemWindow> {
-    let mut scope: Vec<String> = Vec::new();
+    let mut scope: Vec<(u64, String)> = Vec::new();
     let mut windows: Vec<MemWindow> = Vec::new();
     let mut current: Option<MemWindow> = None;
     // ts of the last over-threshold sample; a below-threshold stretch only
@@ -703,9 +767,15 @@ pub fn over_budget_windows(events: &[Event], threshold: f64, merge_gap_ns: u64) 
 
     for ev in events {
         match &ev.payload {
-            Payload::ModuleEntered { qualname, .. } => scope.push(qualname.clone()),
-            Payload::ModuleReturned { .. } => {
-                scope.pop();
+            Payload::ModuleEntered {
+                module_call_id,
+                qualname,
+                ..
+            } => scope.push((*module_call_id, qualname.clone())),
+            Payload::ModuleReturned { module_call_id } => {
+                if let Some(pos) = scope.iter().rposition(|(id, _)| id == module_call_id) {
+                    scope.remove(pos);
+                }
             }
             Payload::MetalDeviceMemSample {
                 allocated_bytes,
@@ -738,7 +808,7 @@ pub fn over_budget_windows(events: &[Event], threshold: f64, merge_gap_ns: u64) 
                                 w.recommended_max_bytes = *recommended_max_bytes;
                                 w.peak_scope = scope
                                     .last()
-                                    .cloned()
+                                    .map(|(_, q)| q.clone())
                                     .unwrap_or_else(|| "<unscoped>".to_string());
                             }
                         }
@@ -752,7 +822,7 @@ pub fn over_budget_windows(events: &[Event], threshold: f64, merge_gap_ns: u64) 
                                 recommended_max_bytes: *recommended_max_bytes,
                                 peak_scope: scope
                                     .last()
-                                    .cloned()
+                                    .map(|(_, q)| q.clone())
                                     .unwrap_or_else(|| "<unscoped>".to_string()),
                             });
                         }

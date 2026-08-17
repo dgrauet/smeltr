@@ -1,7 +1,9 @@
 //! Aggregated UI state. Pure data; no rendering.
 
 use serde::Serialize;
+use smeltr_analyzer::op_clamp::OpClampState;
 use smeltr_core::event::{Event, Payload, ProbeHealthState, ProcEntry};
+use smeltr_core::fmt::{basename, truncate};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const HOT_KERNELS_WINDOW_NS: u64 = 30 * 1_000_000_000;
@@ -39,6 +41,10 @@ pub struct UiState {
     pub proc_top: Vec<ProcEntry>,
     pub log_feed: VecDeque<LogEntry>,
     pub hot_kernels: VecDeque<HotKernelSample>,
+    /// #146 serialization clamp, run incrementally so the live panel reports
+    /// the same GPU ns as `smeltr breakdown` on the finished session.
+    #[serde(skip)]
+    pub op_clamp: OpClampState,
     pub model_loads: Vec<ModelLoadSample>,
     pub model_unloads: Vec<ModelUnloadSample>,
     pub gpu_mem_samples: Vec<(u64, u64)>,
@@ -113,7 +119,8 @@ impl UiState {
             self.session_short = Some(s[..s.len().min(8)].to_string());
         }
         self.bump_timeline(ev.ts_wall_ns / 1_000_000_000);
-        self.ingest_payload(ev);
+        let op_scale = self.op_clamp.observe(ev);
+        self.ingest_payload(ev, op_scale);
     }
 
     fn bump_timeline(&mut self, ts_sec: u64) {
@@ -134,7 +141,7 @@ impl UiState {
         }
     }
 
-    fn ingest_payload(&mut self, ev: &Event) {
+    fn ingest_payload(&mut self, ev: &Event, op_scale: Option<f64>) {
         match &ev.payload {
             Payload::MetalCbCommitted {
                 cb_id,
@@ -342,7 +349,12 @@ impl UiState {
                     self.hot_kernels.push_back(HotKernelSample {
                         ts_mono_ns: ev.ts_mono_ns,
                         name: op.name.clone(),
-                        gpu_ns: op.gpu_ns,
+                        // Encoder windows overlap on pipelined Apple GPUs, so
+                        // a raw sum can exceed the CB's own execution window.
+                        gpu_ns: match op_scale {
+                            Some(s) => (op.gpu_ns as f64 * s) as u64,
+                            None => op.gpu_ns,
+                        },
                         count: op.count,
                     });
                 }
@@ -397,18 +409,6 @@ impl MetalQueueState {
             .min_by_key(|(_, ts)| *ts)
             .map(|(cb, ts)| (*cb, *ts));
     }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..n])
-    }
-}
-
-fn basename(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 #[cfg(test)]
@@ -532,6 +532,57 @@ mod tests {
         }
         assert!(s.timeline_buckets.len() <= 61);
         assert!(s.timeline_buckets.back().unwrap().0 == 119);
+    }
+
+    /// #146: encoder GPU windows overlap on pipelined Apple GPUs, so a raw
+    /// op sum can exceed the command buffer's own execution window. The
+    /// batch analyzer rescales those ops; the live panel must too, or the
+    /// TUI reports more GPU time than `smeltr breakdown` for the same run.
+    #[test]
+    fn hot_kernels_apply_the_serialization_clamp() {
+        let mut s = UiState::default();
+        // CB window: scheduled at 0, completed at 100 -> 100 ns.
+        s.ingest(&ev(
+            0,
+            Payload::MetalCbScheduled {
+                cb_id: 1,
+                queue_id: 1,
+            },
+        ));
+        s.ingest(&ev(
+            100,
+            Payload::MetalCbCompleted {
+                cb_id: 1,
+                queue_id: 1,
+                status: 0,
+                error_code: None,
+                error_domain: None,
+                in_flight_ns: 100,
+            },
+        ));
+        // Ops claim 200 ns between them -- twice the window.
+        s.ingest(&ev(
+            101,
+            Payload::MetalCbOps {
+                cb_id: 1,
+                ops: vec![
+                    OpSample {
+                        name: "a".into(),
+                        gpu_ns: 150,
+                        count: 1,
+                        symbol: None,
+                    },
+                    OpSample {
+                        name: "b".into(),
+                        gpu_ns: 50,
+                        count: 1,
+                        symbol: None,
+                    },
+                ],
+            },
+        ));
+        let total: u64 = s.top_hot_kernels(10).iter().map(|(_, ns, _)| ns).sum();
+        assert_eq!(total, 100, "op sum must be clamped to the CB window");
     }
 
     #[test]

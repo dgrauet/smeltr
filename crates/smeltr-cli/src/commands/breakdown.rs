@@ -2,8 +2,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use smeltr_analyzer::{
-    apply_op_group_by, compute_breakdown, render_chrome_trace, render_ops_flat, render_table,
-    ModuleBreakdown, OpGroupBy,
+    apply_op_group_by, compute_breakdown, prune_by_field_filter, render_chrome_trace,
+    render_ops_flat, render_table, BreakdownNotices, ModuleBreakdown, OpGroupBy,
 };
 use smeltr_core::event::FieldValue;
 use smeltr_core::reader::read_events;
@@ -71,24 +71,16 @@ pub fn run(
         return Ok(());
     }
 
-    // #165: flag partial op-level numbers when sampling auto-disabled.
-    let degraded = smeltr_analyzer::diff::sampling_disable_episodes(&events);
-    if let Some(notice) = crate::degraded::single_session_notice(degraded) {
+    // Same set the MCP tool surfaces, from the same detector: partial op
+    // numbers (#165), and why the tree is mostly <unscoped> -- a fully-lazy
+    // pipeline (#163) or a missing Python sidecar (#178).
+    let notices = BreakdownNotices::detect(&events);
+    if let Some(notice) = crate::degraded::single_session_notice(notices.sampling_disable_episodes)
+    {
         print!("{notice}");
     }
-
-    // #163: fully-lazy pipelines (single pipeline-level mx.eval per step)
-    // dump ~100% of GPU time into <unscoped>; say so instead of letting the
-    // tree be misread as a smeltr bug.
-    if let Some(gap) = smeltr_analyzer::rules::lazy_eval_attribution::detect(&events) {
-        print!("{}", lazy_gap_notice(&gap));
-    }
-
-    // #178: Metal capture but zero sidecar events — the tree will be 100%
-    // <unscoped> and the #163 notice cannot fire (no eval windows at all);
-    // point at the missing `smeltr` package in the target environment.
-    if let Some(absent) = smeltr_analyzer::rules::sidecar_absent::detect(&events) {
-        print!("{}", sidecar_absent_notice(&absent));
+    if let Some(gap) = notices.attribution_gap.as_ref() {
+        print!("{}", attribution_gap_notice(gap));
     }
 
     // Parse --field key=value flags.
@@ -130,35 +122,20 @@ pub fn run(
     Ok(())
 }
 
-/// Recursively prunes nodes that don't match `filter` and have no matching
-/// descendants. A node matches when its `fields` map is a superset of `filter`.
-fn prune_by_field_filter(
-    node: &mut ModuleBreakdown,
-    filter: &BTreeMap<String, FieldValue>,
-) -> bool {
-    let mut any_child_matches = false;
-    let mut kept = Vec::with_capacity(node.children.len());
-    for mut child in std::mem::take(&mut node.children) {
-        if prune_by_field_filter(&mut child, filter) {
-            any_child_matches = true;
-            kept.push(child);
-        }
-    }
-    node.children = kept;
-
-    let self_matches = filter.iter().all(|(k, v)| node.fields.get(k) == Some(v));
-    self_matches || any_child_matches
-}
-
 /// #178: renders the "Python sidecar never attached" notice printed above
 /// the tree when the session has Metal CBs but no sidecar event.
-fn sidecar_absent_notice(absent: &smeltr_analyzer::rules::sidecar_absent::SidecarAbsent) -> String {
-    format!("ℹ no Python sidecar: {}\n\n", absent.advice())
-}
-
-/// #163: renders the lazy-eval attribution-gap notice printed above the tree.
-fn lazy_gap_notice(gap: &smeltr_analyzer::rules::lazy_eval_attribution::LazyEvalGap) -> String {
-    format!("⚠ module attribution gap: {}\n\n", gap.advice())
+/// Renders the attribution-gap notice printed above the tree. The two
+/// causes call for different reactions -- instrument the pipeline versus
+/// install the sidecar -- so they keep distinct leads.
+fn attribution_gap_notice(gap: &smeltr_analyzer::AttributionGap) -> String {
+    match gap {
+        smeltr_analyzer::AttributionGap::LazyEval(advice) => {
+            format!("⚠ module attribution gap: {advice}\n\n")
+        }
+        smeltr_analyzer::AttributionGap::SidecarAbsent(advice) => {
+            format!("ℹ no Python sidecar: {advice}\n\n")
+        }
+    }
 }
 
 fn write_flamegraph(path: &Path, root: &ModuleBreakdown) -> Result<()> {
@@ -226,7 +203,7 @@ mod tests {
             first_seq: 1,
             first_ts_mono_ns: 1,
         };
-        let n = lazy_gap_notice(&gap);
+        let n = attribution_gap_notice(&smeltr_analyzer::AttributionGap::LazyEval(gap.advice()));
         assert!(n.starts_with("⚠ module attribution gap"), "{n}");
         assert!(n.contains("99%"), "{n}");
         assert!(n.contains("smeltr.scope"), "{n}");
@@ -242,7 +219,9 @@ mod tests {
             first_seq: 1,
             first_ts_mono_ns: 1,
         };
-        let n = sidecar_absent_notice(&absent);
+        let n = attribution_gap_notice(&smeltr_analyzer::AttributionGap::SidecarAbsent(
+            absent.advice(),
+        ));
         assert!(n.starts_with("ℹ no Python sidecar"), "{n}");
         assert!(n.contains("42 command buffer(s)"), "{n}");
         assert!(n.contains("pip install"), "{n}");

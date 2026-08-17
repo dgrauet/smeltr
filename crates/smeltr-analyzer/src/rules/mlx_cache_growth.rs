@@ -68,7 +68,7 @@ impl Rule for MlxCacheGrowthRule {
             return Vec::new();
         }
 
-        let gb = |b: u64| b as f64 / 1_000_000_000.0;
+        let gb = smeltr_core::fmt::decimal_gb;
         vec![Finding::new(
             Severity::Warning,
             Category::ContributingFactor,

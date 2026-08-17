@@ -2,7 +2,10 @@
 
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
-use smeltr_analyzer::{apply_op_group_by, compute_breakdown, ModuleBreakdown, OpGroupBy};
+use smeltr_analyzer::{
+    apply_op_group_by, compute_breakdown, prune_by_field_filter, BreakdownNotices, ModuleBreakdown,
+    OpGroupBy,
+};
 use smeltr_core::event::FieldValue;
 use smeltr_core::reader::read_events;
 use std::collections::BTreeMap;
@@ -64,31 +67,11 @@ pub struct Response {
     /// mutually exclusive (the latter implies no eval windows at all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution_gap: Option<String>,
-}
-
-/// Recursively prunes nodes whose own fields don't match the filter
-/// AND none of their descendants match either. A node matches if its
-/// `fields` map is a superset of `filter` (every key/value in `filter`
-/// is present in `fields` with equal value).
-///
-/// Returns true if the node itself (or any descendant) matches.
-fn prune_by_field_filter(
-    node: &mut ModuleBreakdown,
-    filter: &BTreeMap<String, FieldValue>,
-) -> bool {
-    // Recurse first so child match info is up-to-date.
-    let mut any_child_matches = false;
-    let mut kept = Vec::with_capacity(node.children.len());
-    for mut child in std::mem::take(&mut node.children) {
-        if prune_by_field_filter(&mut child, filter) {
-            any_child_matches = true;
-            kept.push(child);
-        }
-    }
-    node.children = kept;
-
-    let self_matches = filter.iter().all(|(k, v)| node.fields.get(k) == Some(v));
-    self_matches || any_child_matches
+    /// Set when op-timing sampling auto-disabled during the run (#165):
+    /// the per-op `gpu_ns` below are incomplete over those spans. The CLI
+    /// has always printed this; the tool used to omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<String>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -105,9 +88,12 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
 
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
-    let attribution_gap = smeltr_analyzer::rules::lazy_eval_attribution::detect(&events)
-        .map(|gap| gap.advice())
-        .or_else(|| smeltr_analyzer::rules::sidecar_absent::detect(&events).map(|a| a.advice()));
+    let notices = BreakdownNotices::detect(&events);
+    let attribution_gap = notices
+        .attribution_gap
+        .as_ref()
+        .map(|g| g.advice().to_string());
+    let degraded = notices.degraded_advice();
     let mut root =
         compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
@@ -168,6 +154,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     Ok(Response {
         root,
         attribution_gap,
+        degraded,
     })
 }
 
@@ -803,6 +790,52 @@ mod tests {
             op.symbol.is_none(),
             "symbol should be None after kind grouping"
         );
+    }
+
+    /// #165 parity: the CLI has always warned that per-op numbers are
+    /// partial when op-timing sampling auto-disabled. The tool used to stay
+    /// silent, leaving an agent no way to know the numbers were incomplete.
+    #[test]
+    #[serial_test::serial]
+    fn sampling_disabled_session_surfaces_degraded_notice() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut w = SessionWriter::create(meta).unwrap();
+        for (seq, reason) in [
+            (
+                1u64,
+                "stage sampling disabled after sustained alloc failures",
+            ),
+            (
+                2,
+                "dispatch sampling disabled after sustained alloc failures",
+            ),
+        ] {
+            w.write_event(&Event {
+                ts_mono_ns: seq,
+                ts_wall_ns: seq,
+                session_id: Uuid::nil(),
+                source: Source::MetalHook,
+                pid: None,
+                seq,
+                payload: Payload::MetalHookSkipped {
+                    reason: reason.into(),
+                },
+            })
+            .unwrap();
+        }
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), "ok".into()).unwrap();
+
+        let resp = run(Params {
+            session: dir.file_name().unwrap().to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let notice = resp.degraded.expect("degraded notice");
+        assert!(notice.contains("2 time(s)"), "{notice}");
+        assert!(notice.contains("partial"), "{notice}");
     }
 
     /// #163: a fully-lazy session (single pipeline-level eval with empty

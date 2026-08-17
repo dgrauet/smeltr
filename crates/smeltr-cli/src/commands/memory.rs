@@ -6,6 +6,7 @@ use smeltr_analyzer::memory::{
     compute_heap_breakdown, compute_memory_breakdown, compute_memory_timeline, HeapMemory,
     MemTimeline, ScopeMemory,
 };
+use smeltr_core::fmt::{binary_bytes, truncate};
 use smeltr_core::reader::read_events;
 
 pub fn run(
@@ -31,7 +32,7 @@ pub fn run(
 /// #182: time-resolved profile — per-bucket peaks and the over-budget
 /// windows the aggregated percentage used to hide.
 pub(crate) fn render_timeline(t: &MemTimeline) -> String {
-    let gb = |b: u64| b as f64 / 1e9;
+    let gb = smeltr_core::fmt::decimal_gb;
     let mut out = String::new();
     out.push_str(&format!(
         "{:<16} {:>11} {:>11} {:>13} {:>8}\n",
@@ -93,9 +94,9 @@ fn render_scopes(out: &mut String, rows: &[ScopeMemory], top: usize) {
         out.push_str(&format!(
             "{:<48} {:>12} {:>12} {:>12} {:>10}\n",
             truncate(&r.qualname, 48),
-            fmt_bytes(r.peak_bytes),
-            fmt_bytes(r.avg_bytes),
-            fmt_bytes(r.end_bytes),
+            binary_bytes(r.peak_bytes),
+            binary_bytes(r.avg_bytes),
+            binary_bytes(r.end_bytes),
             r.sample_count
         ));
     }
@@ -117,7 +118,7 @@ fn render_heaps(out: &mut String, rows: &[HeapMemory], top: usize) {
             "{:<48} {:>10} {:>16}\n",
             truncate(&r.qualname, 48),
             r.peak_heap_count,
-            fmt_bytes(r.peak_heap_bytes)
+            binary_bytes(r.peak_heap_bytes)
         ));
     }
     if rows.len() > top {
@@ -125,31 +126,6 @@ fn render_heaps(out: &mut String, rows: &[HeapMemory], top: usize) {
     }
     if rows.is_empty() {
         out.push_str("(no heap allocations attributed to scopes)\n");
-    }
-}
-
-fn fmt_bytes(b: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if b >= GB {
-        format!("{:.2} GB", b as f64 / GB as f64)
-    } else if b >= MB {
-        format!("{:.2} MB", b as f64 / MB as f64)
-    } else if b >= KB {
-        format!("{:.2} KB", b as f64 / KB as f64)
-    } else {
-        format!("{b} B")
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out = s.chars().take(max - 1).collect::<String>();
-        out.push('…');
-        out
     }
 }
 
@@ -167,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn render_formats_bytes_as_gb_mb() {
+    fn render_formats_bytes_with_binary_units() {
         let scopes = vec![ScopeMemory {
             qualname: "huge".into(),
             peak_bytes: 8 * 1024 * 1024 * 1024,
@@ -176,9 +152,9 @@ mod tests {
             sample_count: 100,
         }];
         let s = render(&scopes, &[], 20);
-        assert!(s.contains("8.00 GB"));
-        assert!(s.contains("4.00 MB"));
-        assert!(s.contains("1.00 KB"));
+        assert!(s.contains("8.00 GiB"));
+        assert!(s.contains("4.0 MiB"));
+        assert!(s.contains("1 KiB"));
     }
 
     #[test]
