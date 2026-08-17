@@ -78,6 +78,74 @@ struct CallNode {
     fields: std::collections::BTreeMap<String, smeltr_core::event::FieldValue>,
 }
 
+/// One completed Metal command buffer with the ops sampled for that
+/// lifetime, if any.
+pub struct CompletedCb {
+    pub commit_ts: u64,
+    /// Wall time the CB spent in flight. Only a meaningful GPU figure when
+    /// op sampling was off for the whole session — pipelined CBs overlap, so
+    /// summing it across CBs over-counts by roughly the queue depth.
+    pub in_flight_ns: u64,
+    pub ops: Option<Vec<OpSample>>,
+}
+
+pub struct CompletedCbs {
+    /// In completion order.
+    pub completed: Vec<CompletedCb>,
+    /// Whether any `MetalCbOps` event appeared at all. When it did, a CB
+    /// without ops contributed no GPU work (blit, host copy, empty CB)
+    /// rather than an unknown amount.
+    pub seen_any_cb_ops: bool,
+}
+
+/// Pair `MetalCbCommitted`/`MetalCbCompleted` and attach each `MetalCbOps`
+/// to the completion it belongs to.
+///
+/// Chronologically, never through a session-wide `cb_id` index: `cb_id` is
+/// the command buffer *pointer* and Metal recycles those allocations, so one
+/// id spans many lifetimes. Indexing by id attributed the last lifetime's
+/// ops to every completion sharing the pointer, multiplying op time ~29x on
+/// a real run (#127). The hook emits `CbOps` immediately after the matching
+/// `CbCompleted`, which is what makes the chronological pairing exact.
+pub fn completed_command_buffers(events: &[Event]) -> CompletedCbs {
+    let mut cb_commit_ts: HashMap<u64, u64> = HashMap::new();
+    let mut completed: Vec<CompletedCb> = Vec::new();
+    let mut last_completed_idx: HashMap<u64, usize> = HashMap::new();
+    let mut seen_any_cb_ops = false;
+    for ev in events {
+        match &ev.payload {
+            Payload::MetalCbCommitted { cb_id, .. } => {
+                cb_commit_ts.insert(*cb_id, ev.ts_mono_ns);
+            }
+            Payload::MetalCbCompleted {
+                cb_id,
+                in_flight_ns,
+                ..
+            } => {
+                if let Some(commit_ts) = cb_commit_ts.remove(cb_id) {
+                    last_completed_idx.insert(*cb_id, completed.len());
+                    completed.push(CompletedCb {
+                        commit_ts,
+                        in_flight_ns: *in_flight_ns,
+                        ops: None,
+                    });
+                }
+            }
+            Payload::MetalCbOps { cb_id, ops } => {
+                seen_any_cb_ops = true;
+                if let Some(&i) = last_completed_idx.get(cb_id) {
+                    completed[i].ops = Some(ops.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    CompletedCbs {
+        completed,
+        seen_any_cb_ops,
+    }
+}
+
 pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdown, BreakdownError> {
     let mut events: Vec<Event> = events.into_iter().collect();
     if events.is_empty() {
@@ -130,42 +198,11 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     // commits the Metal CBs up to ~500 ms later.
     let eval_intervals = crate::windows::eval_windows(&events);
 
-    // 3. Pair MetalCbCommitted/Completed and attach each MetalCbOps to the
-    // completion it belongs to — chronologically, NOT via a session-wide
-    // cb_id index: cb_id is the CB *pointer* and Metal recycles CB
-    // allocations, so one id spans many lifetimes (#127 — the old index
-    // attributed the last lifetime's ops to every completion sharing the
-    // pointer, multiplying op time ~×29 on a real run). The hook emits
-    // CbOps immediately after the matching CbCompleted.
-    let mut cb_commit_ts: HashMap<u64, u64> = HashMap::new();
-    // (cb_id, commit_ts, in_flight_ns, ops)
-    let mut cb_completed: Vec<(u64, u64, u64, Option<Vec<OpSample>>)> = Vec::new();
-    let mut last_completed_idx: HashMap<u64, usize> = HashMap::new();
-    let mut seen_any_cb_ops = false;
-    for ev in &events {
-        match &ev.payload {
-            Payload::MetalCbCommitted { cb_id, .. } => {
-                cb_commit_ts.insert(*cb_id, ev.ts_mono_ns);
-            }
-            Payload::MetalCbCompleted {
-                cb_id,
-                in_flight_ns,
-                ..
-            } => {
-                if let Some(commit_ts) = cb_commit_ts.remove(cb_id) {
-                    last_completed_idx.insert(*cb_id, cb_completed.len());
-                    cb_completed.push((*cb_id, commit_ts, *in_flight_ns, None));
-                }
-            }
-            Payload::MetalCbOps { cb_id, ops } => {
-                seen_any_cb_ops = true;
-                if let Some(&i) = last_completed_idx.get(cb_id) {
-                    cb_completed[i].3 = Some(ops.clone());
-                }
-            }
-            _ => {}
-        }
-    }
+    // 3. Pair command buffers with their ops.
+    let CompletedCbs {
+        completed: cb_completed,
+        seen_any_cb_ops,
+    } = completed_command_buffers(&events);
 
     // 4. Attribute each CB to the eval whose interval contains the commit ts.
     let mut unscoped_gpu_ns: u64 = 0;
@@ -177,11 +214,12 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     let mut unscoped_ops: HashMap<String, OpAgg> = HashMap::new();
     let mut ops_cbs_without_samples: u64 = 0;
     let mut no_eval_window: Vec<(u64, u64, Option<&Vec<OpSample>>)> = Vec::new();
-    for (_cb_id, commit_ts, ns, ops_for_cb) in &cb_completed {
+    for cb in &cb_completed {
+        let commit_ts = &cb.commit_ts;
         let idx = eval_intervals
             .iter()
             .position(|e| e.t_in <= *commit_ts && *commit_ts <= e.t_out);
-        let ops_for_cb = ops_for_cb.as_ref();
+        let ops_for_cb = cb.ops.as_ref();
         if seen_any_cb_ops && ops_for_cb.is_none() {
             ops_cbs_without_samples += 1;
         }
@@ -197,7 +235,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         let ns = &match ops_for_cb {
             Some(ops) => ops.iter().map(|o| o.gpu_ns).sum::<u64>(),
             None if seen_any_cb_ops => 0,
-            None => *ns,
+            None => cb.in_flight_ns,
         };
         match idx {
             Some(i) => {
@@ -2668,5 +2706,133 @@ mod tests {
         assert!(idxs.contains(&&FieldValue::Int(0)));
         assert!(idxs.contains(&&FieldValue::Int(1)));
         assert!(idxs.contains(&&FieldValue::Int(2)));
+    }
+
+    /// #127: Metal recycles command-buffer allocations, so one `cb_id` spans
+    /// many lifetimes. Each completion must get the ops sampled for ITS
+    /// lifetime; indexing by id alone gave every completion the last
+    /// lifetime's ops, multiplying op time ~29x on a real run.
+    #[test]
+    fn recycled_cb_id_does_not_share_ops_across_lifetimes() {
+        let op = |ns: u64| OpSample {
+            name: "k".into(),
+            gpu_ns: ns,
+            count: 1,
+            symbol: None,
+        };
+        let evs = vec![
+            ev(
+                1,
+                10,
+                Payload::MetalCbCommitted {
+                    cb_id: 7,
+                    queue_id: 1,
+                    label: None,
+                    queue_depth: 0,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                2,
+                20,
+                Payload::MetalCbCompleted {
+                    cb_id: 7,
+                    queue_id: 1,
+                    status: 0,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 10,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                3,
+                21,
+                Payload::MetalCbOps {
+                    cb_id: 7,
+                    ops: vec![op(100)],
+                },
+                Source::MetalHook,
+            ),
+            // Same pointer, reused for a second command buffer.
+            ev(
+                4,
+                30,
+                Payload::MetalCbCommitted {
+                    cb_id: 7,
+                    queue_id: 1,
+                    label: None,
+                    queue_depth: 0,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                5,
+                40,
+                Payload::MetalCbCompleted {
+                    cb_id: 7,
+                    queue_id: 1,
+                    status: 0,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 10,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                6,
+                41,
+                Payload::MetalCbOps {
+                    cb_id: 7,
+                    ops: vec![op(5)],
+                },
+                Source::MetalHook,
+            ),
+        ];
+        let r = completed_command_buffers(&evs);
+        assert!(r.seen_any_cb_ops);
+        assert_eq!(r.completed.len(), 2);
+        let ns: Vec<u64> = r
+            .completed
+            .iter()
+            .map(|cb| cb.ops.as_ref().map(|o| o[0].gpu_ns).unwrap_or(0))
+            .collect();
+        assert_eq!(ns, vec![100, 5], "each lifetime keeps its own ops");
+    }
+
+    /// A CB that completed without any `MetalCbOps` keeps `None`, which the
+    /// caller reads as "no GPU work" once any CB in the session carried ops.
+    #[test]
+    fn completion_without_ops_stays_none() {
+        let evs = vec![
+            ev(
+                1,
+                10,
+                Payload::MetalCbCommitted {
+                    cb_id: 1,
+                    queue_id: 1,
+                    label: None,
+                    queue_depth: 0,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                2,
+                20,
+                Payload::MetalCbCompleted {
+                    cb_id: 1,
+                    queue_id: 1,
+                    status: 0,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 10,
+                },
+                Source::MetalHook,
+            ),
+        ];
+        let r = completed_command_buffers(&evs);
+        assert_eq!(r.completed.len(), 1);
+        assert!(r.completed[0].ops.is_none());
+        assert!(!r.seen_any_cb_ops);
     }
 }
