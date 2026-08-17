@@ -41,20 +41,31 @@ impl OpTimeScales {
     }
 }
 
-/// Chronological read-only pass computing the per-CbOps-event scale
-/// factors. Events must be in session order (as read from disk).
-pub fn compute_op_time_scales(events: &[Event]) -> OpTimeScales {
-    let mut last_sched: HashMap<u64, u64> = HashMap::new();
-    let mut queue_last_done: HashMap<u64, u64> = HashMap::new();
-    // cb_id -> serialization-clamped window of its latest completion,
-    // consumed by the CbOps event that follows it (#127 pairing).
-    let mut window_for_cb: HashMap<u64, u64> = HashMap::new();
-    let mut scales: HashMap<u64, f64> = HashMap::new();
+/// Incremental form of the clamp, for consumers that see events one at a
+/// time (the TUI's live panels) rather than holding a whole session.
+///
+/// The rule is a forward state machine -- a CB's window is known by the time
+/// its `MetalCbOps` arrives -- so streaming and batch consumers can share it
+/// and report the same numbers.
+#[derive(Debug, Clone, Default)]
+pub struct OpClampState {
+    last_sched: HashMap<u64, u64>,
+    queue_last_done: HashMap<u64, u64>,
+    /// cb_id -> serialization-clamped window of its latest completion,
+    /// consumed by the CbOps event that follows it (#127 pairing).
+    window_for_cb: HashMap<u64, u64>,
+}
 
-    for ev in events {
+impl OpClampState {
+    /// Feed one event in session order. Returns the scale factor for a
+    /// `MetalCbOps` event whose op sum exceeded its CB's window, and `None`
+    /// for every other event or when no clamp is needed. Ops are never
+    /// scaled up.
+    pub fn observe(&mut self, ev: &Event) -> Option<f64> {
         match &ev.payload {
             Payload::MetalCbScheduled { cb_id, .. } => {
-                last_sched.insert(*cb_id, ev.ts_mono_ns);
+                self.last_sched.insert(*cb_id, ev.ts_mono_ns);
+                None
             }
             Payload::MetalCbCompleted {
                 cb_id, queue_id, ..
@@ -62,23 +73,34 @@ pub fn compute_op_time_scales(events: &[Event]) -> OpTimeScales {
                 let done = ev.ts_mono_ns;
                 // No scheduled event seen (partial capture): skip the clamp
                 // for this lifetime rather than guessing a window.
-                if let Some(sched) = last_sched.remove(cb_id) {
-                    let start = sched.max(queue_last_done.get(queue_id).copied().unwrap_or(0));
-                    window_for_cb.insert(*cb_id, done.saturating_sub(start));
+                if let Some(sched) = self.last_sched.remove(cb_id) {
+                    let start = sched.max(self.queue_last_done.get(queue_id).copied().unwrap_or(0));
+                    self.window_for_cb
+                        .insert(*cb_id, done.saturating_sub(start));
                 } else {
-                    window_for_cb.remove(cb_id);
+                    self.window_for_cb.remove(cb_id);
                 }
-                queue_last_done.insert(*queue_id, done);
+                self.queue_last_done.insert(*queue_id, done);
+                None
             }
             Payload::MetalCbOps { cb_id, ops } => {
-                if let Some(window) = window_for_cb.remove(cb_id) {
-                    let sum: u64 = ops.iter().map(|o| o.gpu_ns).sum();
-                    if sum > window {
-                        scales.insert(ev.seq, window as f64 / sum as f64);
-                    }
-                }
+                let window = self.window_for_cb.remove(cb_id)?;
+                let sum: u64 = ops.iter().map(|o| o.gpu_ns).sum();
+                (sum > window).then(|| window as f64 / sum as f64)
             }
-            _ => {}
+            _ => None,
+        }
+    }
+}
+
+/// Chronological read-only pass computing the per-CbOps-event scale
+/// factors. Events must be in session order (as read from disk).
+pub fn compute_op_time_scales(events: &[Event]) -> OpTimeScales {
+    let mut state = OpClampState::default();
+    let mut scales: HashMap<u64, f64> = HashMap::new();
+    for ev in events {
+        if let Some(scale) = state.observe(ev) {
+            scales.insert(ev.seq, scale);
         }
     }
     OpTimeScales { scales }
