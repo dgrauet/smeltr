@@ -1,16 +1,14 @@
 //! Attribute kernel dispatches to Python source file:line.
 //!
-//! Joins each `MlxEvalEntered.stack_frames` (top non-smeltr frame) with
-//! the `MetalCbOps` events that fall within the eval's window, aggregating
-//! per `(kind, file_line)` → `(sum_gpu_ns, count)`.
+//! Joins each `MlxEvalEntered.stack_frames` (top frame) with the
+//! `MetalCbOps` events that fall within the eval's window, aggregating per
+//! `(kind, file_line)` → `(sum_gpu_ns, count)`.
 
 use crate::op_kinds::resolve_kind;
+use crate::windows::{eval_windows, scope_windows, EvalWindow, ScopeSweep};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, OpSample, Payload};
-use smeltr_core::fmt::basename;
 use std::collections::HashMap;
-
-const ASYNC_GRACE_NS: u64 = 500_000_000; // 500 ms — mirrors breakdown.rs
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DispatchOrigin {
@@ -18,13 +16,6 @@ pub struct DispatchOrigin {
     pub file_line: String,
     pub gpu_ns: u64,
     pub dispatch_count: u64,
-}
-
-#[derive(Clone)]
-struct EvalWindow {
-    t_in: u64,
-    t_out: u64,
-    file_line: String,
 }
 
 /// Compute per-(kind, file:line) dispatch attribution.
@@ -35,77 +26,19 @@ struct EvalWindow {
 ///
 /// Empty if no events carry stack_frames (capture disabled).
 pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
-    let mut evals: Vec<EvalWindow> = Vec::new();
-    let mut open: HashMap<u64, (u64, String)> = HashMap::new();
-    // #140 scope fallback — mirrors breakdown.rs step 4.5: lazy workloads
-    // barely call mx.eval, so CBs with no eval window are attributed to the
-    // innermost scope/module window open at that time, as `scope:<qualname>`.
-    struct ScopeWindow {
-        t_in: u64,
-        t_out: u64,
-        qualname: String,
-    }
-    let mut scope_windows: Vec<ScopeWindow> = Vec::new();
-    let mut open_scope_idx: HashMap<u64, usize> = HashMap::new();
-    let last_event_ts = events.last().map(|e| e.ts_mono_ns).unwrap_or(0);
-
-    for ev in events {
-        match &ev.payload {
-            Payload::ModuleEntered {
-                module_call_id,
-                qualname,
-                ..
-            } => {
-                open_scope_idx.insert(*module_call_id, scope_windows.len());
-                scope_windows.push(ScopeWindow {
-                    t_in: ev.ts_mono_ns,
-                    // Closed on ModuleReturned; a never-returned call stays
-                    // open until the end of the session.
-                    t_out: last_event_ts,
-                    qualname: qualname.clone(),
-                });
-            }
-            Payload::ModuleReturned { module_call_id } => {
-                if let Some(i) = open_scope_idx.remove(module_call_id) {
-                    scope_windows[i].t_out = ev.ts_mono_ns;
-                }
-            }
-            Payload::MlxEvalEntered {
-                call_id,
-                stack_frames,
-                ..
-            } => {
-                if let Some(top) = stack_frames.first() {
-                    let file_line = format!("{}:{}", basename(&top.filename), top.lineno);
-                    open.insert(*call_id, (ev.ts_mono_ns, file_line));
-                }
-            }
-            Payload::MlxEvalReturned {
-                call_id, was_async, ..
-            } => {
-                if let Some((t_in, file_line)) = open.remove(call_id) {
-                    let t_out = if *was_async {
-                        ev.ts_mono_ns.saturating_add(ASYNC_GRACE_NS)
-                    } else {
-                        ev.ts_mono_ns
-                    };
-                    evals.push(EvalWindow {
-                        t_in,
-                        t_out,
-                        file_line,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Sweep state for the scope fallback: events (hence CbOps) and
-    // scope_windows are both chronological; the stack top is the innermost
-    // open window (inner calls return before outer ones, so expired windows
-    // pop from the top).
-    let mut next_scope = 0usize;
-    let mut scope_stack: Vec<&ScopeWindow> = Vec::new();
+    // Only evals carrying a captured frame can name an origin. Keeping the
+    // frame-less ones would let them shadow an enclosing eval that does have
+    // one, since `find_window` takes the latest window covering the sample.
+    let evals: Vec<EvalWindow> = eval_windows(events)
+        .into_iter()
+        .filter(|w| w.top_frame.is_some())
+        .collect();
+    // #140 scope fallback — same rule as breakdown's step 4.5: lazy
+    // workloads barely call mx.eval, so CBs with no eval window are
+    // attributed to the innermost scope open at that time, as
+    // `scope:<qualname>`.
+    let scopes = scope_windows(events);
+    let mut sweep = ScopeSweep::new(&scopes.windows);
 
     // #146: op times whose sum exceeds their CB's serialization-clamped
     // window are rescaled at read time (this consumer only borrows events).
@@ -115,25 +48,12 @@ pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
     for ev in events {
         if let Payload::MetalCbOps { ops, .. } = &ev.payload {
             let ts = ev.ts_mono_ns;
-            let file_line = match find_window(&evals, ts) {
-                Some(window) => window.file_line.clone(),
-                None => {
-                    while next_scope < scope_windows.len() && scope_windows[next_scope].t_in <= ts {
-                        scope_stack.push(&scope_windows[next_scope]);
-                        next_scope += 1;
-                    }
-                    while let Some(top) = scope_stack.last() {
-                        if top.t_out.saturating_add(ASYNC_GRACE_NS) < ts {
-                            scope_stack.pop();
-                        } else {
-                            break;
-                        }
-                    }
-                    match scope_stack.last() {
-                        Some(win) => format!("scope:{}", win.qualname),
-                        None => continue,
-                    }
-                }
+            let file_line = match find_window(&evals, ts).and_then(|w| w.top_frame.clone()) {
+                Some(frame) => frame,
+                None => match sweep.innermost_at(ts) {
+                    Some(win) => format!("scope:{}", win.qualname),
+                    None => continue,
+                },
             };
             for op in ops {
                 let kind = op_kind(op);

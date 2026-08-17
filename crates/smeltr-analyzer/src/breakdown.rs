@@ -78,12 +78,6 @@ struct CallNode {
     fields: std::collections::BTreeMap<String, smeltr_core::event::FieldValue>,
 }
 
-struct EvalInterval {
-    t_in: u64,
-    t_out: u64,
-    stack: Vec<u64>,
-}
-
 pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdown, BreakdownError> {
     let mut events: Vec<Event> = events.into_iter().collect();
     if events.is_empty() {
@@ -97,106 +91,44 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     crate::op_clamp::apply_op_time_scales(&mut events, &op_scales);
     let events = events;
 
-    // 1. Index module calls; track unclosed Entered and orphan Returned.
-    // Also record each call's [entered, returned] wall window for the #131
-    // scope fallback below.
+    // 1. Index module calls into the tree. Window boundaries and the
+    // malformed-return count come from the shared builder, which every
+    // other attribution pass uses too.
     let mut calls: HashMap<u64, CallNode> = HashMap::new();
-    let mut open_calls: Vec<u64> = Vec::new();
-    let mut malformed_returns: u64 = 0;
-    struct ModuleWindow {
-        t_in: u64,
-        t_out: u64,
-        call_id: u64,
-    }
-    let mut module_windows: Vec<ModuleWindow> = Vec::new();
-    let mut open_window_idx: HashMap<u64, usize> = HashMap::new();
-    let last_event_ts = events.last().map(|e| e.ts_mono_ns).unwrap_or(0);
     for ev in &events {
-        match &ev.payload {
-            Payload::ModuleEntered {
-                module_call_id,
-                qualname,
-                class_name,
-                parent_call_id,
-                fields,
-                ..
-            } => {
-                let node = CallNode {
-                    qualname: qualname.clone(),
-                    class_name: class_name.clone(),
-                    parent: *parent_call_id,
-                    fields: fields.clone(),
-                    ..Default::default()
-                };
-                if let Some(p) = parent_call_id {
-                    if let Some(parent) = calls.get_mut(p) {
-                        parent.children.push(*module_call_id);
-                    }
-                }
-                calls.insert(*module_call_id, node);
-                open_calls.push(*module_call_id);
-                open_window_idx.insert(*module_call_id, module_windows.len());
-                module_windows.push(ModuleWindow {
-                    t_in: ev.ts_mono_ns,
-                    // Closed on ModuleReturned; a never-returned call (e.g.
-                    // aborted run) stays open until the end of the session.
-                    t_out: last_event_ts,
-                    call_id: *module_call_id,
-                });
-            }
-            Payload::ModuleReturned { module_call_id } => {
-                if let Some(pos) = open_calls.iter().rposition(|c| c == module_call_id) {
-                    open_calls.remove(pos);
-                    if let Some(&i) = open_window_idx.get(module_call_id) {
-                        module_windows[i].t_out = ev.ts_mono_ns;
-                    }
-                } else if !calls.contains_key(module_call_id) {
-                    malformed_returns += 1;
+        if let Payload::ModuleEntered {
+            module_call_id,
+            qualname,
+            class_name,
+            parent_call_id,
+            fields,
+            ..
+        } = &ev.payload
+        {
+            let node = CallNode {
+                qualname: qualname.clone(),
+                class_name: class_name.clone(),
+                parent: *parent_call_id,
+                fields: fields.clone(),
+                ..Default::default()
+            };
+            if let Some(p) = parent_call_id {
+                if let Some(parent) = calls.get_mut(p) {
+                    parent.children.push(*module_call_id);
                 }
             }
-            _ => {}
+            calls.insert(*module_call_id, node);
         }
     }
-    malformed_returns += open_calls.len() as u64;
+    let crate::windows::ScopeWindows {
+        windows: module_windows,
+        malformed_returns,
+    } = crate::windows::scope_windows(&events);
 
-    // 2. Pair MlxEvalEntered/Returned by call_id.
-    //
-    // MLX 0.31+ uses async GPU scheduling: mx.eval() returns quickly (< 10 ms)
-    // after merely queuing GPU work; the Metal CBs are committed by the driver
-    // thread up to ~500 ms later. To keep those CBs inside their attribution
-    // window we extend t_out by ASYNC_GRACE_NS when was_async=true.
-    const ASYNC_GRACE_NS: u64 = 500_000_000; // 500 ms
-    let mut compute_entered: HashMap<u64, (u64, Vec<u64>)> = HashMap::new();
-    let mut compute_intervals: Vec<EvalInterval> = Vec::new();
-    for ev in &events {
-        match &ev.payload {
-            Payload::MlxEvalEntered {
-                call_id,
-                module_stack,
-                ..
-            } => {
-                compute_entered.insert(*call_id, (ev.ts_mono_ns, module_stack.clone()));
-            }
-            Payload::MlxEvalReturned {
-                call_id, was_async, ..
-            } => {
-                if let Some((t_in, stack)) = compute_entered.remove(call_id) {
-                    let t_out = if *was_async {
-                        ev.ts_mono_ns.saturating_add(ASYNC_GRACE_NS)
-                    } else {
-                        ev.ts_mono_ns
-                    };
-                    compute_intervals.push(EvalInterval { t_in, t_out, stack });
-                }
-            }
-            _ => {}
-        }
-    }
-    let eval_intervals = {
-        let mut v = compute_intervals;
-        v.sort_by_key(|e| e.t_in);
-        v
-    };
+    // 2. Eval windows, already widened by the async grace: MLX 0.31+
+    // returns from mx.eval() within ~10 ms of queuing while the driver
+    // commits the Metal CBs up to ~500 ms later.
+    let eval_intervals = crate::windows::eval_windows(&events);
 
     // 3. Pair MetalCbCommitted/Completed and attach each MetalCbOps to the
     // completion it belongs to — chronologically, NOT via a session-wide
@@ -299,23 +231,10 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     // ts, a stack of open windows (module calls nest on the Python side).
     let mut fallback: HashMap<u64, (u64, u64, HashMap<String, OpAgg>)> = HashMap::new();
     let mut cbs_scope_attributed: u64 = 0;
-    module_windows.sort_by_key(|w| w.t_in);
     no_eval_window.sort_by_key(|(ts, _, _)| *ts);
-    let mut next_window = 0usize;
-    let mut stack: Vec<&ModuleWindow> = Vec::new();
+    let mut sweep = crate::windows::ScopeSweep::new(&module_windows);
     for (commit_ts, ns, ops_for_cb) in no_eval_window {
-        while next_window < module_windows.len() && module_windows[next_window].t_in <= commit_ts {
-            stack.push(&module_windows[next_window]);
-            next_window += 1;
-        }
-        while let Some(top) = stack.last() {
-            if top.t_out.saturating_add(ASYNC_GRACE_NS) < commit_ts {
-                stack.pop();
-            } else {
-                break;
-            }
-        }
-        match stack.last() {
+        match sweep.innermost_at(commit_ts) {
             Some(win) => {
                 cbs_scope_attributed += 1;
                 let slot = fallback.entry(win.call_id).or_default();
@@ -355,7 +274,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     for (i, eval) in eval_intervals.iter().enumerate() {
         let gpu = per_eval_gpu_ns[i];
         let cbs = per_eval_cb_count[i];
-        if let Some(leaf) = eval.stack.last() {
+        if let Some(leaf) = eval.module_stack.last() {
             if let Some(node) = calls.get_mut(leaf) {
                 node.gpu_ns_self += gpu;
                 node.eval_count += 1;

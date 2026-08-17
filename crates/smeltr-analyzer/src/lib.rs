@@ -24,6 +24,7 @@ pub mod memory;
 
 pub mod op_clamp;
 pub mod op_kinds;
+pub mod windows;
 pub use op_kinds::resolve_kind;
 
 pub use finding::{Category, EvidenceRef, Finding, Severity};
