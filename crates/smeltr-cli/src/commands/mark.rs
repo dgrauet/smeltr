@@ -9,7 +9,7 @@ pub async fn run(label: String, session: Option<&str>) -> anyhow::Result<()> {
     let scope_token = match session {
         None => None,
         Some(s) => {
-            let dir = smeltr_mcp::types::resolve_session(s)
+            let dir = smeltr_core::session_resolve::resolve_session(s)
                 .map_err(|e| anyhow::anyhow!("could not resolve session {s:?}: {e}"))?;
             let meta = smeltr_core::reader::read_metadata(&dir)?;
             Some(meta.scope_token.ok_or_else(|| {

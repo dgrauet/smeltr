@@ -8,7 +8,7 @@ use ratatui::symbols::Marker;
 use ratatui::text::Line;
 use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph};
 use ratatui::Frame;
-use std::path::Path;
+use smeltr_core::fmt::{basename, binary_bytes};
 
 const MAX_MODEL_ROWS: usize = 12;
 
@@ -28,26 +28,6 @@ fn color_for(key: &str) -> Color {
         .bytes()
         .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
     palette[(h as usize) % palette.len()]
-}
-
-fn human_bytes(b: u64) -> String {
-    const KB: u64 = 1_024;
-    const MB: u64 = KB * 1_024;
-    const GB: u64 = MB * 1_024;
-    if b >= GB {
-        format!("{:.2} GB", b as f64 / GB as f64)
-    } else if b >= MB {
-        format!("{:.0} MB", b as f64 / MB as f64)
-    } else {
-        format!("{:.0} KB", b as f64 / KB as f64)
-    }
-}
-
-fn basename(path: &str) -> &str {
-    Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
 }
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
@@ -103,7 +83,7 @@ fn render_swim_lanes(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
             .as_deref()
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
-        let size_label = human_bytes(m.size_bytes);
+        let size_label = binary_bytes(m.size_bytes);
 
         let bar_len = ((m.size_bytes as f64 / max_size as f64) * bar_max as f64) as usize;
         let bar_len = bar_len.max(1);
@@ -397,10 +377,10 @@ mod tests {
     }
 
     #[test]
-    fn human_bytes_formats_gb_mb_kb() {
-        assert_eq!(human_bytes(2_000_000_000), "1.86 GB");
-        assert_eq!(human_bytes(500_000_000), "477 MB");
-        assert_eq!(human_bytes(500_000), "488 KB");
+    fn binary_bytes_formats_gib_mib_kib() {
+        assert_eq!(binary_bytes(2_000_000_000), "1.86 GiB");
+        assert_eq!(binary_bytes(500_000_000), "476.8 MiB");
+        assert_eq!(binary_bytes(500_000), "488 KiB");
     }
 
     #[test]

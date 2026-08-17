@@ -80,7 +80,7 @@ pub async fn run(session: Option<String>) -> Result<()> {
     let want: Option<Uuid> = match session {
         None => None,
         Some(ref s) => {
-            let dir = smeltr_mcp::types::resolve_session(s)
+            let dir = smeltr_core::session_resolve::resolve_session(s)
                 .map_err(|e| anyhow::anyhow!("{e}"))
                 .with_context(|| format!("resolving session {s:?}"))?;
             let meta =

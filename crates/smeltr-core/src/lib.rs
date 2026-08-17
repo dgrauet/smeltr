@@ -5,6 +5,7 @@ pub mod clock;
 pub mod codec;
 pub mod event;
 pub mod filter;
+pub mod fmt;
 pub mod reader;
 pub mod session;
 pub mod session_resolve;

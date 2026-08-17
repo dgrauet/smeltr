@@ -12,15 +12,13 @@
 
 use crate::finding::{Category, EvidenceRef, Finding, Severity};
 use crate::rule::Rule;
+use crate::windows::eval_windows;
 use smeltr_core::event::{Event, Payload};
 use std::collections::HashMap;
 
 /// Minimum share (percent of total attributed GPU time) landing in
 /// empty-module-stack eval windows before the gap is reported.
 pub const LAZY_GAP_THRESHOLD_PCT: u64 = 50;
-
-/// Same async-scheduling grace as `breakdown::compute` (see #131/#136).
-const ASYNC_GRACE_NS: u64 = 500_000_000;
 
 /// Detected lazy-eval attribution gap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,17 +71,9 @@ impl LazyEvalGap {
 /// GPU ns) without building the module tree. Returns `Some` only when the
 /// empty-stack share crosses [`LAZY_GAP_THRESHOLD_PCT`].
 pub fn detect(events: &[Event]) -> Option<LazyEvalGap> {
-    // 1. Eval intervals (paired by call_id, async grace on t_out), flagged
-    //    empty when their module_stack was empty at eval entry.
-    struct EvalInterval {
-        t_in: u64,
-        t_out: u64,
-        empty_stack: bool,
-        seq: u64,
-        ts: u64,
-    }
-    let mut entered: HashMap<u64, (u64, bool, u64, u64)> = HashMap::new();
-    let mut intervals: Vec<EvalInterval> = Vec::new();
+    // 1. Eval windows (paired by call_id, async grace on t_out). An empty
+    //    `module_stack` marks an eval made outside any module forward.
+    let intervals = eval_windows(events);
     // 2. Module instrumentation presence (drives the advice wording only —
     //    CBs outside eval windows are attributable via the #131 scope
     //    fallback and never count toward the gap).
@@ -99,39 +89,6 @@ pub fn detect(events: &[Event]) -> Option<LazyEvalGap> {
 
     for ev in events {
         match &ev.payload {
-            Payload::MlxEvalEntered {
-                call_id,
-                module_stack,
-                ..
-            } => {
-                entered.insert(
-                    *call_id,
-                    (
-                        ev.ts_mono_ns,
-                        module_stack.is_empty(),
-                        ev.seq,
-                        ev.ts_mono_ns,
-                    ),
-                );
-            }
-            Payload::MlxEvalReturned {
-                call_id, was_async, ..
-            } => {
-                if let Some((t_in, empty_stack, seq, ts)) = entered.remove(call_id) {
-                    let t_out = if *was_async {
-                        ev.ts_mono_ns.saturating_add(ASYNC_GRACE_NS)
-                    } else {
-                        ev.ts_mono_ns
-                    };
-                    intervals.push(EvalInterval {
-                        t_in,
-                        t_out,
-                        empty_stack,
-                        seq,
-                        ts,
-                    });
-                }
-            }
             Payload::ModuleEntered { .. } => {
                 module_call_count += 1;
             }
@@ -157,7 +114,6 @@ pub fn detect(events: &[Event]) -> Option<LazyEvalGap> {
             _ => {}
         }
     }
-    intervals.sort_by_key(|e| e.t_in);
 
     // 4. Bucket each CB by the same precedence as breakdown::compute:
     //    containing eval window first, module/scope window second.
@@ -177,10 +133,10 @@ pub fn detect(events: &[Event]) -> Option<LazyEvalGap> {
             .enumerate()
             .find(|(_, e)| e.t_in <= *commit_ts && *commit_ts <= e.t_out);
         if let Some((idx, interval)) = hit {
-            if interval.empty_stack && ns > 0 {
+            if interval.module_stack.is_empty() && ns > 0 {
                 gap_gpu_ns += ns;
                 lazy_evals.insert(idx);
-                let evidence = (interval.seq, interval.ts);
+                let evidence = (interval.seq, interval.t_in);
                 first = Some(first.map_or(evidence, |f| f.min(evidence)));
             }
         }

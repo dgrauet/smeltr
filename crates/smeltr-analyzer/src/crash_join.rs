@@ -243,7 +243,7 @@ pub fn find_jetsam_report(
 pub fn jetsam_finding(j: &JetsamJoin) -> Finding {
     // Decimal GB (1e9), not binary GiB — consistent with how macOS and the
     // jetsam reports themselves express memory footprints.
-    let gb = |b: u64| b as f64 / 1_000_000_000.0;
+    let gb = smeltr_core::fmt::decimal_gb;
     // `per-process-limit` and `vm-pageshortage` call for opposite fixes:
     // shrink the run's footprint versus free up the machine. The reason sits
     // in the report; withholding it throws away the answer to the very
@@ -502,7 +502,7 @@ fn presume_memory_death(
     // Decimal GB (1e9), like `jetsam_finding`: macOS and the jetsam reports
     // express footprints that way, and two findings about the same fact in two
     // different units do not compare.
-    let gb = |b: u64| b as f64 / 1_000_000_000.0;
+    let gb = smeltr_core::fmt::decimal_gb;
     Some(
         Finding::new(
             Severity::Warning,

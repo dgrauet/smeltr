@@ -1,5 +1,6 @@
 use crate::client::Client;
 use clap::Subcommand;
+use smeltr_core::fmt::binary_bytes;
 use smeltr_core::reader::{list_sessions, read_events, read_metadata};
 use smeltr_core::session::SessionId;
 use smeltr_daemon::protocol::{ClientToDaemon, DaemonToClient};
@@ -101,7 +102,7 @@ fn resolve_id(s: &str) -> anyhow::Result<SessionId> {
     }
     // Same resolution as every other session arg (short id, full UUID, or
     // SessionMetadata.name — #164).
-    let dir = smeltr_mcp::types::resolve_session(s)
+    let dir = smeltr_core::session_resolve::resolve_session(s)
         .map_err(|e| anyhow::anyhow!("could not resolve session id `{s}`: {e}"))?;
     Ok(read_metadata(&dir)?.session_id)
 }
@@ -182,7 +183,7 @@ fn print_session(
             } => {
                 format!(
                     "MetalHeapAlloc heap_id=0x{heap_id:x} size={} label={}",
-                    human_bytes(*size_bytes),
+                    binary_bytes(*size_bytes),
                     label.as_deref().unwrap_or("-")
                 )
             }
@@ -200,7 +201,7 @@ fn print_session(
                     heap_id
                         .map(|h| format!("0x{h:x}"))
                         .unwrap_or_else(|| "-".into()),
-                    human_bytes(*size_bytes),
+                    binary_bytes(*size_bytes),
                     label.as_deref().unwrap_or("-")
                 )
             }
@@ -218,7 +219,7 @@ fn print_session(
                     heap_id
                         .map(|h| format!("0x{h:x}"))
                         .unwrap_or_else(|| "-".into()),
-                    human_bytes(*size_bytes),
+                    binary_bytes(*size_bytes),
                     label.as_deref().unwrap_or("-")
                 )
             }
@@ -256,9 +257,9 @@ fn print_session(
             } => {
                 format!(
                     "MlxMemoryPoll active={} peak={} cache={}",
-                    human_bytes(*active_bytes),
-                    human_bytes(*peak_bytes),
-                    human_bytes(*cache_bytes)
+                    binary_bytes(*active_bytes),
+                    binary_bytes(*peak_bytes),
+                    binary_bytes(*cache_bytes)
                 )
             }
             smeltr_core::event::Payload::ProcFootprint {
@@ -283,8 +284,8 @@ fn print_session(
                  lifetime_max={}",
                 killed_pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
                 reason.as_deref().unwrap_or("-"),
-                human_bytes(*footprint_bytes),
-                human_bytes(*lifetime_max_bytes)
+                binary_bytes(*footprint_bytes),
+                binary_bytes(*lifetime_max_bytes)
             ),
             smeltr_core::event::Payload::MlxArrayAlive {
                 array_id,
@@ -295,7 +296,7 @@ fn print_session(
             } => {
                 format!(
                     "MlxArrayAlive id=0x{array_id:x} size={} dtype={dtype} shape={shape:?} stream={stream}",
-                    human_bytes(*size_bytes)
+                    binary_bytes(*size_bytes)
                 )
             }
             smeltr_core::event::Payload::MlxArrayFreed { array_id } => {
@@ -309,7 +310,7 @@ fn print_session(
             } => {
                 format!(
                     "MlxSnapshot arrays={live_arrays} total={} streams={streams:?} mlx={}",
-                    human_bytes(*total_array_bytes),
+                    binary_bytes(*total_array_bytes),
                     mlx_version.as_deref().unwrap_or("none")
                 )
             }
@@ -333,21 +334,6 @@ fn print_session(
         );
     }
     Ok(())
-}
-
-fn human_bytes(b: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    if b >= GIB {
-        format!("{:.2} GiB", b as f64 / GIB as f64)
-    } else if b >= MIB {
-        format!("{:.1} MiB", b as f64 / MIB as f64)
-    } else if b >= KIB {
-        format!("{:.0} KiB", b as f64 / KIB as f64)
-    } else {
-        format!("{b} B")
-    }
 }
 
 #[cfg(test)]
