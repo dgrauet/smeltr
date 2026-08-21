@@ -139,6 +139,7 @@ mod tests {
             signal: Some("SIGSEGV".into()),
             exception_codes: vec![],
             summary: "boom".into(),
+            proc_name: Some("python".into()),
         });
         assert!(matches!(
             classify(&ev),

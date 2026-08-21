@@ -64,6 +64,7 @@ pub fn find_crash_report(
             signal,
             exception_codes,
             summary,
+            ..
         }) = parse_ips(&content, &path.to_string_lossy())
         else {
             continue;

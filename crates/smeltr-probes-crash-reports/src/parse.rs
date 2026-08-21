@@ -9,9 +9,17 @@ struct Header {
 }
 
 #[derive(Deserialize)]
+struct IncidentHeader {
+    #[serde(default)]
+    incident_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct Body {
     #[serde(default)]
     pid: Option<u32>,
+    #[serde(default, rename = "procName")]
+    proc_name: Option<String>,
     #[serde(default)]
     exception: Option<Exception>,
     #[serde(default)]
@@ -163,7 +171,21 @@ pub fn parse_ips(content: &str, path: &str) -> Option<Payload> {
         signal,
         exception_codes: codes_out,
         summary,
+        proc_name: body.proc_name,
     })
+}
+
+/// The incident UUID macOS stamps in the single-line `.ips` header.
+///
+/// Stable identity for one crash across the several passes ReportCrash makes
+/// while writing the report (#227). Returns `None` on a header we cannot read
+/// -- a partially written first pass -- which is why callers must fall back on
+/// something else rather than treat "no id" as "already seen".
+pub fn incident_id(content: &str) -> Option<String> {
+    let (header_line, _) = content.split_once('\n')?;
+    serde_json::from_str::<IncidentHeader>(header_line)
+        .ok()?
+        .incident_id
 }
 
 #[cfg(test)]
@@ -181,6 +203,7 @@ mod tests {
             exception_codes,
             summary,
             path,
+            ..
         } = p
         else {
             panic!()
@@ -193,6 +216,26 @@ mod tests {
             "codes: {exception_codes:?}"
         );
         assert!(summary.contains("kIOGPU"), "summary: {summary}");
+    }
+
+    #[test]
+    fn parses_proc_name() {
+        let p = parse_ips(FIXTURE, "/x/sample.ips").expect("parse failed");
+        let Payload::CrashReportEmitted { proc_name, .. } = p else {
+            panic!()
+        };
+        assert_eq!(proc_name.as_deref(), Some("python"));
+    }
+
+    #[test]
+    fn incident_id_read_from_header() {
+        assert_eq!(incident_id(FIXTURE).as_deref(), Some("ABC123"));
+    }
+
+    #[test]
+    fn incident_id_absent_on_garbage_header() {
+        assert!(incident_id("not json\nbody").is_none());
+        assert!(incident_id("").is_none());
     }
 
     #[test]

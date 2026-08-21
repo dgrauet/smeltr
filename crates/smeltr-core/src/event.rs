@@ -136,6 +136,10 @@ pub enum Payload {
         signal: Option<String>,
         exception_codes: Vec<String>,
         summary: String,
+        /// `procName` from the report body. Additive (#227): sessions
+        /// recorded before it decode with `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proc_name: Option<String>,
     },
     /// The kernel killed a process under memory pressure (jetsam,
     /// `bug_type: 298`). `footprint_bytes` is the footprint at kill time,
@@ -476,6 +480,7 @@ mod tests {
                 signal: Some("SIGABRT".into()),
                 exception_codes: vec!["0x0e".into()],
                 summary: "kIOGPU...".into(),
+                proc_name: Some("python".into()),
             },
             Source::CrashReport,
         );
