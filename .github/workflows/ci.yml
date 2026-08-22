@@ -73,6 +73,9 @@ jobs:
         working-directory: python
         run: |
           uv venv .venv
+          # mlx, not just dev: without it pytest.importorskip silently skipped
+          # the op-breakdown e2e test on every run (#226). The macos-14 runner
+          # has cargo and a working Metal device, so it executes for real.
           uv pip install --python .venv/bin/python -e '.[mlx,dev]'
 
       - name: ruff lint
@@ -86,12 +89,6 @@ jobs:
       - name: ty check
         working-directory: python
         run: .venv/bin/ty check
-
-      - name: probe runner capabilities (temporary, #226)
-        working-directory: python
-        run: |
-          echo "cargo: $(command -v cargo || echo ABSENT) $(cargo --version 2>/dev/null)"
-          .venv/bin/python -c "import mlx.core as mx; print('metal available:', mx.metal.is_available())"
 
       - name: pytest
         working-directory: python
