@@ -1,19 +1,26 @@
-"""End-to-end Phase 2.5: smeltr record on a tiny MLX model produces
-PSO-signature op lines in the breakdown.
+"""End-to-end: smeltr record on a tiny MLX model produces op lines in the
+breakdown.
 
-Phase 2.5 captures each dispatched kernel's MTLComputePipelineState
-pointer + threadgroup dimensions as a synthetic identity (no semantic
-name — MLX 0.31 doesn't emit debug groups). The per-CB in_flight_ns is
-distributed pro-rata by dispatch count to give a rough time-per-kernel
-attribution.
+What is under test is that op-level capture happened at all, not which
+naming path produced the label. The hook builds a synthetic identity from
+the MTLComputePipelineState pointer + threadgroup dimensions
+(`K_<pso_hash16>_<w>x<h>x<d>`), and since #21 also resolves a symbol,
+which the renderer prefers. On a working machine the symbol is the normal
+outcome, so asserting on the `K_` fallback asserted the degraded path and
+failed *because the tool improved* (#226). The precedence between the two
+is covered where it belongs, in
+`smeltr_analyzer::breakdown::render_table_prefers_symbol_over_fingerprint`,
+which pins both directions — do not re-add a naming assertion here.
 
 Skips when MLX isn't installed, not on macOS, or when op-level capture
-is disabled (SMELTR_HOOK_NO_OPS=1).
+is disabled (SMELTR_HOOK_NO_OPS=1). CI installs `.[mlx,dev]` so the MLX
+skip does not silently hide this test there.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -162,8 +169,9 @@ def test_op_breakdown_records_some_op(short_tmp_dir, tmp_path):
     if "op-level capture disabled" in record.stderr:
         pytest.skip("op-level capture disabled — SMELTR_HOOK_NO_OPS=1 or hook inactive")
 
-    # Phase 2.5: op names are PSO+threadgroup signatures, e.g. "K_a3f7_32x1x1".
-    # We assert at least one such line appears in the breakdown table. The
-    # semantic names (Matmul, Softmax, ...) are not recoverable without MLX
-    # emitting debug groups, which it doesn't in 0.31.
-    assert "└ op:K_" in out, f"expected at least one K_<sig>_<dims> op line in breakdown:\n{out}"
+    # Op-level capture produced at least one named kernel. Either naming path
+    # is a pass: a resolved symbol ("block_softmax_float32") or the synthetic
+    # fallback ("K_a3f7_32x1x1"). What must not happen is an empty label or no
+    # op line at all.
+    op_names = re.findall(r"\u2514 op:(\S+)", out)
+    assert op_names, f"expected at least one op line in breakdown:\n{out}"

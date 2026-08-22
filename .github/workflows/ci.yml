@@ -73,7 +73,10 @@ jobs:
         working-directory: python
         run: |
           uv venv .venv
-          uv pip install --python .venv/bin/python -e '.[dev]'
+          # mlx, not just dev: without it pytest.importorskip silently skipped
+          # the op-breakdown e2e test on every run (#226). The macos-14 runner
+          # has cargo and a working Metal device, so it executes for real.
+          uv pip install --python .venv/bin/python -e '.[mlx,dev]'
 
       - name: ruff lint
         working-directory: python
@@ -89,7 +92,7 @@ jobs:
 
       - name: pytest
         working-directory: python
-        run: .venv/bin/pytest tests --ignore=tests/test_e2e_daemon.py
+        run: .venv/bin/pytest tests -rs --ignore=tests/test_e2e_daemon.py
 
   intendant:
     name: intendant audit
