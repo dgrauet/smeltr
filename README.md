@@ -80,7 +80,7 @@ The `libmetal_hook.dylib` is built and **embedded into the `smeltr` binary** at 
 | `thermal` | `kern.thermalstate` (Nominal/Light/Moderate/Heavy) |
 | `oslog` | GPU subsystems + kernel "GPU watchdog" messages via `/usr/bin/log stream` |
 | `ioreport` | v1 stub — real IOReport residency lands in a future plan |
-| `crash-reports` | parses `.ips` files dropped in `~/Library/Logs/DiagnosticReports/` |
+| `crash-reports` | parses `.ips` files dropped in `~/Library/Logs/DiagnosticReports/`, once per incident; smeltrd's own reports are left to its panic hook |
 | `mach-exceptions` | attached only to children spawned by `smeltr record` (same-UID PIDs) |
 
 The Metal hook adds: `MetalCbCommitted`, `MetalCbScheduled`, `MetalCbCompleted` (with status, error code/domain, `in_flight_ns`), `MetalCbWarning` (CBs in-flight > 5s), `MetalCbOps` (per-kernel GPU timing), `MetalDeviceMemSample`, `MetalHeapAlloc`/`Free`, `MetalBufferAlloc`/`Free`, `MetalTextureAlloc`/`Free`, plus `MetalHookSkipped`/`MetalHookDropped` diagnostics when capture degrades (ring corruption, sampling backoff).

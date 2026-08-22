@@ -1,12 +1,57 @@
-use crate::parse::parse_ips;
+use crate::parse::{incident_id, parse_ips};
 use async_trait::async_trait;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use smeltr_core::event::Source;
 use smeltr_probes_core::sink::SharedSink;
 use smeltr_probes_core::{Probe, ProbeError, ProbeHealth};
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// Process whose crash reports the daemon declines to ingest: a crashed
+/// smeltrd already writes its own `post-mortem-daemon-panic-*` session from
+/// its panic hook, carrying the panic message and backtrace the `.ips` does
+/// not have. Ingesting the report on top only adds a poorer duplicate --
+/// and, since our own test suite aborts daemons on purpose, one per
+/// `cargo test` run on the developer's machine (#227).
+///
+/// The cost, deliberately accepted: an smeltrd killed outside the panic hook
+/// (SIGSEGV, SIGKILL) gets no post-mortem session. The report stays on disk
+/// and `smeltr analyze` still joins it (`crash_join.rs`).
+const SELF_PROC_NAME: &str = "smeltrd";
+
+/// Upper bound on remembered incidents. Crash reports are rare; this only
+/// exists so a daemon running for weeks cannot grow the set without limit.
+const SEEN_CAP: usize = 512;
+
+/// Remembers which crash reports have already been emitted.
+///
+/// Keyed on the report's incident UUID, falling back to its path when the
+/// header cannot be read. Nothing is recorded for a report that failed to
+/// parse, so the self-healing re-parse of a partial write (#151) still emits
+/// the first time it succeeds.
+#[derive(Default)]
+struct SeenReports {
+    keys: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl SeenReports {
+    /// Records `key` and reports whether it is new.
+    fn insert(&mut self, key: String) -> bool {
+        if !self.keys.insert(key.clone()) {
+            return false;
+        }
+        self.order.push_back(key);
+        if self.order.len() > SEEN_CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.keys.remove(&old);
+            }
+        }
+        true
+    }
+}
 
 pub struct CrashReportsProbe {
     dirs: Vec<PathBuf>,
@@ -63,6 +108,7 @@ impl Probe for CrashReportsProbe {
             }
         }
         let pid_filter = self.pid_filter.clone();
+        let mut seen = SeenReports::default();
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
@@ -90,6 +136,23 @@ impl Probe for CrashReportsProbe {
                             tracing::warn!(path = %p.display(), "failed to parse .ips crash report (partial write or unknown format)");
                         }
                         if let Some(payload) = parsed {
+                            if let smeltr_core::event::Payload::CrashReportEmitted {
+                                proc_name: Some(name),
+                                ..
+                            } = &payload
+                            {
+                                if name == SELF_PROC_NAME {
+                                    continue;
+                                }
+                            }
+                            // Key on the incident, not the event: ReportCrash
+                            // rewrites a report several times and each pass is
+                            // its own notify event (#227).
+                            let key = incident_id(&content)
+                                .unwrap_or_else(|| p.to_string_lossy().into_owned());
+                            if !seen.insert(key) {
+                                continue;
+                            }
                             if let Some(filter) = &pid_filter {
                                 if let smeltr_core::event::Payload::CrashReportEmitted {
                                     crashed_pid,
@@ -122,12 +185,19 @@ impl Probe for CrashReportsProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smeltr_core::event::Payload;
     use smeltr_probes_core::sink::test_util::CapturingSink;
     use std::sync::Arc;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn detects_ips_file_drop_in_watched_dir() {
+    const FIXTURE: &str = include_str!("../tests/fixtures/sample.ips");
+
+    /// Runs the probe over a temp dir, replays `writes` into it one after the
+    /// other, and returns every CrashReport payload the probe emitted.
+    ///
+    /// Each write is a separate filesystem event: writing the same name twice
+    /// is exactly the Create-then-Modify sequence ReportCrash produces.
+    async fn emitted_for(writes: &[(&str, &str)]) -> Vec<Payload> {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         let probe = CrashReportsProbe::with_dirs(vec![dir.clone()]);
@@ -141,19 +211,84 @@ mod tests {
         });
 
         tokio::time::sleep(Duration::from_millis(600)).await;
-        let fixture = include_str!("../tests/fixtures/sample.ips");
-        std::fs::write(dir.join("python-2026-05-13.ips"), fixture).unwrap();
-
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        for (name, content) in writes {
+            std::fs::write(dir.join(name), content).unwrap();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
         token.cancel();
         let _ = h.await;
 
         let evs = sink.events.lock().unwrap();
-        assert!(
-            evs.iter()
-                .any(|(src, _, _)| matches!(src, Source::CrashReport)),
-            "no CrashReport events seen, got {} events",
-            evs.len()
-        );
+        evs.iter()
+            .filter(|(src, _, _)| matches!(src, Source::CrashReport))
+            .map(|(_, _, payload)| payload.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn detects_ips_file_drop_in_watched_dir() {
+        let evs = emitted_for(&[("python-2026-05-13.ips", FIXTURE)]).await;
+        assert_eq!(evs.len(), 1, "expected exactly one report, got {evs:?}");
+    }
+
+    #[tokio::test]
+    async fn same_report_rewritten_emits_once() {
+        // ReportCrash writes a report in several passes; every pass is a
+        // notify event and re-parsing is deliberate (#151). What must not
+        // repeat is the emission -- each one drives its own post-mortem
+        // session (#227).
+        let evs = emitted_for(&[
+            ("python-2026-05-13.ips", FIXTURE),
+            ("python-2026-05-13.ips", FIXTURE),
+            ("python-2026-05-13.ips", FIXTURE),
+        ])
+        .await;
+        assert_eq!(evs.len(), 1, "expected exactly one report, got {evs:?}");
+    }
+
+    #[tokio::test]
+    async fn partial_then_complete_write_emits_once() {
+        // The self-healing path: the first pass cannot be parsed, so nothing
+        // is remembered and the completed report still gets through -- once.
+        let half = &FIXTURE[..FIXTURE.len() / 2];
+        let evs = emitted_for(&[
+            ("python-2026-05-13.ips", half),
+            ("python-2026-05-13.ips", FIXTURE),
+        ])
+        .await;
+        assert_eq!(evs.len(), 1, "expected exactly one report, got {evs:?}");
+    }
+
+    #[tokio::test]
+    async fn distinct_incidents_both_emit() {
+        let other = FIXTURE.replacen("ABC123", "DEF456", 1);
+        assert_ne!(other, FIXTURE, "fixture must carry an incident id");
+        let evs = emitted_for(&[
+            ("python-2026-05-13.ips", FIXTURE),
+            ("python-2026-05-14.ips", &other),
+        ])
+        .await;
+        assert_eq!(evs.len(), 2, "expected two reports, got {evs:?}");
+    }
+
+    #[tokio::test]
+    async fn reports_without_incident_id_fall_back_to_path() {
+        // A header we cannot read the incident from must not collapse every
+        // such report into one: the path keeps them apart, while repeated
+        // writes of the same path are still deduplicated.
+        let anon = FIXTURE.replacen("\"incident_id\"", "\"unknown_key\"", 1);
+        assert!(incident_id(&anon).is_none());
+        let evs = emitted_for(&[("a.ips", &anon), ("a.ips", &anon), ("b.ips", &anon)]).await;
+        assert_eq!(evs.len(), 2, "expected two reports, got {evs:?}");
+    }
+
+    #[tokio::test]
+    async fn own_daemon_crash_report_is_skipped() {
+        // A crashed smeltrd already writes its own post-mortem session, with
+        // the panic message and backtrace the .ips does not carry (#227).
+        let daemon = include_str!("../tests/fixtures/smeltrd.ips");
+        let evs = emitted_for(&[("smeltrd-2026-08-17-123523.ips", daemon)]).await;
+        assert!(evs.is_empty(), "expected no report, got {evs:?}");
     }
 }
