@@ -33,7 +33,7 @@ pub fn read_footprint(pid: u32) -> Option<Footprint> {
     if rc != 0 {
         return None;
     }
-    // SAFETY: rc == 0 garantit que le noyau a rempli la struct.
+    // SAFETY: rc == 0 guarantees the kernel filled the struct in.
     let ri = unsafe { ri.assume_init() };
     Some(Footprint {
         phys_bytes: ri.ri_phys_footprint,
