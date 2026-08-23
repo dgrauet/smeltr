@@ -6,6 +6,12 @@ use smeltr_probes_core::{Probe, ProbeError, ProbeHealth};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// Cadence of the system-wide CPU sweep. Back to 2s now that a tick costs
+/// 0.02s instead of 0.43s (#217): #220 had slowed it to 5s purely to stop
+/// the probe burning a third of a core, and that reason is gone. The TUI
+/// process panel consumes these samples live, so resolution is worth having.
+const DEFAULT_PERIOD: Duration = Duration::from_secs(2);
+
 pub struct ProcProbe {
     period: Duration,
     top_n: usize,
@@ -14,6 +20,19 @@ pub struct ProcProbe {
 impl ProcProbe {
     pub fn new(period: Duration, top_n: usize) -> Self {
         Self { period, top_n }
+    }
+
+    /// Period from `SMELTR_PROC_PERIOD_MS`, falling back to [`DEFAULT_PERIOD`].
+    ///
+    /// Read in the daemon's process, like `SMELTR_FOOTPRINT_PERIOD_MS`: set it
+    /// on the daemon's environment, not on the `smeltr record` invocation.
+    pub fn default_period() -> Duration {
+        std::env::var("SMELTR_PROC_PERIOD_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_PERIOD)
     }
 }
 
@@ -51,5 +70,34 @@ impl Probe for ProcProbe {
                 .collect();
             sink.emit(Source::Proc, None, Payload::ProcTop { top, flagged });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn default_period_is_two_seconds() {
+        assert_eq!(ProcProbe::default_period(), Duration::from_secs(2));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_var_overrides_period() {
+        std::env::set_var("SMELTR_PROC_PERIOD_MS", "500");
+        assert_eq!(ProcProbe::default_period(), Duration::from_millis(500));
+        std::env::remove_var("SMELTR_PROC_PERIOD_MS");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn zero_and_garbage_fall_back_to_default() {
+        std::env::set_var("SMELTR_PROC_PERIOD_MS", "0");
+        assert_eq!(ProcProbe::default_period(), DEFAULT_PERIOD);
+        std::env::set_var("SMELTR_PROC_PERIOD_MS", "later");
+        assert_eq!(ProcProbe::default_period(), DEFAULT_PERIOD);
+        std::env::remove_var("SMELTR_PROC_PERIOD_MS");
     }
 }

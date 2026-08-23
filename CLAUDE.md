@@ -203,6 +203,17 @@ CBOR length-prefixed frames over a Unix socket. See
 
   **The bundle is large.** Five command buffers of an LTX-2 denoise produced
   6.4 GB. Keep N small and expect gigabytes.
+- `SMELTR_PROC_PERIOD_MS=<n>` — cadence of the `proc` probe's system-wide
+  CPU sweep (default 2000). Read by `ProcProbe::default_period()` in the
+  **daemon** process — set it on the daemon's environment, not on the
+  `smeltr record` invocation. The probe forks `ps -axco pid,%cpu,comm` per
+  tick, measured at 0.02 s. It used to fork `top -l 1` (0.43 s/tick, 30.8 %
+  of a core at 2 s, which is why #220 slowed it to 5 s) — and `top -l 1`
+  reports **0.0 % for every process**, since the CPU column is a difference
+  between two samples and the first has nothing to difference against.
+  Do not "optimise" this into syscalls: `proc_pid_rusage` and
+  `proc_pidinfo(PROC_PIDTBSDINFO)` both return EPERM on root-owned
+  processes, i.e. exactly the daemons worth flagging (#217).
 - `SMELTR_FOOTPRINT_PERIOD_MS=<n>` — sampling cadence for `phys_footprint`
   over the traced process tree (default 2000, aligned with the `proc` probe).
   Read by `FootprintProbe::default_period()`, which runs inside the

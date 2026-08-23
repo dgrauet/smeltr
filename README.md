@@ -76,7 +76,7 @@ The `libmetal_hook.dylib` is built and **embedded into the `smeltr` binary** at 
 | Probe | What it captures |
 |---|---|
 | `vm` | wired / active / compressed memory, swap, page-out rate |
-| `proc` | top-N CPU; flags `ReportCrash` / `diagnosticservicesd` / `UserNotificationCenter` / `spindump` when above threshold |
+| `proc` | top-N CPU via `ps`; flags `ReportCrash` / `diagnosticservicesd` / `UserNotificationCenter` / `spindump` when above threshold |
 | `thermal` | `kern.thermalstate` (Nominal/Light/Moderate/Heavy) |
 | `oslog` | GPU subsystems + kernel "GPU watchdog" messages via `/usr/bin/log stream` |
 | `ioreport` | v1 stub — real IOReport residency lands in a future plan |
