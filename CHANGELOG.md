@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.2](https://github.com/dgrauet/smeltr/compare/v0.28.1...v0.28.2) (2026-08-23)
+
+
+### Bug Fixes
+
+* **probes:** report real per-process CPU, which top -l 1 never did ([#231](https://github.com/dgrauet/smeltr/issues/231)) ([0427d70](https://github.com/dgrauet/smeltr/commit/0427d700a0f3f8bb43737d6d7152f90f872e15f3)), closes [#217](https://github.com/dgrauet/smeltr/issues/217)
+
 ## [0.28.1](https://github.com/dgrauet/smeltr/compare/v0.28.0...v0.28.1) (2026-08-22)
 
 
