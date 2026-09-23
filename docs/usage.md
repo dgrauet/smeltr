@@ -378,9 +378,10 @@ the right scope. Without this, short scopes around lazy-materialized
 work would report `sample_count = 0`.
 
 **Per-scope synchronous samples:** every `smeltr.scope("name")` enter
-and exit triggers a direct `MTLDevice.currentAllocatedSize` read,
-emitted as a `MetalDeviceMemSample` event with `at_event="scope_enter"`
-or `"scope_exit"`. This guarantees `sample_count >= 2` for every user
+and exit reads MLX's Metal allocation (active + cache — the MLX share of
+`MTLDevice.currentAllocatedSize`, the quantity the Metal hook samples) and
+the device's recommended working set, emitted as a `MetalDeviceMemSample`
+event with `at_event="scope_enter"` or `"scope_exit"`. This guarantees `sample_count >= 2` for every user
 scope even when the scope is too short to hit the async sampler.
 Auto-wrapped `mlx.nn.Module.__call__` calls do NOT trigger these reads
 (would balloon overhead at module granularity — thousands of MTL reads

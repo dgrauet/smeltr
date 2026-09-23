@@ -164,8 +164,11 @@ CBOR length-prefixed frames over a Unix socket. See
   surfaced by `list_sessions` and accepted as an alias by every CLI/MCP session arg via
   `smeltr_mcp::types::resolve_session`.
 - `SMELTR_SCOPE_MEM_SAMPLE` — on by default. Every `smeltr.scope("...")` enter and exit
-  reads `MTLDevice.currentAllocatedSize` synchronously and emits a `MetalDeviceMemSample`
-  event with `at_event="scope_enter"|"scope_exit"`. Set to `0` to opt out (one syscall
+  reads MLX's Metal allocation synchronously (`get_active_memory() + get_cache_memory()` —
+  the MLX share of `MTLDevice.currentAllocatedSize`, which the hook's samples report — plus
+  `device_info()["max_recommended_working_set_size"]` as the budget) and emits a
+  `MetalDeviceMemSample` event with `at_event="scope_enter"|"scope_exit"`. Active memory
+  alone understated scope peaks (#243). Set to `0` to opt out (one syscall
   per scope boundary; non-trivial in tight loops). Auto-wrapped `mlx.nn.Module.__call__`
   is NEVER bracketed — bracketing is limited to `_scope_cm` to keep Module-granular
   instrumentation free of MTL reads.

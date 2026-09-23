@@ -84,3 +84,29 @@ def test_auto_module_wrap_does_not_emit_mem_sample(monkeypatch) -> None:
         _modules._pop(cid)
     kinds = [c.get("kind") for c in captured]
     assert kinds == ["ModuleEntered", "ModuleReturned"], kinds
+
+
+def test_device_memory_matches_what_the_metal_hook_measures(monkeypatch) -> None:
+    """#243: scope samples share `MetalDeviceMemSample` with the hook, which
+    reports MTLDevice.currentAllocatedSize and recommendedMaxWorkingSetSize.
+    MLX's Metal allocation is active + cache (the cache is still allocated
+    from Metal), and device_info() carries the recommended working set.
+    Sending active memory alone understated every scope peak, and the
+    missing budget left the over-budget ratios blind."""
+
+    class FakeApi:
+        @staticmethod
+        def get_active_memory():
+            return 100
+
+        @staticmethod
+        def get_cache_memory():
+            return 50
+
+        @staticmethod
+        def device_info():
+            return {"max_recommended_working_set_size": 1000, "memory_size": 4000}
+
+    monkeypatch.setattr(_mlx, "_get_mlx_memory_api", lambda: FakeApi)
+    monkeypatch.setattr(_mlx, "_recommended_working_set", None, raising=False)
+    assert _mlx.read_device_memory_bytes() == (150, 1000)
