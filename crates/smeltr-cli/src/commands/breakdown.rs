@@ -45,7 +45,6 @@ fn parse_field_kv(s: &str) -> Result<(String, FieldValue), String> {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     id: Option<String>,
-    last: bool,
     include_ambient: bool,
     top: usize,
     depth: u16,
@@ -63,7 +62,10 @@ pub fn run(
         other => anyhow::bail!("--group-by must be \"name\" or \"kind\", got {other:?}"),
     };
 
-    let dir = crate::session_resolver::resolve(id, last, include_ambient)?;
+    // No id means the newest recording (`--last` only makes that explicit).
+    // Never prefer post-mortems here: that is analyze's rule, and passing
+    // `--last` into it made `breakdown --last` open post-mortems (#241).
+    let dir = crate::session_resolver::resolve(id, false, include_ambient)?;
     let events =
         read_events(&dir).with_context(|| format!("reading events from {}", dir.display()))?;
     if events.is_empty() {

@@ -45,11 +45,14 @@ Project: Metal/MLX observability tool for macOS Apple Silicon.
   `crates/smeltr-metal-ring/src/writer.rs` (Rust writer used by the daemon) — independent
   implementations of the same byte layout.
 - **Session ref resolution**: `smeltr_core::session_resolve::resolve_session(arg)` accepts short
-  id (8 hex suffix), full UUID, or `SessionMetadata.name` (most-recent-wins on collision). Use it
-  in every new tool that takes a session; `smeltr_mcp::types::resolve_session` is a thin wrapper
-  that only maps the error onto `ToolError`. CLI subcommands take `<SESSION> | --last` (mutually exclusive,
-  clap `required_unless_present`/`conflicts_with`) resolved via
+  id (8 hex, exact — never a substring), full UUID, directory name, or `SessionMetadata.name`
+  (most-recent-wins on collision). Use it in every new tool that takes a session;
+  `smeltr_mcp::types::resolve_session` is a thin wrapper that only maps the error onto
+  `ToolError`. CLI subcommands take `<SESSION> | --last` (mutually exclusive, clap
+  `required_unless_present`/`conflicts_with`) resolved via
   `smeltr_cli::session_resolver::resolve_arg` — `--last` = most recent non-ambient session.
+  "Most recent" is by `started_rfc3339` via `session_resolve::sessions_newest_first`, never by
+  directory name: `post-mortem-*` directories sort after every dated one (#241).
 - **New MCP tool**: file in `crates/smeltr-mcp/src/tools/<name>.rs` with `Params`/`Response`/`run`,
   register `pub mod` in `tools.rs`, add dispatch arm in `server.rs::call_tool` AND a
   `tool::<Params>(...)` entry in `list_tools()`.

@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Identifies a session on disk. Accepts a directory-name suffix match
-/// (e.g. the 8-char short id) or the full directory name.
+/// Identifies a session on disk: short id, full UUID, directory name or
+/// `SessionMetadata.name` (see [`resolve_session`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRef {
     pub id: String,
@@ -22,69 +22,15 @@ pub enum ToolError {
     Serde(#[from] serde_json::Error),
 }
 
-/// Resolve a session ref to a directory path. Tries (in order):
-///   1. Directory-name suffix match (short id / partial). Returns the
-///      most recent matching session.
-///   2. Full-UUID match against `metadata.session_id` (for callers that
-///      pass back the full UUID returned by a previous call).
-///   3. Exact `SessionMetadata.name` match across all sessions
-///      (`smeltr_core::session_resolve::resolve_session_dir_by_name`),
-///      most-recent wins.
-///
-/// Returns `NotFound` if no path matches.
+/// Resolve a session ref to a directory path with the rules every surface
+/// shares ([`smeltr_core::session_resolve::resolve_session`]: short id, full
+/// UUID, directory name or `SessionMetadata.name`), mapped onto `ToolError`.
 pub fn resolve_session(arg: &str) -> Result<std::path::PathBuf, ToolError> {
-    let sessions = smeltr_core::reader::list_sessions()?;
-    if !sessions.is_empty() {
-        for dir in sessions.iter().rev() {
-            if dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.contains(arg))
-                .unwrap_or(false)
-            {
-                return Ok(dir.clone());
-            }
-        }
-    }
-    // Full-UUID match: a 32-hex (or dashed) UUID does not appear in the
-    // short-id-based directory name, so match it against metadata.session_id.
-    if let Ok(want) = arg.parse::<smeltr_core::session::SessionId>() {
-        for dir in sessions.iter().rev() {
-            if smeltr_core::reader::read_metadata(dir)
-                .map(|m| m.session_id == want)
-                .unwrap_or(false)
-            {
-                return Ok(dir.clone());
-            }
-        }
-    }
-    if let Some(dir) = smeltr_core::session_resolve::resolve_session_dir_by_name(arg) {
-        return Ok(dir);
-    }
-    Err(ToolError::NotFound(arg.to_string()))
-}
-
-/// Most recently started recording (directory names sort chronologically:
-/// `YYYY-MM-DD-HHMMSS-<short>`). Ambient sessions are skipped — the daemon
-/// reopens one at every boot, so right after a daemon restart the newest
-/// directory is an (empty) ambient session, not the run the user means by
-/// "last". Falls back to the newest session of any kind when no non-ambient
-/// session exists. `NotFound("<latest>")` when there is none at all. Used
-/// by CLI `--last` flags to skip the list-then-copy-paste dance.
-pub fn latest_session() -> Result<std::path::PathBuf, ToolError> {
-    let sessions = smeltr_core::reader::list_sessions()?;
-    for dir in sessions.iter().rev() {
-        let is_ambient = smeltr_core::reader::read_metadata(dir)
-            .map(|m| matches!(m.kind, smeltr_core::session::SessionKind::Ambient))
-            .unwrap_or(false);
-        if !is_ambient {
-            return Ok(dir.clone());
-        }
-    }
-    sessions
-        .into_iter()
-        .next_back()
-        .ok_or_else(|| ToolError::NotFound("<latest>".to_string()))
+    use smeltr_core::session_resolve::ResolveError;
+    smeltr_core::session_resolve::resolve_session(arg).map_err(|e| match e {
+        ResolveError::Io(e) => ToolError::Io(e),
+        ResolveError::NotFound(s) => ToolError::NotFound(s),
+    })
 }
 
 #[cfg(test)]

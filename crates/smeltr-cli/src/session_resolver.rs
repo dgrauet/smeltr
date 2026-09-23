@@ -2,19 +2,21 @@
 //! over the daemon's Ambient session by default.
 
 use anyhow::{anyhow, Context, Result};
-use smeltr_core::reader::{list_sessions, read_metadata};
+use smeltr_core::reader::read_metadata;
 use smeltr_core::session::SessionKind;
+use smeltr_core::session_resolve::{latest_session, sessions_newest_first};
 use std::path::PathBuf;
 
 /// Pick the session directory the user most likely means.
 ///
-/// Resolution order:
+/// Resolution order ("newest" is by start time, never by directory name):
 /// 1. If `id` is given, resolve it like every other session arg
-///    (`smeltr_core::session_resolve::resolve_session`: short id, full UUID, or
-///    `SessionMetadata.name` — #116).
-/// 2. Else if `prefer_post_mortem` is true, look for a `post-mortem-` dir first.
+///    (`smeltr_core::session_resolve::resolve_session`: short id, full UUID,
+///    directory name or `SessionMetadata.name` — #116).
+/// 2. Else if `prefer_post_mortem` is true (`analyze`), return the newest
+///    post-mortem when nothing was recorded after it (#166).
 /// 3. Else if `include_ambient` is true, return the newest session of any kind.
-/// 4. Else return the newest Scoped session, falling back to newest overall.
+/// 4. Else return the newest recording, falling back to newest overall.
 pub fn resolve(
     id: Option<String>,
     prefer_post_mortem: bool,
@@ -24,7 +26,7 @@ pub fn resolve(
         return smeltr_core::session_resolve::resolve_session(&id)
             .map_err(|e| anyhow!("could not resolve session {id:?}: {e}"));
     }
-    let sessions = list_sessions().context("listing sessions")?;
+    let sessions = sessions_newest_first().context("listing sessions")?;
     if sessions.is_empty() {
         return Err(anyhow!("no sessions found under SMELTR_HOME"));
     }
@@ -35,46 +37,26 @@ pub fn resolve(
                 .map(|n| n.starts_with("post-mortem-"))
                 .unwrap_or(false)
         };
-        if let Some(pm) = sessions.iter().rev().find(|d| is_pm(d)) {
-            // #166: a stale post-mortem must not shadow a scoped session
-            // recorded after it — prefer it only when it is still the most
-            // recent thing that happened. RFC3339 strings compare
-            // chronologically.
-            let pm_started = read_metadata(pm).ok().map(|m| m.started_rfc3339);
-            let newest_scoped_started = sessions.iter().rev().filter(|d| !is_pm(d)).find_map(|d| {
-                read_metadata(d)
-                    .ok()
-                    .filter(|m| matches!(m.kind, SessionKind::Scoped { .. }))
-                    .map(|m| m.started_rfc3339)
-            });
-            let stale = matches!(
-                (&pm_started, &newest_scoped_started),
-                (Some(p), Some(s)) if p < s
-            );
-            if !stale {
-                return Ok(pm.clone());
-            }
+        let is_scoped = |d: &PathBuf| {
+            read_metadata(d)
+                .map(|m| matches!(m.kind, SessionKind::Scoped { .. }))
+                .unwrap_or(false)
+        };
+        // #166: a stale post-mortem must not shadow a scoped session
+        // recorded after it — prefer it only when it is still the most
+        // recent thing that happened.
+        if let Some(pm) = sessions
+            .iter()
+            .find(|d| is_pm(d) || is_scoped(d))
+            .filter(|d| is_pm(d))
+        {
+            return Ok(pm.clone());
         }
     }
     if include_ambient {
-        return sessions
-            .last()
-            .cloned()
-            .ok_or_else(|| anyhow!("no sessions found"));
+        return Ok(sessions[0].clone());
     }
-    // Prefer newest Scoped.
-    for dir in sessions.iter().rev() {
-        if let Ok(meta) = read_metadata(dir) {
-            if matches!(meta.kind, SessionKind::Scoped { .. }) {
-                return Ok(dir.clone());
-            }
-        }
-    }
-    // Fallback: newest of any kind.
-    sessions
-        .last()
-        .cloned()
-        .ok_or_else(|| anyhow!("no sessions found"))
+    latest_session().map_err(|e| anyhow!("{e}"))
 }
 
 /// Common `<SESSION> | --last` resolution for subcommands where the two are
@@ -233,6 +215,20 @@ mod post_mortem_recency_tests {
         );
         let chosen = resolve(None, true, false).unwrap();
         assert_eq!(chosen, sc_dir);
+    }
+
+    #[test]
+    #[serial]
+    fn newest_post_mortem_wins_whatever_its_label() {
+        // #241: `mach-exception` sorts after `crash-report` by name; the
+        // newer post-mortem must win anyway.
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let old = make_session_at("2026-07-01T00:00:00Z", SessionKind::Ambient);
+        let _old = into_post_mortem(old, "post-mortem-mach-exception-2026-07-01-000000-aaaa0000");
+        let new = make_session_at("2026-07-02T00:00:00Z", SessionKind::Ambient);
+        let new = into_post_mortem(new, "post-mortem-crash-report-2026-07-02-000000-bbbb0000");
+        assert_eq!(resolve(None, true, false).unwrap(), new);
     }
 
     #[test]

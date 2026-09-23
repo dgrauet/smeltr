@@ -41,7 +41,9 @@ enum Cmd {
         /// Use the most recent post-mortem session (or newest if none).
         #[arg(long)]
         last: bool,
-        /// Session id or directory-name suffix to analyze.
+        /// Session reference: short id, full UUID, directory name or name.
+        /// Omitted: same as --last.
+        #[arg(conflicts_with = "last")]
         id: Option<String>,
         /// Include the daemon's ambient session when picking --last.
         #[arg(long)]
@@ -49,10 +51,12 @@ enum Cmd {
     },
     /// Per-module GPU time breakdown for an MLX inference session.
     Breakdown {
-        /// Use the most recent session.
+        /// Use the most recent recording.
         #[arg(long)]
         last: bool,
-        /// Session id or directory-name suffix.
+        /// Session reference: short id, full UUID, directory name or name.
+        /// Omitted: same as --last.
+        #[arg(conflicts_with = "last")]
         id: Option<String>,
         /// Include the daemon's ambient session when picking --last.
         #[arg(long)]
@@ -217,7 +221,7 @@ fn main() -> anyhow::Result<()> {
                 include_ambient,
             } => commands::analyze::run(last, id, include_ambient),
             Cmd::Breakdown {
-                last,
+                last: _,
                 id,
                 include_ambient,
                 top,
@@ -231,7 +235,6 @@ fn main() -> anyhow::Result<()> {
                 field_filter,
             } => commands::breakdown::run(
                 id,
-                last,
                 include_ambient,
                 top,
                 depth,
