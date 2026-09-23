@@ -115,6 +115,7 @@ stays on). Use when counter sampling overhead is undesirable.
 | `smeltr doctor` | Audit probe availability and permissions |
 | `smeltr mcp` | Stdio MCP server (Claude integration) |
 | `smeltr daemon install` | Install persistent LaunchAgent |
+| `smeltr daemon start\|stop\|restart\|status` | Control smeltrd — routed through `launchctl` when the LaunchAgent serves this `SMELTR_HOME`; `restart` picks up a rebuilt binary |
 
 Session refs accept the short id (last 8 hex), the full UUID, or the
 `--name` you passed to `record` (most-recent-wins on name collision).
