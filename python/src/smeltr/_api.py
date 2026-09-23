@@ -54,7 +54,7 @@ def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0, poll_hz: floa
         if _client is not None:
             _client.close()
         c = _Client(client_name=client_name)
-        c.connect(timeout_s=timeout_s)
+        c.connect(timeout_s=timeout_s, scope_token=_scope_token)
         _client = c
     try:
         _emit(
@@ -132,7 +132,13 @@ def mark(label: str, **fields: object) -> None:
         from smeltr._modules import _coerce_fields
 
         payload["fields"] = _coerce_fields(fields)
-    _emit(payload)
+    # A no-op when not attached (`_emit` raises RuntimeError), and never
+    # raises: observability must not break user code (#245) — scope()
+    # already behaved this way.
+    try:
+        _emit(payload)
+    except (ClientError, OSError, RuntimeError):
+        pass
 
 
 def now() -> int:
@@ -177,6 +183,12 @@ def export(
     if resolved_session is None:
         if _client is None:
             raise RuntimeError("smeltr.attach() must be called first, or pass session=… explicitly")
+        # Ask now rather than trusting attach(): under `smeltr record` the
+        # recording may register after this process attached.
+        try:
+            _client.hello(_scope_token)
+        except (ClientError, OSError) as e:
+            raise RuntimeError(f"could not ask the daemon for the active session: {e}") from e
         active = _client.active_session
         if not active:
             raise RuntimeError("no active session known by the daemon; pass session=… explicitly")

@@ -40,6 +40,7 @@ async fn serve_once(listener: &UnixListener, event: Event) {
         &DaemonToClient::Welcome {
             daemon_version: "test".into(),
             active_session: smeltr_core::session::SessionId::new(),
+            active_session_ref: String::new(),
         },
     )
     .unwrap();

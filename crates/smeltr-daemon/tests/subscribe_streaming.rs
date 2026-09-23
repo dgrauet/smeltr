@@ -44,6 +44,7 @@ fn subscribe_receives_emitted_events() {
         &mut sub_stream,
         &ClientToDaemon::Hello {
             client: "sub".into(),
+            scope_token: None,
         },
     )
     .unwrap();
@@ -61,6 +62,7 @@ fn subscribe_receives_emitted_events() {
         &mut emit_stream,
         &ClientToDaemon::Hello {
             client: "emit".into(),
+            scope_token: None,
         },
     )
     .unwrap();
@@ -105,6 +107,7 @@ fn subscribe_receives_emitted_events() {
         &mut stop_stream,
         &ClientToDaemon::Hello {
             client: "stop".into(),
+            scope_token: None,
         },
     )
     .unwrap();

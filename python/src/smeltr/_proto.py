@@ -29,5 +29,8 @@ def emit_msg(
     return msg
 
 
-def hello_msg(client: str) -> dict[str, Any]:
-    return {"op": "Hello", "client": client}
+def hello_msg(client: str, scope_token: str | None = None) -> dict[str, Any]:
+    msg: dict[str, Any] = {"op": "Hello", "client": client}
+    if scope_token:
+        msg["scope_token"] = scope_token
+    return msg

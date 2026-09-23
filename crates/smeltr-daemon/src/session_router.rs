@@ -169,6 +169,11 @@ impl SessionRouter {
         Some(id)
     }
 
+    /// Id of the recording registered under `token`, if any.
+    pub fn session_for_token(&self, token: &str) -> Option<SessionId> {
+        self.by_token.lock().unwrap().get(token).map(|s| s.id())
+    }
+
     pub fn ambient_id(&self) -> SessionId {
         self.ambient.id()
     }

@@ -49,6 +49,7 @@ async fn subscribe_events_forwards_bus_events() {
             &mut s,
             &ClientToDaemon::Hello {
                 client: "emit".into(),
+                scope_token: None,
             },
         )
         .unwrap();

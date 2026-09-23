@@ -14,6 +14,7 @@ impl Client {
         let mut c = Self { stream };
         c.send(&ClientToDaemon::Hello {
             client: "smeltr-cli".into(),
+            scope_token: None,
         })
         .await?;
         match c.recv().await? {
