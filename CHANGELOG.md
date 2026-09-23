@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.8](https://github.com/dgrauet/smeltr/compare/v0.28.7...v0.28.8) (2026-09-23)
+
+
+### Bug Fixes
+
+* parity between CLI, MCP and TUI (attribution, clamp, degraded, memory, filters, trace) ([#255](https://github.com/dgrauet/smeltr/issues/255)) ([345c622](https://github.com/dgrauet/smeltr/commit/345c622c55adcb84415154f187686f48bee4178f))
+
 ## [0.28.7](https://github.com/dgrauet/smeltr/compare/v0.28.6...v0.28.7) (2026-09-23)
 
 
