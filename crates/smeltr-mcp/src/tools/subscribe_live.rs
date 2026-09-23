@@ -102,7 +102,11 @@ pub fn summarize_delta(
         .collect();
     by_payload.sort_by(|a, b| b.count.cmp(&a.count).then(a.kind.cmp(&b.kind)));
 
-    // GPU: completed CBs + summed op GPU time over the delta window.
+    // GPU: completed CBs + summed op GPU time over the delta window. Op
+    // times go through the #146 clamp, computed over the whole history —
+    // a CB's window may be set before the cursor — so live numbers match
+    // the TUI's live panel and `smeltr breakdown` (#243).
+    let op_scales = smeltr_analyzer::op_clamp::compute_op_time_scales(events);
     let mut new_cbs: u64 = 0;
     let mut gpu_ns_total: u64 = 0;
     let mut op_acc: BTreeMap<String, (u64, u64)> = BTreeMap::new(); // kind -> (gpu_ns, count)
@@ -112,7 +116,8 @@ pub fn summarize_delta(
             Payload::MetalCbCompleted { .. } => new_cbs += 1,
             Payload::MetalCbOps { ops, .. } => {
                 for o in ops {
-                    gpu_ns_total += o.gpu_ns;
+                    let gpu_ns = op_scales.scaled_gpu_ns(e.seq, o.gpu_ns);
+                    gpu_ns_total += gpu_ns;
                     // Kind → symbol → raw name, like the other breakdown
                     // surfaces (the raw name is a pipeline address).
                     let kind = o
@@ -123,7 +128,7 @@ pub fn summarize_delta(
                         .or_else(|| o.symbol.clone())
                         .unwrap_or_else(|| o.name.clone());
                     let slot = op_acc.entry(kind).or_insert((0, 0));
-                    slot.0 += o.gpu_ns;
+                    slot.0 += gpu_ns;
                     slot.1 += o.count as u64;
                 }
             }
@@ -289,6 +294,47 @@ mod tests {
             gpu_ns,
             count,
         }
+    }
+
+    /// #243: live GPU time goes through the #146 clamp, like the TUI's live
+    /// panel and `smeltr breakdown` — raw op sums exceed wall clock on
+    /// pipelined runs. The CB's window (20 ns) was set before the cursor;
+    /// only its ops (claiming 100 ns) fall in the delta.
+    #[test]
+    fn live_gpu_time_is_clamped_like_the_breakdown() {
+        let evs = vec![
+            ev(
+                1,
+                Source::MetalHook,
+                Payload::MetalCbScheduled {
+                    cb_id: 9,
+                    queue_id: 1,
+                },
+            ),
+            ev(
+                3,
+                Source::MetalHook,
+                Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 20,
+                },
+            ),
+            ev(
+                4,
+                Source::MetalHook,
+                Payload::MetalCbOps {
+                    cb_id: 9,
+                    ops: vec![op("K", "gemm_bf16", 100, 1)],
+                },
+            ),
+        ];
+        let r = summarize_delta(&evs, 2, "s".into(), None, true);
+        assert_eq!(r.gpu.gpu_ms_added, 20.0 / 1e6);
+        assert_eq!(r.top_ops[0].gpu_ms, 20.0 / 1e6);
     }
 
     #[test]
