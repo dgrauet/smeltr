@@ -104,14 +104,30 @@ async fn main() -> anyhow::Result<()> {
     let mut bus_rx = bus.subscribe();
     let mut trigger_shutdown = shutdown_tx.subscribe();
     tokio::spawn(async move {
+        let mut gate = smeltr_daemon::triggers::TriggerGate::new(
+            smeltr_daemon::triggers::TRIGGER_MIN_INTERVAL,
+        );
         loop {
             tokio::select! {
                 msg = bus_rx.recv() => {
                     match msg {
                         Ok(ev) => {
                             if let Some(reason) = smeltr_daemon::triggers::classify(&ev) {
+                                if !gate.admit(&reason, std::time::Instant::now()) {
+                                    tracing::info!(reason = ?reason, "post-mortem trigger rate-limited");
+                                    continue;
+                                }
                                 tracing::warn!(reason = ?reason, "post-mortem trigger fired");
-                                match smeltr_daemon::triggers::flush_post_mortem(&trigger_fr, &reason) {
+                                // Compresses and writes the whole flight
+                                // recorder: keep it off the async workers.
+                                let fr = trigger_fr.clone();
+                                let flush_reason = reason.clone();
+                                let flushed = tokio::task::spawn_blocking(move || {
+                                    smeltr_daemon::triggers::flush_post_mortem(&fr, &flush_reason)
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+                                match flushed {
                                     Ok(summary) => {
                                         tracing::info!(
                                             dir = ?summary.session_dir,
