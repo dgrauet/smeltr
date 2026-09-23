@@ -3,10 +3,13 @@ use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
 pub enum DaemonCmd {
-    /// Spawn smeltrd in the background.
+    /// Start smeltrd: through launchd when the LaunchAgent is installed,
+    /// otherwise as a detached background process.
     Start,
-    /// Send SIGTERM to the running smeltrd.
+    /// Stop smeltrd (via launchd when the LaunchAgent manages it).
     Stop,
+    /// Stop then start smeltrd, e.g. to pick up a rebuilt binary.
+    Restart,
     /// Print PID, socket, sessions dir, and whether the socket responds.
     Status,
     /// Install the LaunchAgent so smeltrd starts automatically at login.
@@ -19,6 +22,10 @@ pub async fn run(cmd: DaemonCmd) -> anyhow::Result<()> {
     match cmd {
         DaemonCmd::Start => start().await,
         DaemonCmd::Stop => stop().await,
+        DaemonCmd::Restart => {
+            stop().await?;
+            start().await
+        }
         DaemonCmd::Status => status().await,
         DaemonCmd::Install => install(),
         DaemonCmd::Uninstall => uninstall(),
@@ -194,20 +201,127 @@ pub fn uninstall() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn pid_file_path() -> PathBuf {
-    let base = std::env::var("SMELTR_HOME")
+fn smeltr_home_dir() -> PathBuf {
+    std::env::var("SMELTR_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let home = std::env::var_os("HOME").expect("HOME must be set");
             PathBuf::from(home).join(".smeltr")
-        });
-    base.join("smeltrd.pid")
+        })
+}
+
+fn pid_file_path() -> PathBuf {
+    smeltr_home_dir().join("smeltrd.pid")
 }
 
 fn read_pid() -> Option<u32> {
     std::fs::read_to_string(pid_file_path())
         .ok()
         .and_then(|s| s.trim().parse().ok())
+}
+
+/// How smeltrd is supervised for the current `SMELTR_HOME`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Supervision {
+    /// No LaunchAgent serves this `SMELTR_HOME`: the CLI owns the daemon.
+    Unmanaged,
+    /// The LaunchAgent is installed for this `SMELTR_HOME`. `loaded` is
+    /// whether launchd currently knows the job, `pid` the process it runs.
+    LaunchAgent { loaded: bool, pid: Option<u32> },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StartAction {
+    SpawnDetached,
+    Kickstart,
+    Bootstrap,
+}
+
+/// Never spawn a detached smeltrd beside the LaunchAgent: it wins the
+/// pid-file claim during launchd's `ThrottleInterval`, and launchd's own
+/// instance then exits and is relaunched every few seconds for as long as
+/// the stray daemon lives (days, in practice), whose output goes nowhere.
+fn start_action(s: Supervision) -> StartAction {
+    match s {
+        Supervision::Unmanaged => StartAction::SpawnDetached,
+        Supervision::LaunchAgent { loaded: true, .. } => StartAction::Kickstart,
+        Supervision::LaunchAgent { loaded: false, .. } => StartAction::Bootstrap,
+    }
+}
+
+/// A live pid-file daemon that the loaded LaunchAgent does not own.
+fn outside_launchd(s: Supervision, live_pid: Option<u32>) -> Option<u32> {
+    match s {
+        Supervision::LaunchAgent { loaded: true, pid } if live_pid != pid => live_pid,
+        _ => None,
+    }
+}
+
+/// `SMELTR_HOME` the plist hands to smeltrd.
+fn plist_smeltr_home(plist: &str) -> Option<String> {
+    let after_key = &plist[plist.find("<key>SMELTR_HOME</key>")?..];
+    let start = after_key.find("<string>")? + "<string>".len();
+    let len = after_key[start..].find("</string>")?;
+    Some(
+        after_key[start..start + len]
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+    )
+}
+
+/// The job's pid from `launchctl print` (top-level `pid = N` line only;
+/// nested blocks are indented deeper).
+fn launchd_pid(print_output: &str) -> Option<u32> {
+    print_output
+        .lines()
+        .find_map(|l| l.strip_prefix("\tpid = "))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+fn launchd_target() -> String {
+    let uid = unsafe { libc_getuid() };
+    format!("gui/{uid}/{LAUNCHAGENT_LABEL}")
+}
+
+fn supervision() -> Supervision {
+    let Ok(plist_path) = launchagent_path() else {
+        return Supervision::Unmanaged;
+    };
+    let Ok(plist) = std::fs::read_to_string(&plist_path) else {
+        return Supervision::Unmanaged;
+    };
+    // A sandbox SMELTR_HOME gets its own CLI-owned daemon; only the home
+    // the agent serves is launchd's to manage.
+    match plist_smeltr_home(&plist) {
+        Some(h) if std::path::Path::new(&h) == smeltr_home_dir() => {}
+        _ => return Supervision::Unmanaged,
+    }
+    match std::process::Command::new("launchctl")
+        .args(["print", &launchd_target()])
+        .output()
+    {
+        Ok(out) if out.status.success() => Supervision::LaunchAgent {
+            loaded: true,
+            pid: launchd_pid(&String::from_utf8_lossy(&out.stdout)),
+        },
+        _ => Supervision::LaunchAgent {
+            loaded: false,
+            pid: None,
+        },
+    }
+}
+
+fn launchctl(args: &[&str]) -> anyhow::Result<()> {
+    let status = std::process::Command::new("launchctl")
+        .args(args)
+        .status()?;
+    anyhow::ensure!(
+        status.success(),
+        "launchctl {} failed: {status}",
+        args.join(" ")
+    );
+    Ok(())
 }
 
 async fn start() -> anyhow::Result<()> {
@@ -217,34 +331,61 @@ async fn start() -> anyhow::Result<()> {
             return Ok(());
         }
     }
-    // Try ./target/debug/smeltrd first (dev), then $PATH.
-    let exe = std::env::current_exe()?;
-    let dev_path = exe.parent().map(|p| p.join("smeltrd"));
-    let smeltrd = match dev_path {
-        Some(p) if p.exists() => p,
-        _ => PathBuf::from("smeltrd"),
+    let spawned = match start_action(supervision()) {
+        StartAction::Kickstart => {
+            launchctl(&["kickstart", &launchd_target()])?;
+            None
+        }
+        StartAction::Bootstrap => {
+            let plist = launchagent_path()?;
+            let uid = unsafe { libc_getuid() };
+            launchctl(&["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])?;
+            None
+        }
+        StartAction::SpawnDetached => {
+            // Try ./target/debug/smeltrd first (dev), then $PATH.
+            let exe = std::env::current_exe()?;
+            let dev_path = exe.parent().map(|p| p.join("smeltrd"));
+            let smeltrd = match dev_path {
+                Some(p) if p.exists() => p,
+                _ => PathBuf::from("smeltrd"),
+            };
+            let child = std::process::Command::new(&smeltrd)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .spawn()?;
+            Some(child.id())
+        }
     };
-    let child = std::process::Command::new(&smeltrd)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::null())
-        .spawn()?;
-    // Give it a moment to write the pid file.
-    for _ in 0..20 {
-        if read_pid().map(process_alive).unwrap_or(false) {
-            println!("smeltrd started (pid {})", child.id());
+    // Give it a moment to write the pid file (launchd may also be inside
+    // its ThrottleInterval right after a stop).
+    for _ in 0..200 {
+        if let Some(pid) = read_pid().filter(|p| process_alive(*p)) {
+            match spawned {
+                Some(_) => println!("smeltrd started (pid {pid})"),
+                None => println!("smeltrd started by launchd (pid {pid})"),
+            }
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    anyhow::bail!("smeltrd did not become healthy within 1s")
+    anyhow::bail!("smeltrd did not become healthy within 10s")
 }
 
 async fn stop() -> anyhow::Result<()> {
-    let pid = read_pid().ok_or_else(|| anyhow::anyhow!("no pid file"))?;
-    if !process_alive(pid) {
-        anyhow::bail!("pid {pid} is not running");
+    // A bare SIGTERM is undone by KeepAlive: unload the job first. The plist
+    // stays, so the agent comes back at next login or `smeltr daemon start`.
+    if let Supervision::LaunchAgent { loaded: true, .. } = supervision() {
+        launchctl(&["bootout", &launchd_target()])?;
+        println!("launchctl booted out {LAUNCHAGENT_LABEL}");
     }
+    // bootout waits for launchd's process; this also catches a daemon
+    // running outside launchd.
+    let Some(pid) = read_pid().filter(|p| process_alive(*p)) else {
+        println!("smeltrd stopped");
+        return Ok(());
+    };
     unsafe {
         if libc_kill(pid as i32, 15) != 0 {
             anyhow::bail!("kill failed: {}", std::io::Error::last_os_error());
@@ -267,6 +408,26 @@ async fn status() -> anyhow::Result<()> {
         }
         Some(pid) => println!("pid:    {pid} (stale, not running)"),
         None => println!("pid:    (no pid file)"),
+    }
+    let sup = supervision();
+    match sup {
+        Supervision::Unmanaged => println!("launchd: not managed"),
+        Supervision::LaunchAgent { loaded: false, .. } => {
+            println!("launchd: {LAUNCHAGENT_LABEL} installed, not loaded")
+        }
+        Supervision::LaunchAgent { pid: Some(p), .. } => {
+            println!("launchd: {LAUNCHAGENT_LABEL} running (pid {p})")
+        }
+        Supervision::LaunchAgent { pid: None, .. } => {
+            println!("launchd: {LAUNCHAGENT_LABEL} loaded, not running")
+        }
+    }
+    if let Some(pid) = outside_launchd(sup, read_pid().filter(|p| process_alive(*p))) {
+        println!(
+            "WARNING: smeltrd pid {pid} runs outside launchd; launchd's instance \
+             cannot start beside it and relaunches in a loop.\n         \
+             Fix: smeltr daemon restart"
+        );
     }
     println!("socket: {}", smeltr_daemon::server::socket_path().display());
     println!(
@@ -319,6 +480,75 @@ mod install_tests {
         assert!(plist.contains("&amp;"));
         assert!(plist.contains("&lt;"));
         assert!(plist.contains("&gt;"));
+    }
+
+    #[test]
+    fn plist_smeltr_home_round_trips_through_plist_content() {
+        let plist = plist_content("/bin/smeltrd", "/Users/u/a & b/.smeltr");
+        assert_eq!(
+            plist_smeltr_home(&plist).as_deref(),
+            Some("/Users/u/a & b/.smeltr")
+        );
+    }
+
+    #[test]
+    fn plist_smeltr_home_absent_without_key() {
+        assert_eq!(plist_smeltr_home("<plist><dict></dict></plist>"), None);
+    }
+
+    #[test]
+    fn launchd_pid_reads_top_level_pid_only() {
+        let print = "gui/501/com.smeltr.daemon = {\n\
+                     \tstate = running\n\
+                     \tendpoints = {\n\
+                     \t\tpid = 999\n\
+                     \t}\n\
+                     \tpid = 76710\n\
+                     }\n";
+        assert_eq!(launchd_pid(print), Some(76710));
+    }
+
+    #[test]
+    fn launchd_pid_none_when_not_running() {
+        let print = "gui/501/com.smeltr.daemon = {\n\tstate = not running\n\truns = 3\n}\n";
+        assert_eq!(launchd_pid(print), None);
+    }
+
+    #[test]
+    fn start_never_spawns_beside_a_launch_agent() {
+        // Spawning a detached smeltrd while the agent is installed is what
+        // made launchd's instance lose the pid-file race and relaunch-loop.
+        assert_eq!(
+            start_action(Supervision::Unmanaged),
+            StartAction::SpawnDetached
+        );
+        assert_eq!(
+            start_action(Supervision::LaunchAgent {
+                loaded: true,
+                pid: None
+            }),
+            StartAction::Kickstart
+        );
+        assert_eq!(
+            start_action(Supervision::LaunchAgent {
+                loaded: false,
+                pid: None
+            }),
+            StartAction::Bootstrap
+        );
+    }
+
+    #[test]
+    fn outside_launchd_flags_a_daemon_launchd_does_not_own() {
+        let loaded = |pid| Supervision::LaunchAgent { loaded: true, pid };
+        assert_eq!(outside_launchd(loaded(None), Some(82120)), Some(82120));
+        assert_eq!(
+            outside_launchd(loaded(Some(1277)), Some(82120)),
+            Some(82120)
+        );
+        assert_eq!(outside_launchd(loaded(Some(1277)), Some(1277)), None);
+        assert_eq!(outside_launchd(loaded(None), None), None);
+        assert_eq!(outside_launchd(Supervision::Unmanaged, Some(82120)), None);
     }
 
     #[test]
