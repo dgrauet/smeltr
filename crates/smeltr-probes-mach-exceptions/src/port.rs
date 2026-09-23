@@ -2,17 +2,22 @@
 
 // ---- Pure parsing of mach_exception_raise / exception_raise messages ----
 //
-// Format (offsets on 64-bit Darwin):
+// Format (offsets on 64-bit Darwin; MIG messages are `#pragma pack(4)`,
+// checked with offsetof against the SDK's __Request__mach_exception_raise_t):
 //
 //   0 | 24 | mach_msg_header_t (msgh_id is at offset 20)
 //  24 |  4 | mach_msg_body_t.msgh_descriptor_count
-//  28 | 16 | thread mach_msg_port_descriptor_t (port name at offset 28)
-//  44 | 16 | task   mach_msg_port_descriptor_t (port name at offset 44)
-//  60 |  8 | NDR_record_t
-//  68 |  4 | exception_type_t (i32)
-//  72 |  4 | mach_msg_type_number_t codeCnt
-//  76 | 8N | int64_t code[N]  (msgid 2405)
-//      | 4N | int32_t code[N]  (msgid 2401)
+//  28 | 12 | thread mach_msg_port_descriptor_t (port name at offset 28)
+//  40 | 12 | task   mach_msg_port_descriptor_t (port name at offset 40)
+//  52 |  8 | NDR_record_t
+//  60 |  4 | exception_type_t (i32)
+//  64 |  4 | mach_msg_type_number_t codeCnt
+//  68 | 8N | int64_t code[N]  (msgid 2405)
+//     | 4N | int32_t code[N]  (msgid 2401)
+//
+// mach_msg_port_descriptor_t is 12 bytes, not 16: a 16-byte assumption read
+// the exception type from the low half of code[0] and never found the task
+// port or the codes (#240).
 
 const MACH_MSG_ID_EXCEPTION_RAISE: u32 = 2401;
 const MACH_MSG_ID_MACH_EXCEPTION_RAISE: u32 = 2405;
@@ -20,17 +25,19 @@ const MAX_DECODED_CODES: usize = 8;
 
 const HEADER_LEN: usize = 24;
 const BODY_LEN: usize = 4;
-const PORT_DESC_LEN: usize = 16;
+const PORT_DESC_LEN: usize = 12;
 const NDR_LEN: usize = 8;
-const TASK_PORT_OFFSET: usize = HEADER_LEN + BODY_LEN + PORT_DESC_LEN; // 44
-const EXC_TYPE_OFFSET: usize = HEADER_LEN + BODY_LEN + 2 * PORT_DESC_LEN + NDR_LEN; // 68
-const CODE_CNT_OFFSET: usize = EXC_TYPE_OFFSET + 4; // 72
-const CODES_OFFSET: usize = CODE_CNT_OFFSET + 4; // 76
+const THREAD_PORT_OFFSET: usize = HEADER_LEN + BODY_LEN; // 28
+const TASK_PORT_OFFSET: usize = THREAD_PORT_OFFSET + PORT_DESC_LEN; // 40
+const EXC_TYPE_OFFSET: usize = TASK_PORT_OFFSET + PORT_DESC_LEN + NDR_LEN; // 60
+const CODE_CNT_OFFSET: usize = EXC_TYPE_OFFSET + 4; // 64
+const CODES_OFFSET: usize = CODE_CNT_OFFSET + 4; // 68
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedException {
     pub exception_type: i32,
     pub codes: Vec<i64>,
+    pub thread_port: u32,
     pub task_port: u32,
 }
 
@@ -46,6 +53,12 @@ pub fn parse_mach_exception_raise(buf: &[u8]) -> Option<ParsedException> {
         MACH_MSG_ID_MACH_EXCEPTION_RAISE => true,
         _ => return None,
     };
+    let thread_port = u32::from_le_bytes([
+        buf[THREAD_PORT_OFFSET],
+        buf[THREAD_PORT_OFFSET + 1],
+        buf[THREAD_PORT_OFFSET + 2],
+        buf[THREAD_PORT_OFFSET + 3],
+    ]);
     let task_port = u32::from_le_bytes([
         buf[TASK_PORT_OFFSET],
         buf[TASK_PORT_OFFSET + 1],
@@ -92,6 +105,7 @@ pub fn parse_mach_exception_raise(buf: &[u8]) -> Option<ParsedException> {
     Some(ParsedException {
         exception_type,
         codes,
+        thread_port,
         task_port,
     })
 }
@@ -101,20 +115,16 @@ mod parse_tests {
     use super::*;
 
     fn synth_msg_64bit_codes() -> Vec<u8> {
-        let mut buf = vec![0u8; 92];
+        let mut buf = vec![0u8; 84];
         buf[20..24].copy_from_slice(&2405u32.to_le_bytes());
         buf[24..28].copy_from_slice(&2u32.to_le_bytes()); // descriptor_count
-                                                          // thread port at 28 = 0
-                                                          // task port at 44 — set to 0xabcd
-        buf[44..48].copy_from_slice(&0xabcdu32.to_le_bytes());
-        // NDR at 60 — zero
-        // exception at 68 = EXC_BAD_ACCESS = 1
-        buf[68..72].copy_from_slice(&1i32.to_le_bytes());
-        // codeCnt at 72 = 2
-        buf[72..76].copy_from_slice(&2u32.to_le_bytes());
-        // codes
-        buf[76..84].copy_from_slice(&1i64.to_le_bytes()); // KERN_INVALID_ADDRESS
-        buf[84..92].copy_from_slice(&0xdead_beefi64.to_le_bytes()); // fault addr
+        buf[28..32].copy_from_slice(&0x1234u32.to_le_bytes()); // thread port
+        buf[40..44].copy_from_slice(&0xabcdu32.to_le_bytes()); // task port
+                                                               // NDR at 52 — zero
+        buf[60..64].copy_from_slice(&1i32.to_le_bytes()); // EXC_BAD_ACCESS
+        buf[64..68].copy_from_slice(&2u32.to_le_bytes()); // codeCnt
+        buf[68..76].copy_from_slice(&1i64.to_le_bytes()); // KERN_INVALID_ADDRESS
+        buf[76..84].copy_from_slice(&0xdead_beefi64.to_le_bytes()); // fault addr
         buf
     }
 
@@ -124,6 +134,7 @@ mod parse_tests {
         let p = parse_mach_exception_raise(&buf).expect("should parse");
         assert_eq!(p.exception_type, 1);
         assert_eq!(p.codes, vec![1i64, 0xdead_beef]);
+        assert_eq!(p.thread_port, 0x1234);
         assert_eq!(p.task_port, 0xabcd);
     }
 
@@ -144,7 +155,7 @@ mod parse_tests {
     fn clamps_excessive_code_count() {
         let mut buf = vec![0u8; 92];
         buf[20..24].copy_from_slice(&2405u32.to_le_bytes());
-        buf[72..76].copy_from_slice(&1000u32.to_le_bytes()); // wildly excessive
+        buf[64..68].copy_from_slice(&1000u32.to_le_bytes()); // wildly excessive
         let r = parse_mach_exception_raise(&buf);
         // Either rejected (buffer too short for 1000 codes) — most likely outcome.
         if let Some(p) = r {
@@ -156,12 +167,12 @@ mod parse_tests {
     fn parses_legacy_exception_raise_32bit_codes() {
         let mut buf = vec![0u8; 92];
         buf[20..24].copy_from_slice(&2401u32.to_le_bytes());
-        buf[72..76].copy_from_slice(&2u32.to_le_bytes());
+        buf[64..68].copy_from_slice(&2u32.to_le_bytes());
         // Two 32-bit codes
-        buf[76..80].copy_from_slice(&42i32.to_le_bytes());
-        buf[80..84].copy_from_slice(&7i32.to_le_bytes());
+        buf[68..72].copy_from_slice(&42i32.to_le_bytes());
+        buf[72..76].copy_from_slice(&7i32.to_le_bytes());
         // exception
-        buf[68..72].copy_from_slice(&10i32.to_le_bytes());
+        buf[60..64].copy_from_slice(&10i32.to_le_bytes());
         let p = parse_mach_exception_raise(&buf).expect("should parse");
         assert_eq!(p.exception_type, 10);
         assert_eq!(p.codes, vec![42i64, 7i64]);
@@ -202,7 +213,11 @@ mod imp {
     const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
     const MACH_PORT_NULL: MachPortT = 0;
 
+    const KERN_FAILURE: KernReturnT = 5;
+    const MACH_PORT_RIGHT_SEND: i32 = 0;
+
     // bits for mach_msg(option):
+    const MACH_SEND_MSG: i32 = 0x00000001;
     const MACH_RCV_MSG: i32 = 0x00000002;
     const MACH_RCV_TIMEOUT: i32 = 0x00000100;
     const MACH_MSG_SUCCESS: KernReturnT = 0;
@@ -212,6 +227,13 @@ mod imp {
         fn task_for_pid(target_tport: MachPortT, pid: i32, t: *mut MachPortT) -> KernReturnT;
         fn mach_port_deallocate(task: MachPortT, name: MachPortT) -> KernReturnT;
         fn mach_port_allocate(task: MachPortT, right: i32, name: *mut MachPortT) -> KernReturnT;
+        fn mach_port_mod_refs(
+            task: MachPortT,
+            name: MachPortT,
+            right: i32,
+            delta: i32,
+        ) -> KernReturnT;
+        fn mach_msg_destroy(msg: *mut MachMsgHeader);
         fn mach_port_insert_right(
             task: MachPortT,
             name: MachPortT,
@@ -251,6 +273,20 @@ mod imp {
         msgh_id: i32,
     }
 
+    // __Reply__mach_exception_raise_t: header + NDR + RetCode.
+    #[repr(C)]
+    struct ExceptionReply {
+        header: MachMsgHeader,
+        ndr: [u8; 8],
+        ret_code: KernReturnT,
+    }
+
+    // NDR_record: little-endian integers, ASCII chars, IEEE floats.
+    const NDR_RECORD: [u8; 8] = [0, 0, 0, 0, 1, 0, 0, 0];
+    const MACH_MSGH_BITS_REMOTE_MASK: u32 = 0x1f;
+    // MIG replies carry the request id + 100.
+    const MIG_REPLY_ID_OFFSET: i32 = 100;
+
     // Minimal envelope big enough to receive an exception_raise message
     // (id=2401). The trailer is treated as opaque.
     #[repr(C)]
@@ -288,6 +324,9 @@ mod imp {
             if kr != KERN_SUCCESS {
                 return Err(std::io::Error::other(format!("mach_port_allocate: {kr}")));
             }
+            // From here on, dropping the receiver releases the port on
+            // every error path.
+            let receiver = ExceptionReceiver { port };
             let kr = mach_port_insert_right(me, port, port, MACH_MSG_TYPE_MAKE_SEND);
             if kr != KERN_SUCCESS {
                 return Err(std::io::Error::other(format!(
@@ -310,12 +349,15 @@ mod imp {
                 EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES,
                 THREAD_STATE_NONE,
             );
+            // The target keeps its own reference to our port; the task
+            // right was only needed for the call.
+            let _ = mach_port_deallocate(me, target_task);
             if kr != KERN_SUCCESS {
                 return Err(std::io::Error::other(format!(
                     "task_set_exception_ports: {kr}"
                 )));
             }
-            Ok(ExceptionReceiver { port })
+            Ok(receiver)
         }
     }
 
@@ -339,19 +381,91 @@ mod imp {
                     &msg as *const ExceptionMsg as *const u8,
                     std::mem::size_of::<ExceptionMsg>(),
                 );
-                let parsed = super::parse_mach_exception_raise(bytes)?;
+                let Some(parsed) = super::parse_mach_exception_raise(bytes) else {
+                    // Not an exception message: release whatever rights it
+                    // carries rather than leaking them.
+                    mach_msg_destroy(&mut msg.header);
+                    return None;
+                };
                 let mut target_pid: u32 = 0;
                 let mut pid_out: i32 = 0;
                 let kr = pid_for_task(parsed.task_port as MachPortT, &mut pid_out);
                 if kr == KERN_SUCCESS && pid_out > 0 {
                     target_pid = pid_out as u32;
                 }
+                let me = mach_task_self();
+                let _ = mach_port_deallocate(me, parsed.thread_port);
+                let _ = mach_port_deallocate(me, parsed.task_port);
+                reply_not_handled(&msg.header);
                 Some(DecodedException {
                     target_pid,
                     exception_type: parsed.exception_type,
                     codes: parsed.codes,
                 })
             }
+        }
+    }
+
+    /// Answer the exception with KERN_FAILURE. The faulting thread blocks
+    /// until its handler replies; "not handled" sends the exception on to
+    /// the host handler (ReportCrash) and then the Unix signal, so the
+    /// process crashes exactly as it would unobserved (#240).
+    unsafe fn reply_not_handled(request: &MachMsgHeader) {
+        let mut reply = ExceptionReply {
+            header: MachMsgHeader {
+                msgh_bits: request.msgh_bits & MACH_MSGH_BITS_REMOTE_MASK,
+                msgh_size: std::mem::size_of::<ExceptionReply>() as u32,
+                msgh_remote_port: request.msgh_remote_port,
+                msgh_local_port: MACH_PORT_NULL,
+                msgh_voucher_port: MACH_PORT_NULL,
+                msgh_id: request.msgh_id + MIG_REPLY_ID_OFFSET,
+            },
+            ndr: NDR_RECORD,
+            ret_code: KERN_FAILURE,
+        };
+        let kr = mach_msg(
+            &mut reply.header,
+            MACH_SEND_MSG,
+            reply.header.msgh_size,
+            0,
+            MACH_PORT_NULL,
+            0,
+            MACH_PORT_NULL,
+        );
+        if kr != MACH_MSG_SUCCESS {
+            tracing::warn!(kr, "mach exception reply failed");
+        }
+    }
+
+    impl Drop for ExceptionReceiver {
+        fn drop(&mut self) {
+            unsafe {
+                let me = mach_task_self();
+                // Send first: once the receive right is gone the name turns
+                // into a dead name and no longer holds a send right.
+                let _ = mach_port_mod_refs(me, self.port, MACH_PORT_RIGHT_SEND, -1);
+                let _ = mach_port_mod_refs(me, self.port, MACH_PORT_RIGHT_RECEIVE, -1);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod drop_tests {
+        use super::*;
+
+        extern "C" {
+            fn mach_port_type(task: MachPortT, name: MachPortT, ptype: *mut u32) -> KernReturnT;
+        }
+
+        #[test]
+        fn dropping_the_receiver_frees_its_port_name() {
+            let receiver = install_for_pid(std::process::id()).unwrap();
+            let port = receiver.port;
+            drop(receiver);
+            let mut ptype = 0u32;
+            let kr = unsafe { mach_port_type(mach_task_self(), port, &mut ptype) };
+            // KERN_INVALID_NAME (15): no right of any kind left under it.
+            assert_eq!(kr, 15, "port name still holds rights 0x{ptype:x}");
         }
     }
 }
@@ -393,6 +507,7 @@ pub use stub::*;
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn install_on_self_runs_or_reports_permission() {
@@ -409,6 +524,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Child half of `real_fault_is_decoded_and_the_faulting_process_dies`.
+    /// `task_for_pid` on another process is refused without root or an
+    /// entitlement, but always allowed on oneself: the child watches its
+    /// own task, prints what the receiver decoded, then faults.
+    #[test]
+    #[ignore = "helper, run by real_fault_is_decoded_and_the_faulting_process_dies"]
+    fn fault_helper() {
+        if std::env::var_os("SMELTR_MACH_EXC_FAULT").is_none() {
+            return;
+        }
+        let receiver = install_for_pid(std::process::id()).unwrap();
+        std::thread::spawn(move || {
+            if let Some(e) = receiver.next(Duration::from_secs(10)) {
+                println!(
+                    "decoded pid={} type={} codes={:?}",
+                    e.target_pid, e.exception_type, e.codes
+                );
+            }
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        unsafe { std::ptr::read_volatile(16 as *const u8) };
+    }
+
+    #[test]
+    fn real_fault_is_decoded_and_the_faulting_process_dies() {
+        use std::io::Read;
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "port::tests::fault_helper",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("SMELTR_MACH_EXC_FAULT", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // The faulting thread waits for the receiver's reply: without one it
+        // never reaches the default handler and the process hangs.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break Some(s);
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        let Some(status) = status else {
+            panic!("faulting process must terminate after the exception; stdout: {out:?}");
+        };
+        assert!(status.signal().is_some(), "killed by a signal: {status:?}");
+        let want = format!("decoded pid={} type=1 codes=[1, 16]", child.id());
+        assert!(
+            out.contains(&want),
+            "want {want:?} (EXC_BAD_ACCESS, KERN_INVALID_ADDRESS at 16), got {out:?}"
+        );
     }
 
     #[cfg(target_os = "macos")]
