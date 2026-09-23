@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.7](https://github.com/dgrauet/smeltr/compare/v0.28.6...v0.28.7) (2026-09-23)
+
+
+### Bug Fixes
+
+* **cli:** write logs to stderr, never onto the MCP JSON-RPC stdout ([#253](https://github.com/dgrauet/smeltr/issues/253)) ([7a1f581](https://github.com/dgrauet/smeltr/commit/7a1f581ea7784fe5963d889c0de3ffb2f7779698))
+* crash reports and post-mortems (get_crash_report, routing, rate limit, pid file, flight recorder) ([#252](https://github.com/dgrauet/smeltr/issues/252)) ([3814dc6](https://github.com/dgrauet/smeltr/commit/3814dc6735dc2a9bbf6f8cdc4e6f1b3b4551d859))
+
 ## [0.28.6](https://github.com/dgrauet/smeltr/compare/v0.28.5...v0.28.6) (2026-09-23)
 
 
