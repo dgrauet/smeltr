@@ -6,13 +6,7 @@ use smeltr_core::event::{Event, Payload};
 
 pub struct SystemPressureRule;
 
-const FLAGGED: &[&str] = &[
-    "ReportCrash",
-    "diagnosticservicesd",
-    "crashanalyticsd",
-    "spindump",
-    "syslogd",
-];
+use smeltr_core::event::PRESSURE_PROCESS_NAMES as FLAGGED;
 
 const CPU_THRESHOLD: f32 = 5.0;
 
@@ -164,5 +158,26 @@ mod tests {
             findings[0].title
         );
         assert_eq!(findings[0].evidence[0].seq, 17, "evidence is the peak");
+    }
+
+    /// #245: the proc probe flags UserNotificationCenter (and the README
+    /// says so) but this rule kept its own, different list.
+    #[test]
+    fn flags_every_process_the_probe_flags() {
+        for name in smeltr_core::event::PRESSURE_PROCESS_NAMES {
+            let events = vec![ev(
+                1,
+                Source::Proc,
+                Payload::ProcTop {
+                    top: vec![ProcEntry {
+                        pid: 100,
+                        name: (*name).into(),
+                        cpu_pct: 12.0,
+                    }],
+                    flagged: vec![],
+                },
+            )];
+            assert_eq!(SystemPressureRule.check(&events).len(), 1, "{name}");
+        }
     }
 }

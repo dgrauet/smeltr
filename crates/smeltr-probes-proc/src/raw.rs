@@ -5,12 +5,7 @@ pub struct ProcSample {
     pub cpu_pct: f32,
 }
 
-pub const FLAGGED_NAMES: &[&str] = &[
-    "ReportCrash",
-    "diagnosticservicesd",
-    "UserNotificationCenter",
-    "spindump",
-];
+pub use smeltr_core::event::PRESSURE_PROCESS_NAMES as FLAGGED_NAMES;
 
 pub const DEFAULT_FLAG_CPU_PCT: f32 = 5.0;
 
