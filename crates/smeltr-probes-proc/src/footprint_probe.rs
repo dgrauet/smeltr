@@ -1,7 +1,7 @@
 //! Memory footprint probe over the traced process tree.
 //!
-//! Unlike [`crate::probe::ProcProbe`], which samples the system-wide top 50 by
-//! forking `/usr/bin/top`, this one targets only the traced process and its
+//! Unlike [`crate::probe::ProcProbe`], which samples system-wide CPU by
+//! forking `/bin/ps`, this one targets only the traced process and its
 //! descendants, and uses nothing but syscalls.
 
 use crate::footprint::{descendants_of, list_processes, read_footprint, Footprint};
@@ -12,10 +12,9 @@ use smeltr_probes_core::{Probe, ProbeError, ProbeHealth};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// Default cadence. Deliberately faster than `ProcProbe`'s (5s): a tick here
-/// costs ~0.6ms of syscalls against 0.6s of forking and exec'ing `top` — a
-/// thousand times less. Nothing forces this probe to slow down, and its
-/// resolution is what yields the memory growth slope preceding a jetsam kill.
+/// Default cadence, aligned with `ProcProbe`'s. A tick costs ~0.6 ms of
+/// syscalls — nothing forces this probe to slow down, and its resolution is
+/// what yields the memory growth slope preceding a jetsam kill.
 const DEFAULT_PERIOD: Duration = Duration::from_secs(2);
 
 /// A zero `phys_bytes` means the process died (or turned zombie) between the

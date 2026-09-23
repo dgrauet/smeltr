@@ -1891,10 +1891,6 @@ static void smeltr_install_encoder_dispatch_swizzles_eager(void) {
     // Known concrete classes for Metal compute/ML encoders on Apple Silicon.
     // _MTL4ComputeCommandEncoder: MTL4 path used by MLX 0.31+ on macOS 15+.
     // MTLLegacySVComputeCommandEncoder: legacy path used on earlier macOS/MLX.
-    // _MTL4MachineLearningCommandEncoder: ML-hardware path used by MLX 0.31+
-    //   on macOS 26 (Darwin 25.x) with Apple Silicon ANE/ML hardware; uses
-    //   setPipelineState: + dispatchNetworkWithIntermediatesHeap: instead of
-    //   standard compute dispatch APIs.
     static const char *encoder_class_names[] = {
         // Only the three concrete compute encoder classes that MLX actually
         // instantiates. Debug/Tools wrappers are Apple-internal proxies with
@@ -1928,14 +1924,12 @@ static void smeltr_install_encoder_dispatch_swizzles_eager(void) {
               (IMP)smeltr_dispatchTGNoOffset_swz, kSmeltrOrigDispatchTGNoOffset },
             { "dispatchThreadsWithIndirectBuffer:",
               (IMP)smeltr_dispatchThrIndirect_swz, kSmeltrOrigDispatchThrIndirect },
-            // MTL4 ML encoder: setPipelineState: (not setComputePipelineState:).
-            // Reuse smeltr_setComputePipelineState_swz — same ABI (id self, SEL, id pso).
-            { "setPipelineState:",
-              (IMP)smeltr_setComputePipelineState_swz, kSmeltrOrigSetPSO },
-            // MTL4 ML encoder dispatch: dispatchNetworkWithIntermediatesHeap:
-            // Reuse smeltr_dispatchThrIndirect_swz — ignores heap arg, records sentinel dispatch.
-            { "dispatchNetworkWithIntermediatesHeap:",
-              (IMP)smeltr_dispatchThrIndirect_swz, kSmeltrOrigDispatchThrIndirect },
+            // No ML-encoder selectors here (#244): none of the classes above
+            // implements them, and they reused the orig-IMP keys of
+            // setComputePipelineState: / dispatchThreadsWithIndirectBuffer:,
+            // so a class with both would call the wrong original.
+            // setPipelineState: must never be swizzled (Apple's ML proxy
+            // crashes); ML dispatches go through SMELTR_HOOK_ML_ENCODER.
             { NULL, NULL, NULL },
         };
         for (int ei = 0; entries[ei].sel_name; ei++) {
