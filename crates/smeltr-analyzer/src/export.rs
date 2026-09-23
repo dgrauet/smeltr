@@ -370,10 +370,7 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
 
     // Emit ModelUnload instant events (ph:"i") on pid=4.
     for (path, ingest_ts_ns, sha8) in &model_unloads {
-        let basename = std::path::Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(path.as_str());
+        let basename = smeltr_core::fmt::basename(path);
         let ts_us = *ingest_ts_ns as f64 / 1000.0;
         let mut args = serde_json::Map::new();
         args.insert("path".into(), serde_json::Value::String(path.clone()));
@@ -394,10 +391,7 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
 
     // Emit ModelLoad swim-lane events (ph:"X") on pid=4.
     for (path, size_bytes, ingest_ts_ns, dur_ns, sha8, framework) in &model_loads {
-        let basename = std::path::Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(path.as_str());
+        let basename = smeltr_core::fmt::basename(path);
         // Load end = ingest; a load that began before the session opened is
         // clamped at t=0 (its visible duration truncates accordingly).
         let start_ns = ingest_ts_ns.saturating_sub(*dur_ns);
@@ -434,11 +428,7 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
         let mut cumulative: HashMap<String, (String, u64)> = HashMap::new();
         for (path, size_bytes, ingest_ts_ns, _dur, sha8, _framework) in &sorted {
             let key = sha8.clone().unwrap_or_else(|| path.clone());
-            let basename = std::path::Path::new(path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(path.as_str())
-                .to_string();
+            let basename = smeltr_core::fmt::basename(path).to_string();
             let ts_us = *ingest_ts_ns as f64 / 1000.0;
             let entry = cumulative.entry(key).or_insert((basename.clone(), 0));
             entry.1 += size_bytes;

@@ -13,13 +13,17 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 
 pub fn socket_path() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("SMELTR_SOCKET") {
+    // An empty variable counts as unset, as in the Python sidecar: an empty
+    // XDG_RUNTIME_DIR used to bind a relative `smeltr.sock` (#245).
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+    if let Some(p) = var("SMELTR_SOCKET") {
         return p.into();
     }
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .or_else(|_| std::env::var("TMPDIR"))
-        .unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(base).join("smeltr.sock")
+    var("XDG_RUNTIME_DIR")
+        .or_else(|| var("TMPDIR"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "/tmp".into())
+        .join("smeltr.sock")
 }
 
 pub struct Server {
@@ -380,6 +384,29 @@ mod tests {
     /// named it whatever the client — and as a raw 16-byte UUID. A client
     /// that sends its scope token now learns its own recording, by a ref
     /// every CLI command resolves.
+    /// #245: an empty `XDG_RUNTIME_DIR` made the daemon bind a relative
+    /// `smeltr.sock` in its cwd, while the Python sidecar (which skips empty
+    /// values) looked in $TMPDIR — and never connected.
+    #[test]
+    #[serial]
+    fn empty_env_values_are_treated_as_unset() {
+        let saved: Vec<_> = ["SMELTR_SOCKET", "XDG_RUNTIME_DIR", "TMPDIR"]
+            .iter()
+            .map(|k| (k, std::env::var_os(k)))
+            .collect();
+        std::env::set_var("SMELTR_SOCKET", "");
+        std::env::set_var("XDG_RUNTIME_DIR", "");
+        std::env::set_var("TMPDIR", "/t");
+        let p = socket_path();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        assert_eq!(p, std::path::PathBuf::from("/t/smeltr.sock"));
+    }
+
     #[tokio::test]
     #[serial]
     async fn welcome_names_the_recording_of_the_clients_scope_token() {
