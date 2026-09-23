@@ -112,9 +112,8 @@ mod sys {
         unsafe {
             let mut usage: XswUsage = std::mem::zeroed();
             let mut size = std::mem::size_of::<XswUsage>();
-            let name = std::ffi::CString::new("vm.swapusage").unwrap();
             let rc = libc::sysctlbyname(
-                name.as_ptr(),
+                c"vm.swapusage".as_ptr(),
                 &mut usage as *mut _ as *mut _,
                 &mut size,
                 std::ptr::null_mut(),

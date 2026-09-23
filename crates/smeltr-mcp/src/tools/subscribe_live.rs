@@ -135,11 +135,7 @@ pub fn summarize_delta(
             Payload::ModelLoad {
                 path, size_bytes, ..
             } => {
-                let name = std::path::Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path.as_str())
-                    .to_string();
+                let name = smeltr_core::fmt::basename(path).to_string();
                 model_loads.push(ModelLoadDelta {
                     name,
                     bytes: *size_bytes,

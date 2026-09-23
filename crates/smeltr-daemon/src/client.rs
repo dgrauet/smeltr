@@ -37,6 +37,7 @@ async fn connect_subscribed(sock_path: &Path, client: &str) -> std::io::Result<O
         &mut buf,
         &ClientToDaemon::Hello {
             client: client.to_string(),
+            scope_token: None,
         },
     )
     .map_err(|e| std::io::Error::other(e.to_string()))?;

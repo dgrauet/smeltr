@@ -32,6 +32,7 @@ impl Rule for QueuePressureRule {
         let mut max_in_flight_ns = 0u64;
         let mut max_in_flight_cb = 0u64;
         let mut max_in_flight_seq = 0u64;
+        let mut max_in_flight_ts = 0u64;
 
         for e in events {
             match &e.payload {
@@ -48,6 +49,7 @@ impl Rule for QueuePressureRule {
                     max_in_flight_ns = *in_flight_ns;
                     max_in_flight_cb = *cb_id;
                     max_in_flight_seq = e.seq;
+                    max_in_flight_ts = e.ts_mono_ns;
                 }
                 _ => {}
             }
@@ -81,7 +83,7 @@ impl Rule for QueuePressureRule {
         if in_flight_alarm {
             f = f.with_evidence(EvidenceRef {
                 seq: max_in_flight_seq,
-                ts_mono_ns: 0,
+                ts_mono_ns: max_in_flight_ts,
                 description: format!(
                     "MetalCbCompleted cb_id={max_in_flight_cb} in_flight={}ms",
                     max_in_flight_ns / 1_000_000
@@ -133,6 +135,8 @@ mod tests {
         let f = QueuePressureRule.check(&events);
         assert_eq!(f.len(), 1);
         assert!(f[0].title.contains("1500ms"));
+        // #245: the evidence was stamped at t=0.
+        assert_eq!(f[0].evidence[0].ts_mono_ns, 100);
     }
 
     #[test]

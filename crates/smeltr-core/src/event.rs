@@ -30,14 +30,25 @@ impl Source {
     }
 }
 
+/// System processes whose CPU use aggravates or signals trouble (crash
+/// reporting, diagnostics, spindumps). The proc probe flags them in
+/// `ProcTop.flagged` and the `system_pressure` rule reports them — one list,
+/// where two had drifted apart (#245).
+pub const PRESSURE_PROCESS_NAMES: &[&str] = &[
+    "ReportCrash",
+    "diagnosticservicesd",
+    "crashanalyticsd",
+    "UserNotificationCenter",
+    "spindump",
+    "syslogd",
+];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcEntry {
     pub pid: u32,
     pub name: String,
     pub cpu_pct: f32,
 }
-
-impl Eq for ProcEntry {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProbeHealthState {

@@ -33,14 +33,11 @@ impl Rule for DuplicateModelLoadRule {
                 } => {
                     if let Some((first_ts, _, _)) = currently_loaded.get(path.as_str()) {
                         // Already loaded — this is a duplicate.
-                        let mb = *size_bytes as f64 / 1_048_576.0;
-                        let basename = std::path::Path::new(path)
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or(path.as_str());
+                        let basename = smeltr_core::fmt::basename(path);
+                        let size = smeltr_core::fmt::binary_bytes(*size_bytes);
                         let title = format!(
                             "Model {basename} loaded again without prior unload \
-                             (size={mb:.1} MB)"
+                             (size={size})"
                         );
                         let detail = format!(
                             "Duplicate load of {path}: first at t={first_ts} ns, \
@@ -269,5 +266,18 @@ mod tests {
             1,
             "load → load → unload → 1 finding (second load precedes the unload)"
         );
+    }
+
+    /// #245: the size was divided by 2^20 and labelled "MB". Tables use
+    /// binary units through `smeltr_core::fmt::binary_bytes`.
+    #[test]
+    fn size_is_labelled_in_binary_units() {
+        let events = vec![
+            model_load_event(1, "/m/model.safetensors", 2 * 1024 * 1024 * 1024),
+            model_load_event(2, "/m/model.safetensors", 2 * 1024 * 1024 * 1024),
+        ];
+        let title = &DuplicateModelLoadRule.check(&events)[0].title;
+        assert!(title.contains("2.00 GiB"), "{title}");
+        assert!(!title.contains(" MB"), "{title}");
     }
 }

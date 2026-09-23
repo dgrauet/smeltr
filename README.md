@@ -71,7 +71,8 @@ The `libmetal_hook.dylib` is built and **embedded into the `smeltr` binary** at 
 
 ## What gets captured
 
-`smeltrd` runs seven probes by default:
+`smeltrd` runs six probes all the time; `smeltr record` adds two per recorded run
+(`footprint`, `mach-exceptions`):
 
 | Probe | What it captures |
 |---|---|
@@ -81,7 +82,8 @@ The `libmetal_hook.dylib` is built and **embedded into the `smeltr` binary** at 
 | `oslog` | GPU subsystems + kernel "GPU watchdog" messages via `/usr/bin/log stream` |
 | `ioreport` | not implemented: reports itself unavailable and records nothing (GPU timing comes from the Metal hook) |
 | `crash-reports` | parses `.ips` files dropped in `~/Library/Logs/DiagnosticReports/`, once per incident; smeltrd's own reports are left to its panic hook |
-| `mach-exceptions` | attached only to children spawned by `smeltr record` (same-UID PIDs) |
+| `footprint` | per recording: physical memory footprint of the traced process tree (the metric jetsam kills on), every 2 s |
+| `mach-exceptions` | per recording: Mach exceptions of the traced process — needs `task_for_pid`, which macOS refuses without root or the debugger entitlement, even same-UID (`smeltr record` says so) |
 
 The Metal hook adds: `MetalCbCommitted`, `MetalCbScheduled`, `MetalCbCompleted` (with status, error code/domain, `in_flight_ns`), `MetalCbWarning` (CBs in-flight > 5s), `MetalCbOps` (per-kernel GPU timing), `MetalDeviceMemSample`, `MetalHeapAlloc`/`Free`, `MetalBufferAlloc`/`Free`, `MetalTextureAlloc`/`Free`, plus `MetalHookSkipped`/`MetalHookDropped` diagnostics when capture degrades (ring corruption, sampling backoff).
 
@@ -99,16 +101,17 @@ stays on). Use when counter sampling overhead is undesirable.
 
 | Command | Purpose |
 |---|---|
-| `smeltr record [--name N] -- <cmd>` | Capture a run (optionally named) |
-| `smeltr mark <label> [--field k=v] [--session <ref>]` | Append a marker; defaults to the newest active recording, `--session` targets one explicitly |
+| `smeltr record [--name N] [--no-hook] -- <cmd>` | Capture a run (optionally named); needs a running daemon |
+| `smeltr record --gputrace <N> \| --gputrace-scope <NAME> -- <cmd>` | Also write a `.gputrace` (Xcode Metal debugger) of the first N command buffers, or of one named scope — gigabytes, opt-in |
+| `smeltr mark <label> [--session <ref>]` | Append a marker; defaults to the newest active recording, `--session` targets one explicitly |
 | `smeltr tui` | Live event feed / timeline (auto-reconnects if the daemon restarts) |
 | `smeltr tail [--session <ref>]` | Stream the live event bus as NDJSON on stdout |
 | `smeltr sessions ls` | List sessions on disk (annotates ambient/scoped) |
-| `smeltr sessions show <id>` | Per-event-kind summary |
+| `smeltr sessions show <id>` | Session metadata, then every event |
 | `smeltr sessions open <id> [--speed N]` | Replay a session in the TUI |
 | `smeltr analyze <id> \| --last` | Run analyzer rules → findings |
 | `smeltr breakdown <id> \| --last [--field k=v]` | Per-module GPU time breakdown (filterable by scope field) |
-| `smeltr memory <id> \| --last` | Per-scope MTLDevice memory peak/avg/end + heap |
+| `smeltr memory <id> \| --last [--timeline [--bucket S]]` | Per-scope memory peak/avg/end, heaps, process footprint, MLX allocator cache; `--timeline` for per-bucket peaks and over-budget windows |
 | `smeltr origins <id> \| --last` | Per-(kind, file:line) GPU attribution (needs `SMELTR_STACK_CAPTURE=1`) |
 | `smeltr compare <id-a> <id-b> \| --last` | A/B regression: scope + op-kind GPU deltas (`--last` = newest recording as B) |
 | `smeltr export <id> \| --last --format chrome-trace\|json` | Dump to Perfetto / Speedscope / raw JSON |

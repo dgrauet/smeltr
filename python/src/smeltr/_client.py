@@ -9,6 +9,7 @@ import os
 import socket
 import struct
 import threading
+import uuid
 from typing import Any
 
 import cbor2
@@ -50,7 +51,7 @@ class _Client:
         self._owner: int | None = None
         self.active_session: str | None = None
 
-    def connect(self, timeout_s: float = 2.0) -> None:
+    def connect(self, timeout_s: float = 2.0, scope_token: str | None = None) -> None:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(timeout_s)
         try:
@@ -62,11 +63,26 @@ class _Client:
                 f"Is the daemon running? Try `smeltr daemon start`."
             ) from e
         self._sock = s
-        self._write_frame(hello_msg(self._client_name))
-        resp = self._read_frame()
+        self.hello(scope_token)
+
+    def hello(self, scope_token: str | None = None) -> None:
+        """(Re-)introduce this client; records the session the daemon says
+        its events land in — its recording, when `scope_token` names one
+        (#245). May be repeated: the recording can register after attach."""
+        if self._sock is None:
+            raise ClientError("client is not connected")
+        with self._lock:
+            self._write_frame(hello_msg(self._client_name, scope_token))
+            resp = self._read_frame()
         if not isinstance(resp, dict) or resp.get("kind") != "Welcome":
             raise ClientError(f"unexpected handshake response: {resp!r}")
-        self.active_session = resp.get("active_session")
+        ref = resp.get("active_session_ref")
+        if not ref:
+            # Daemons before 0.28.10 only send `active_session`, the ambient
+            # session's UUID as 16 raw bytes.
+            raw = resp.get("active_session")
+            ref = uuid.UUID(bytes=raw).hex if isinstance(raw, bytes) and len(raw) == 16 else raw
+        self.active_session = ref if isinstance(ref, str) and ref else None
 
     def emit(
         self,

@@ -202,12 +202,7 @@ pub fn uninstall() -> anyhow::Result<()> {
 }
 
 fn smeltr_home_dir() -> PathBuf {
-    std::env::var("SMELTR_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var_os("HOME").expect("HOME must be set");
-            PathBuf::from(home).join(".smeltr")
-        })
+    smeltr_core::session::smeltr_home()
 }
 
 fn pid_file_path() -> PathBuf {

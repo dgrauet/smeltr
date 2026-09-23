@@ -8,7 +8,8 @@ def test_connect_handshake(fake_daemon):
     c.connect()
     try:
         assert fake_daemon.hello_seen
-        assert c.active_session == "00000000000000000000000000000001"
+        # The Welcome's resolvable ref, not the ambient UUID bytes (#245).
+        assert c.active_session == "ambient1"
     finally:
         c.close()
 
@@ -41,3 +42,15 @@ def test_connect_without_server_raises(short_tmp_dir, monkeypatch):
     c = _Client()
     with pytest.raises(ClientError):
         c.connect(timeout_s=0.5)
+
+
+def test_handshake_with_an_older_daemon_reads_the_uuid_bytes(fake_daemon):
+    """Daemons before active_session_ref only send the ambient UUID as 16
+    raw bytes: turn them into a ref the CLI resolves, never pass bytes on."""
+    fake_daemon.active_session_ref = ""
+    c = _Client()
+    c.connect()
+    try:
+        assert c.active_session == "0" * 32
+    finally:
+        c.close()

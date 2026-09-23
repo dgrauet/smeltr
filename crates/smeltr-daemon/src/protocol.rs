@@ -11,8 +11,15 @@ use smeltr_core::session::SessionId;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op")]
 pub enum ClientToDaemon {
-    /// Open a new connection. Client identifies itself for logs.
-    Hello { client: String },
+    /// Open a new connection. Client identifies itself for logs, and a
+    /// process running under `smeltr record` passes its
+    /// `SMELTR_SCOPE_TOKEN` so the Welcome can name its recording. May be
+    /// sent again at any time to re-read that session.
+    Hello {
+        client: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_token: Option<String>,
+    },
     /// Append an event to the current active session. Server fills in
     /// ts_mono/ts_wall/seq/session_id; client only specifies source/pid/payload.
     Emit {
@@ -73,7 +80,13 @@ pub enum ClientToDaemon {
 pub enum DaemonToClient {
     Welcome {
         daemon_version: String,
+        /// The ambient session. CBOR-encodes as 16 raw bytes.
         active_session: SessionId,
+        /// Short id of the session this client's events land in: the
+        /// recording of its scope token when one is registered, otherwise
+        /// the ambient session. A ref every CLI command resolves (#245).
+        #[serde(default)]
+        active_session_ref: String,
     },
     Ack,
     Error {
@@ -143,6 +156,7 @@ mod tests {
     fn client_msg_round_trip() {
         let m = ClientToDaemon::Hello {
             client: "test".into(),
+            scope_token: None,
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &m).unwrap();

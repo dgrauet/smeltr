@@ -310,7 +310,7 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
     let mut pids: Vec<u32> = vec![*pid];
     let mut known_names: Vec<String> = argv
         .first()
-        .and_then(|a| a.rsplit('/').next())
+        .map(|a| smeltr_core::fmt::basename(a))
         .filter(|s| !s.is_empty())
         .map(|s| vec![s.to_string()])
         .unwrap_or_default();

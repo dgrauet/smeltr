@@ -118,6 +118,12 @@ CBOR length-prefixed frames over a Unix socket. See
 - `SMELTR_RING_PATH` — metal-hook mmap ring file (set by `smeltr record`).
 - `SMELTR_DYLIB` — override path to `libmetal_hook.dylib` (dev override; smeltr ships an embedded copy by default).
 - `SMELTR_HOOK_DISABLE=1` — kill switch for the metal-hook dylib.
+- `SMELTR_HOOK_NO_OPS=1` — disable op-level GPU capture (per-kernel timing, `MetalCbOps`);
+  CB-level capture stays on. For when counter sampling overhead matters.
+- `SMELTR_HOOK_TRACE=1` — verbose hook diagnostics on the target's stderr (`[smeltr-hook
+  trace]`: class lookups, swizzle installs). Debugging the hook itself.
+- `SMELTR_SKIP_DYLIB_BUILD=1` — build-time: `crates/smeltr-cli/build.rs` skips
+  `make -C metal-hook` (CI, cross-compile).
 - `SMELTR_HOOK_FORCE_OS_MAJOR=<n>` — simulate a macOS major version
   (test override; on macOS < 14 the hook auto-skips).
 - `SMELTR_HOOK_SAMPLING_RETRY_MS=<n>` — backoff before retrying stage/dispatch
@@ -145,11 +151,20 @@ CBOR length-prefixed frames over a Unix socket. See
   record one dispatch per network. Emits `K_MLNet_<encoder_addr>` in the
   op breakdown. `setPipelineState:` is deliberately NOT swizzled (Apple's
   ML proxy machinery crashes if it is).
+- `SMELTR_AUTOLOAD=1` — set ONLY by `smeltr record` in the child env: the sidecar's `.pth`
+  hook attaches automatically, no code change. Unset by default, so unrelated Python
+  processes (pytest, notebooks) never attach.
+- `SMELTR_MODULES_DISABLE=1` — the sidecar skips wrapping `mlx.nn.Module.__call__` (no
+  per-module scopes); explicit `smeltr.scope(...)` still works.
+- `SMELTR_DIAGNOSTIC_REPORTS_DIR` — test override: replaces the DiagnosticReports directories
+  the crash/jetsam joins scan (`crash_join::diagnostic_reports_dirs`).
 - `SMELTR_SCOPE_TOKEN` — UUID stamped by `smeltr record` into the child env. The
   Python sidecar reads it at `attach()` and tags every Emit so the daemon
   routes the event to the correct scoped session even when the recorded
   command is a launcher (`uv run`, `poetry run`, `python -m foo`, shell
-  wrapper) and the grandchild PID differs from the spawned child PID.
+  wrapper) and the grandchild PID differs from the spawned child PID. It is also sent in
+  `Hello`, so the daemon's `Welcome.active_session_ref` names that recording
+  (`smeltr.export()` defaults to it).
   Internal plumbing — not for end-user manual override.
 - `SMELTR_SESSION_INDEX=1` — opt-in chunked session format (set it on the
   `smeltr record` invocation: the client forwards a per-session request to

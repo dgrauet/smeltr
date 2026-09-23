@@ -36,13 +36,7 @@ pub async fn run_replay(session_arg: String, speed: f64) -> Result<()> {
 }
 
 fn socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var("SMELTR_SOCKET") {
-        return p.into();
-    }
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .or_else(|_| std::env::var("TMPDIR"))
-        .unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(base).join("smeltr.sock")
+    smeltr_daemon::server::socket_path()
 }
 
 fn resolve_session(arg: &str) -> Result<PathBuf> {

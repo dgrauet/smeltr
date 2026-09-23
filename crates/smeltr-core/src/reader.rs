@@ -42,10 +42,12 @@ pub fn find_session_dir(id: SessionId) -> std::io::Result<Option<PathBuf>> {
 
 pub fn read_metadata(dir: &Path) -> std::io::Result<SessionMetadata> {
     let text = std::fs::read_to_string(metadata_path(dir))?;
-    parse_metadata(&text).ok_or_else(|| {
+    // Keep TOML's own message (field, line): "could not parse" alone left
+    // nothing to act on (#245).
+    toml::from_str::<SessionMetadata>(&text).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "could not parse metadata.toml",
+            format!("could not parse metadata.toml: {e}"),
         )
     })
 }
@@ -190,10 +192,6 @@ fn read_loop<R: std::io::Read>(r: &mut R, path: &Path) -> std::io::Result<Vec<Ev
         }
     }
     Ok(out)
-}
-
-fn parse_metadata(text: &str) -> Option<SessionMetadata> {
-    toml::from_str::<SessionMetadata>(text).ok()
 }
 
 #[cfg(test)]

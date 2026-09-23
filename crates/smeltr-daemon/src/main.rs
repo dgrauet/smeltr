@@ -224,11 +224,5 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn pid_file_path() -> std::path::PathBuf {
-    let base = std::env::var("SMELTR_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var_os("HOME").expect("HOME must be set");
-            std::path::PathBuf::from(home).join(".smeltr")
-        });
-    base.join("smeltrd.pid")
+    smeltr_core::session::smeltr_home().join("smeltrd.pid")
 }

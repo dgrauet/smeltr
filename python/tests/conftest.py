@@ -20,6 +20,9 @@ class FakeDaemon:
         self.sock_path = sock_path
         self.received: list[dict[str, Any]] = []
         self.hello_seen = False
+        self.hello_tokens: list[str | None] = []
+        # What the daemon names as the client's session in its Welcome.
+        self.active_session_ref = "ambient1"
         self._listener: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -66,12 +69,15 @@ class FakeDaemon:
                 if op == "Hello":
                     with self._lock:
                         self.hello_seen = True
+                        self.hello_tokens.append(msg.get("scope_token"))
                     self._write_frame(
                         conn,
                         {
                             "kind": "Welcome",
                             "daemon_version": "fake-0.0.1",
-                            "active_session": "00000000000000000000000000000001",
+                            # The real daemon sends a UUID: 16 raw bytes.
+                            "active_session": bytes(16),
+                            "active_session_ref": self.active_session_ref,
                         },
                     )
                 elif op == "Emit":

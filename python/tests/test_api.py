@@ -67,11 +67,6 @@ def test_session_context_emits_close_on_exception(fake_daemon):
     assert "session-close: crashy" in labels
 
 
-def test_mark_without_attach_raises(fake_daemon):
-    with pytest.raises(RuntimeError):
-        smeltr.mark("oops")
-
-
 def test_now_returns_monotonic_ns():
     a = smeltr.now()
     b = smeltr.now()
@@ -85,3 +80,25 @@ def test_attach_when_daemon_absent_raises(short_tmp_dir, monkeypatch):
     monkeypatch.setenv("SMELTR_SOCKET", os.path.join(short_tmp_dir, "nope.sock"))
     with pytest.raises(ClientError):
         smeltr.attach(timeout_s=0.5, poll_hz=0)
+
+
+def test_mark_without_attach_is_a_no_op():
+    """#245: the migration guide promises mark() is a no-op when not
+    attached; it raised RuntimeError, crashing code run outside record."""
+    import smeltr._api as api
+
+    assert api._client is None
+    smeltr.mark("outside record")
+
+
+def test_mark_survives_a_daemon_error(fake_daemon):
+    """Observability must not break user code: a dead socket mid-run."""
+    smeltr.attach(poll_hz=0)
+    try:
+        import smeltr._api as api
+
+        assert api._client is not None
+        api._client._sock.close()
+        smeltr.mark("after the daemon went away")
+    finally:
+        smeltr.detach()

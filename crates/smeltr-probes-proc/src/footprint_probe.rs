@@ -111,6 +111,7 @@ mod tests {
     use smeltr_core::event::Payload;
 
     #[test]
+    #[serial_test::serial] // reads SMELTR_FOOTPRINT_PERIOD_MS, which siblings set
     fn default_period_is_two_seconds() {
         assert_eq!(FootprintProbe::default_period(), Duration::from_secs(2));
     }

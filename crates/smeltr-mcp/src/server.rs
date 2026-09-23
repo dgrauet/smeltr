@@ -256,7 +256,7 @@ fn tool_list() -> Vec<Tool> {
         ),
         tool::<crate::tools::correlations::Params>(
             "find_correlations",
-            "Find correlated events in a session via the analyzer.",
+            "Events from other sources within ±window of the event `focal_seq` (default ±200 ms), notable ones first, capped (default 50); what the cap drops is counted per kind.",
         ),
         tool::<crate::tools::crash_report::Params>(
             "get_crash_report",
@@ -323,10 +323,12 @@ impl ServerHandler for SmeltrMcpServer {
              JSON openable in chrome://tracing, Perfetto, or Speedscope.\n\
              \n\
              For raw access: `query_events` (filtered event stream), `get_metal_cb_history` \
-             (Metal command-buffer events), `get_crash_report` (crash dumps), `find_correlations` \
-             (deterministic analyzer findings).\n\
+             (Metal command-buffer events), `get_crash_report` (the .ips crash report behind a session), \
+             `find_correlations` (events around one event, by `focal_seq`). Analyzer findings \
+             come from `get_session_summary`.\n\
              \n\
-             Session refs accept short id (8 hex), full UUID, or SessionMetadata.name. Sessions \
+             Session refs accept short id (8 hex), full UUID, directory name, or \
+             SessionMetadata.name. Sessions \
              are recorded via `smeltr record -- <cmd>`; the optional Python sidecar adds \
              `smeltr.scope(\"name\")` for semantic GPU-time attribution.\n\
              \n\

@@ -13,13 +13,17 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 
 pub fn socket_path() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("SMELTR_SOCKET") {
+    // An empty variable counts as unset, as in the Python sidecar: an empty
+    // XDG_RUNTIME_DIR used to bind a relative `smeltr.sock` (#245).
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+    if let Some(p) = var("SMELTR_SOCKET") {
         return p.into();
     }
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .or_else(|_| std::env::var("TMPDIR"))
-        .unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(base).join("smeltr.sock")
+    var("XDG_RUNTIME_DIR")
+        .or_else(|| var("TMPDIR"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "/tmp".into())
+        .join("smeltr.sock")
 }
 
 pub struct Server {
@@ -202,11 +206,20 @@ async fn handle_msg(
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
 ) -> DaemonToClient {
     match msg {
-        ClientToDaemon::Hello { client } => {
+        ClientToDaemon::Hello {
+            client,
+            scope_token,
+        } => {
             tracing::info!(client = %client, "client connected");
+            let active_session_ref = scope_token
+                .as_deref()
+                .and_then(|t| router.session_for_token(t))
+                .unwrap_or_else(|| router.ambient_id())
+                .short();
             DaemonToClient::Welcome {
                 daemon_version: env!("CARGO_PKG_VERSION").to_string(),
                 active_session: router.ambient_id(),
+                active_session_ref,
             }
         }
         ClientToDaemon::Emit {
@@ -367,6 +380,73 @@ mod tests {
     /// #244: when the scoped session cannot be opened, `record` must hear
     /// it — the daemon answered Ack, so the run went on believing it was
     /// recorded while every event it sent landed in the ambient session.
+    /// #245: `smeltr.export()` exported the ambient session — the Welcome
+    /// named it whatever the client — and as a raw 16-byte UUID. A client
+    /// that sends its scope token now learns its own recording, by a ref
+    /// every CLI command resolves.
+    /// #245: an empty `XDG_RUNTIME_DIR` made the daemon bind a relative
+    /// `smeltr.sock` in its cwd, while the Python sidecar (which skips empty
+    /// values) looked in $TMPDIR — and never connected.
+    #[test]
+    #[serial]
+    fn empty_env_values_are_treated_as_unset() {
+        let saved: Vec<_> = ["SMELTR_SOCKET", "XDG_RUNTIME_DIR", "TMPDIR"]
+            .iter()
+            .map(|k| (k, std::env::var_os(k)))
+            .collect();
+        std::env::set_var("SMELTR_SOCKET", "");
+        std::env::set_var("XDG_RUNTIME_DIR", "");
+        std::env::set_var("TMPDIR", "/t");
+        let p = socket_path();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        assert_eq!(p, std::path::PathBuf::from("/t/smeltr.sock"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn welcome_names_the_recording_of_the_clients_scope_token() {
+        let _home = temp_env();
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let router = Arc::new(SessionRouter::new(ambient.clone(), None, None));
+        let sink = Arc::new(DaemonSink {
+            router: router.clone(),
+        });
+        let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let scoped = router
+            .attach_scoped(
+                4242,
+                vec!["x".into()],
+                Some("tok".into()),
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+
+        let hello = |token: Option<&str>| ClientToDaemon::Hello {
+            client: "t".into(),
+            scope_token: token.map(str::to_string),
+        };
+        let reply = |r: DaemonToClient| match r {
+            DaemonToClient::Welcome {
+                active_session_ref, ..
+            } => active_session_ref,
+            other => panic!("{other:?}"),
+        };
+        let bus = Bus::new();
+        let mine = handle_msg(hello(Some("tok")), &router, &bus, &probe_runtime, &tx).await;
+        let anon = handle_msg(hello(None), &router, &bus, &probe_runtime, &tx).await;
+        probe_runtime.shutdown().await;
+        assert_eq!(reply(mine), scoped.short());
+        assert_eq!(reply(anon), ambient.id().short());
+    }
+
     #[tokio::test]
     #[serial]
     async fn attach_reports_a_session_that_failed_to_open() {
@@ -424,6 +504,7 @@ mod tests {
             &mut s,
             &ClientToDaemon::Hello {
                 client: "test".into(),
+                scope_token: None,
             },
         )
         .await
