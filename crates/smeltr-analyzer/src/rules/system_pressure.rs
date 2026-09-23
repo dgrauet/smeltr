@@ -21,8 +21,13 @@ impl Rule for SystemPressureRule {
         "system_pressure"
     }
 
+    /// One finding per flagged process, not per sample: `ProcTop` arrives
+    /// every 2 s, so a minute of `spindump` used to yield ~30 identical
+    /// warnings (#244). The finding carries the peak and how many samples
+    /// crossed the threshold; its evidence is the peak sample.
     fn check(&self, events: &[Event]) -> Vec<Finding> {
-        let mut out = Vec::new();
+        // name -> (samples over threshold, peak cpu, peak seq, peak ts)
+        let mut by_name: Vec<(String, u32, f32, u64, u64)> = Vec::new();
         for ev in events {
             if let Payload::ProcTop { top, .. } = &ev.payload {
                 for proc in top {
@@ -32,19 +37,41 @@ impl Rule for SystemPressureRule {
                     if !FLAGGED.iter().any(|n| proc.name.contains(n)) {
                         continue;
                     }
-                    let title = format!("{} consuming {:.1}% CPU", proc.name, proc.cpu_pct);
-                    out.push(
-                        Finding::new(Severity::Warning, Category::SystemPressure, title)
-                            .with_evidence(EvidenceRef {
-                                seq: ev.seq,
-                                ts_mono_ns: ev.ts_mono_ns,
-                                description: format!("ProcTop at ts={}", ev.ts_mono_ns),
-                            }),
-                    );
+                    match by_name.iter_mut().find(|(n, ..)| *n == proc.name) {
+                        Some(slot) => {
+                            slot.1 += 1;
+                            if proc.cpu_pct > slot.2 {
+                                (slot.2, slot.3, slot.4) = (proc.cpu_pct, ev.seq, ev.ts_mono_ns);
+                            }
+                        }
+                        None => by_name.push((
+                            proc.name.clone(),
+                            1,
+                            proc.cpu_pct,
+                            ev.seq,
+                            ev.ts_mono_ns,
+                        )),
+                    }
                 }
             }
         }
-        out
+        by_name
+            .into_iter()
+            .map(|(name, samples, peak, seq, ts)| {
+                let title = if samples == 1 {
+                    format!("{name} consuming {peak:.1}% CPU")
+                } else {
+                    format!("{name} consuming up to {peak:.1}% CPU ({samples} samples)")
+                };
+                Finding::new(Severity::Warning, Category::SystemPressure, title).with_evidence(
+                    EvidenceRef {
+                        seq,
+                        ts_mono_ns: ts,
+                        description: format!("peak ProcTop at ts={ts}"),
+                    },
+                )
+            })
+            .collect()
     }
 }
 
@@ -106,5 +133,36 @@ mod tests {
             },
         )];
         assert!(SystemPressureRule.check(&events).is_empty());
+    }
+
+    /// #244: one finding per 2 s sample meant ~30 identical warnings for a
+    /// minute of `spindump` — the flood #115 removed from `mlx_timing`.
+    #[test]
+    fn one_finding_per_process_with_its_peak() {
+        let events: Vec<Event> = (1..=30u64)
+            .map(|i| {
+                ev(
+                    i,
+                    Source::Proc,
+                    Payload::ProcTop {
+                        top: vec![ProcEntry {
+                            pid: 100,
+                            name: "spindump".into(),
+                            cpu_pct: if i == 17 { 31.0 } else { 8.0 },
+                        }],
+                        flagged: vec![],
+                    },
+                )
+            })
+            .collect();
+        let findings = SystemPressureRule.check(&events);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].title.contains("31.0%"), "{}", findings[0].title);
+        assert!(
+            findings[0].title.contains("30 samples"),
+            "{}",
+            findings[0].title
+        );
+        assert_eq!(findings[0].evidence[0].seq, 17, "evidence is the peak");
     }
 }
