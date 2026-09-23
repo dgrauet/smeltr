@@ -47,10 +47,19 @@ Best for: a quick experiment, a single benchmark, a crash repro.
 smeltr record python my_inference.py
 ```
 
-`smeltr record` will:
-1. Spawn `smeltrd` if not already running.
-2. Inject `libmetal_hook.dylib` into the target process via `DYLD_INSERT_LIBRARIES`.
+`smeltr record` needs a running daemon — install it once with
+`smeltr daemon install` (LaunchAgent), or start it with `smeltr daemon start`;
+`record` does not start it and stops with "Is the daemon running?" otherwise.
+It will:
+1. Inject `libmetal_hook.dylib` into the target process via `DYLD_INSERT_LIBRARIES`
+   (skip it with `--no-hook`).
+2. Open a scoped session for the target and attach the per-run probes.
 3. Wait for the target to exit, then flush and close the session.
+
+Opt-in Metal captures, openable in Xcode's Metal debugger: `--gputrace <N>`
+records the first N command buffers; `--gputrace-scope <NAME>` records the
+work of one named `smeltr.scope(...)` (needs the Python sidecar). Both
+produce gigabytes — keep them narrow.
 
 The session lands in `~/.smeltr/sessions/<timestamp>-<id>/`.
 
@@ -89,7 +98,8 @@ smeltr daemon uninstall
 |---|---|---|
 | `smeltr tui` | During or after a run | Live UI: event feed, timeline, queue depth, MLX memory; press `K` to toggle a rolling top-5 hot-kernels panel |
 | `smeltr sessions ls` | After | List sessions on disk |
-| `smeltr sessions show <id>` | After | One-line per event-kind summary |
+| `smeltr sessions show <id>` | After | Session metadata, then every event, one per line |
+| `smeltr memory <id> \| --last [--timeline]` | After | Per-scope memory, process footprint, MLX allocator; `--timeline` for per-bucket peaks and over-budget windows (`--bucket` seconds) |
 | `smeltr analyze <id>` | After | Run analyzer rules → findings (queue pressure, crash correlation, etc.) |
 | `smeltr breakdown [--last] [<id>]` | After | Per-module + per-op GPU time breakdown for an MLX inference session |
 | `smeltr mcp` (in Claude) | After | Query sessions from a Claude conversation via MCP tools |
@@ -196,7 +206,7 @@ def guided_step(...): ...
 
 with smeltr.scope("denoise.pass:cond"):
     cond_x0 = model(**cond_kwargs)
-    mx.core.eval(cond_x0)  # eval must occur inside the scope
+    mx.eval(cond_x0)  # eval must occur inside the scope
 ```
 
 `get_inference_breakdown` then returns a tree where `denoise.pass:cond`
@@ -204,7 +214,7 @@ appears as a node with its rolled-up `gpu_ns_subtree`, `kernel_count`,
 and top kernel ops.
 
 **Important:** kernels are attributed by the `module_stack` snapshot
-taken at `mx.core.eval()` time. If your eval (or implicit eval at array
+taken at `mx.eval()` time. If your eval (or implicit eval at array
 materialization) happens *outside* the `with smeltr.scope(...)` block,
 the kernels go into `unscoped_gpu_ns`. The general pattern is "compute
 and materialize inside the scope".
@@ -225,7 +235,7 @@ scope without encoding them in the name:
 ```python
 with smeltr.scope("denoise.step", step=step_idx, sigma=float(sigma)):
     cond_x0 = model(**cond_kwargs)
-    mx.core.eval(cond_x0)
+    mx.eval(cond_x0)
 
 @smeltr.scope("forward", layer=3)
 def forward(self, x): ...
@@ -265,18 +275,20 @@ without a `kind`.
 
 ### Naming sessions
 
-Label a session via `SMELTR_SESSION_NAME` or `smeltr record --name`:
+Label a recording with `smeltr record --name`, or with `SMELTR_SESSION_NAME`
+in `record`'s environment (`--name` wins). Outside `smeltr record` the
+variable names nothing — the run is not recorded:
 
 ```bash
-SMELTR_SESSION_NAME="ltx2-baseline-480x704x33" ./pipeline.py
 smeltr record --name "ltx2-batched-cfg" -- ./pipeline.py
+SMELTR_SESSION_NAME="ltx2-baseline-480x704x33" smeltr record -- ./pipeline.py
 ```
 
-`smeltr session ls` shows the name (when set) as a `name="..."` suffix.
+`smeltr sessions ls` shows the name (when set) as a `name="..."` suffix.
 `list_sessions` (MCP) surfaces it as the `name` field per session.
 
 Any MCP tool or CLI command that takes a session id (short id, full
-UUID) also accepts the name. On collision (multiple sessions sharing
+UUID, directory name) also accepts the name. On collision (multiple sessions sharing
 a name), the **most recent** wins — use the short id when you need a
 specific older session.
 
@@ -302,9 +314,11 @@ Equivalent paths:
 - **MCP:** `export_session(session, format, output_path)` writes the
   file and returns its path.
 - **Python:** `smeltr.export(filepath, format="chrome-trace", session=None)`.
-  With no `session`, uses the active session known to the connected
-  daemon. Drop it in an `atexit` or `finally` block to dump traces at
-  end of a CI run.
+  With no `session`, exports this process's recording when it runs under
+  `smeltr record` (the daemon matches its `SMELTR_SCOPE_TOKEN`), else the
+  daemon's ambient session. Drop it in an `atexit` or `finally` block to
+  dump traces at end of a CI run — it covers what was recorded up to that
+  point.
 
 The chrome-trace output uses three swimlanes:
 

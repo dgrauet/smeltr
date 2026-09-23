@@ -9,7 +9,8 @@ use smeltr_daemon::protocol::{ClientToDaemon, DaemonToClient};
 pub enum SessionsCmd {
     /// List sessions on disk.
     Ls,
-    /// Show summary + events of a session. Pass an 8-char short id or a full UUID.
+    /// Show a session's metadata, then every event. Session reference: short id,
+    /// full UUID, directory name or name.
     Show { id: String },
     /// Open a session in the TUI replay mode.
     Open {
