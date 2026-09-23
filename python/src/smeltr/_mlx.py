@@ -12,7 +12,11 @@ from smeltr._api import _detect_mlx_version, _emit, _require_attached  # type: i
 
 # array_id -> (size_bytes, dtype, shape, stream)
 _tracked: dict[int, tuple[int, str, list[int], str]] = {}
-_tracked_lock = threading.Lock()
+# Re-entrant: the SIGTERM handler (snapshot) and weakref finalizers
+# (_on_free, run by GC on whatever thread allocates) can fire while their
+# own thread is inside a `with _tracked_lock:` block (#239). Dict operations
+# are atomic per bytecode, so a nested access cannot tear _tracked.
+_tracked_lock = threading.RLock()
 
 
 _STACK_CAPTURE_DEPTH = 3  # top N non-smeltr frames
