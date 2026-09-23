@@ -325,11 +325,9 @@ fn launchctl(args: &[&str]) -> anyhow::Result<()> {
 }
 
 async fn start() -> anyhow::Result<()> {
-    if let Some(pid) = read_pid() {
-        if process_alive(pid) {
-            println!("smeltrd already running (pid {pid})");
-            return Ok(());
-        }
+    if let Some(pid) = live_pid() {
+        println!("smeltrd already running (pid {pid})");
+        return Ok(());
     }
     // Both launchd (plist) and the detached spawn below append the daemon's
     // output here; errors written after this offset are this start's.
@@ -428,7 +426,7 @@ async fn stop() -> anyhow::Result<()> {
     }
     // bootout waits for launchd's process; this also catches a daemon
     // running outside launchd.
-    let Some(pid) = read_pid().filter(|p| process_alive(*p)) else {
+    let Some(pid) = live_pid() else {
         println!("smeltrd stopped");
         return Ok(());
     };
@@ -449,10 +447,10 @@ async fn stop() -> anyhow::Result<()> {
 
 async fn status() -> anyhow::Result<()> {
     match read_pid() {
-        Some(pid) if process_alive(pid) => {
+        Some(pid) if live_pid() == Some(pid) => {
             println!("pid:    {pid}");
         }
-        Some(pid) => println!("pid:    {pid} (stale, not running)"),
+        Some(pid) => println!("pid:    {pid} (stale, no smeltrd runs under it)"),
         None => println!("pid:    (no pid file)"),
     }
     let sup = supervision();
@@ -468,7 +466,7 @@ async fn status() -> anyhow::Result<()> {
             println!("launchd: {LAUNCHAGENT_LABEL} loaded, not running")
         }
     }
-    if let Some(pid) = outside_launchd(sup, read_pid().filter(|p| process_alive(*p))) {
+    if let Some(pid) = outside_launchd(sup, live_pid()) {
         println!(
             "WARNING: smeltrd pid {pid} runs outside launchd; launchd's instance \
              cannot start beside it and relaunches in a loop.\n         \
@@ -481,6 +479,13 @@ async fn status() -> anyhow::Result<()> {
         std::env::var("SMELTR_HOME").unwrap_or_else(|_| "$HOME/.smeltr".into())
     );
     Ok(())
+}
+
+/// The pid file's pid when a smeltrd runs under it. A bare liveness check
+/// took a reused pid for the daemon after an unclean stop, and `stop` would
+/// then signal that process (#242).
+fn live_pid() -> Option<u32> {
+    smeltr_daemon::recovery::live_daemon_pid(&pid_file_path())
 }
 
 fn process_alive(pid: u32) -> bool {
