@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.9](https://github.com/dgrauet/smeltr/compare/v0.28.8...v0.28.9) (2026-09-23)
+
+
+### Bug Fixes
+
+* probe drift (hook timestamps, thermal, ps locale, supervision, IOReport stub, …) ([#257](https://github.com/dgrauet/smeltr/issues/257)) ([d295a48](https://github.com/dgrauet/smeltr/commit/d295a4894397980648a6180c97197dc0512b79f3))
+
 ## [0.28.8](https://github.com/dgrauet/smeltr/compare/v0.28.7...v0.28.8) (2026-09-23)
 
 
