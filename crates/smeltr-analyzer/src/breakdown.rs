@@ -108,6 +108,22 @@ pub struct CompletedCbs {
 /// a real run (#127). The hook emits `CbOps` immediately after the matching
 /// `CbCompleted`, which is what makes the chronological pairing exact.
 pub fn completed_command_buffers(events: &[Event]) -> CompletedCbs {
+    pair_command_buffers(events, None)
+}
+
+/// [`completed_command_buffers`] with every op time rescaled by the #146
+/// clamp, for consumers that only borrow the events (breakdown clamps its
+/// own copy in place first). Without it, the lazy-eval rule and origins
+/// summed raw op times that exceed wall clock on pipelined runs.
+pub fn clamped_command_buffers(events: &[Event]) -> CompletedCbs {
+    let scales = crate::op_clamp::compute_op_time_scales(events);
+    pair_command_buffers(events, Some(&scales))
+}
+
+fn pair_command_buffers(
+    events: &[Event],
+    scales: Option<&crate::op_clamp::OpTimeScales>,
+) -> CompletedCbs {
     let mut cb_commit_ts: HashMap<u64, u64> = HashMap::new();
     let mut completed: Vec<CompletedCb> = Vec::new();
     let mut last_completed_idx: HashMap<u64, usize> = HashMap::new();
@@ -134,7 +150,13 @@ pub fn completed_command_buffers(events: &[Event]) -> CompletedCbs {
             Payload::MetalCbOps { cb_id, ops } => {
                 seen_any_cb_ops = true;
                 if let Some(&i) = last_completed_idx.get(cb_id) {
-                    completed[i].ops = Some(ops.clone());
+                    let mut ops = ops.clone();
+                    if let Some(scales) = scales {
+                        for op in &mut ops {
+                            op.gpu_ns = scales.scaled_gpu_ns(ev.seq, op.gpu_ns);
+                        }
+                    }
+                    completed[i].ops = Some(ops);
                 }
             }
             _ => {}
@@ -216,9 +238,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     let mut no_eval_window: Vec<(u64, u64, Option<&Vec<OpSample>>)> = Vec::new();
     for cb in &cb_completed {
         let commit_ts = &cb.commit_ts;
-        let idx = eval_intervals
-            .iter()
-            .position(|e| e.t_in <= *commit_ts && *commit_ts <= e.t_out);
+        let idx = crate::windows::eval_at(&eval_intervals, *commit_ts);
         let ops_for_cb = cb.ops.as_ref();
         if seen_any_cb_ops && ops_for_cb.is_none() {
             ops_cbs_without_samples += 1;
@@ -400,9 +420,12 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         }
     }
 
+    // A node whose parent never entered (lost `ModuleEntered`: ring drop,
+    // sidecar attached mid-run) is a root too — otherwise its time is
+    // counted as attributed yet shown nowhere (#243).
     let roots: Vec<u64> = calls
         .iter()
-        .filter(|(_, n)| n.parent.is_none())
+        .filter(|(_, n)| n.parent.is_none_or(|p| !calls.contains_key(&p)))
         .map(|(k, _)| *k)
         .collect();
     let mut root_children: Vec<ModuleBreakdown> = roots.iter().map(|r| build(*r, &calls)).collect();
@@ -1291,6 +1314,79 @@ mod tests {
             .iter()
             .find(|c| c.qualname == qualname)
             .unwrap_or_else(|| panic!("missing child {qualname}"))
+    }
+
+    fn module_entered(seq: u64, ts: u64, id: u64, name: &str, parent: Option<u64>) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::ModuleEntered {
+                module_call_id: id,
+                module_def_id: id,
+                qualname: name.into(),
+                class_name: name.into(),
+                parent_call_id: parent,
+                depth: 0,
+                fields: Default::default(),
+            },
+            Source::PythonSidecar,
+        )
+    }
+
+    fn eval_pair(seq: u64, t_in: u64, t_ret: u64, call_id: u64, module: u64) -> Vec<Event> {
+        vec![
+            ev(
+                seq,
+                t_in,
+                Payload::MlxEvalEntered {
+                    call_id,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![module],
+                    stack_frames: vec![],
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                seq + 1,
+                t_ret,
+                Payload::MlxEvalReturned {
+                    call_id,
+                    duration_ns: t_ret - t_in,
+                    was_async: true,
+                },
+                Source::PythonSidecar,
+            ),
+        ]
+    }
+
+    /// #243: a CB committed while two async grace tails overlap goes to the
+    /// latest eval — the rule `origins` and the lazy-eval rule share.
+    #[test]
+    fn overlapping_evals_attribute_to_the_latest() {
+        let mut events = vec![
+            module_entered(1, 10, 1, "first", None),
+            module_entered(2, 11, 2, "second", None),
+        ];
+        events.extend(eval_pair(3, 100, 105, 7, 1));
+        events.extend(eval_pair(5, 110, 115, 8, 2));
+        events.extend(cb_lifecycle(10, 120, 0xa, "Op", 50));
+        let root = compute(events).unwrap();
+        assert_eq!(find_child(&root, "second").gpu_ns_subtree, 50);
+        assert_eq!(find_child(&root, "first").gpu_ns_subtree, 0);
+    }
+
+    /// #243: a scope whose parent's `ModuleEntered` was lost (ring drop,
+    /// sidecar attached mid-run) was neither a root nor a child: its GPU
+    /// time counted as attributed yet appeared nowhere in the tree.
+    #[test]
+    fn scope_with_a_lost_parent_stays_in_the_tree() {
+        let mut events = vec![module_entered(1, 10, 2, "orphan", Some(99))];
+        events.extend(eval_pair(2, 100, 105, 7, 2));
+        events.extend(cb_lifecycle(10, 101, 0xa, "Op", 1_000));
+        let root = compute(events).unwrap();
+        assert_eq!(root.gpu_ns_subtree, 1_000, "tree: {root:#?}");
+        assert_eq!(find_child(&root, "orphan").gpu_ns_subtree, 1_000);
     }
 
     #[test]

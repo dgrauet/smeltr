@@ -470,6 +470,32 @@ mod tests {
                         }],
                     },
                 ),
+                // The lifecycle the hook emits before the ops: origins keys on
+                // the commit (#243).
+                ev(
+                    100,
+                    14,
+                    Source::MetalHook,
+                    Payload::MetalCbCommitted {
+                        cb_id: 9,
+                        queue_id: 1,
+                        queue_depth: 1,
+                        label: None,
+                    },
+                ),
+                ev(
+                    101,
+                    15,
+                    Source::MetalHook,
+                    Payload::MetalCbCompleted {
+                        cb_id: 9,
+                        queue_id: 1,
+                        status: 4,
+                        error_code: None,
+                        error_domain: None,
+                        in_flight_ns: 1,
+                    },
+                ),
                 ev(
                     2,
                     15,

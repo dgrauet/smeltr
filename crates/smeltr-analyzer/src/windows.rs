@@ -202,6 +202,19 @@ impl<'a> ScopeSweep<'a> {
     }
 }
 
+/// Index of the eval window a command buffer committed at `ts` belongs to:
+/// the most recently entered eval whose window covers `ts`.
+///
+/// Async grace tails make consecutive evals overlap. The latest eval to
+/// have started is the stronger evidence — the grace tail is only an upper
+/// bound on how late the previous eval's work may still be committed. Every
+/// consumer must use this one rule: breakdown took the earliest window and
+/// origins the latest, so the two attributed the same CB to different evals
+/// (#243). `windows` must be sorted by `t_in`, as [`eval_windows`] returns.
+pub fn eval_at(windows: &[EvalWindow], ts: u64) -> Option<usize> {
+    windows.iter().rposition(|w| w.t_in <= ts && ts <= w.t_out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +289,23 @@ mod tests {
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].t_in, 100);
         assert_eq!(w[0].t_out, 200 + ASYNC_GRACE_NS);
+    }
+
+    /// #243: async grace tails make consecutive evals overlap. Every
+    /// consumer must settle the overlap the same way — breakdown took the
+    /// earliest eval, origins the latest, so the two disagreed on the CB.
+    #[test]
+    fn eval_at_picks_the_latest_eval_covering_the_instant() {
+        let evs = vec![
+            eval_in(1, 100, 1, vec![], vec![]),
+            eval_out(2, 105, 1, true), // grace: covers up to 105 + 500 ms
+            eval_in(3, 110, 2, vec![], vec![]),
+            eval_out(4, 115, 2, true),
+        ];
+        let w = eval_windows(&evs);
+        assert_eq!(eval_at(&w, 120).map(|i| w[i].seq), Some(3));
+        assert_eq!(eval_at(&w, 102).map(|i| w[i].seq), Some(1));
+        assert_eq!(eval_at(&w, 99), None);
     }
 
     #[test]

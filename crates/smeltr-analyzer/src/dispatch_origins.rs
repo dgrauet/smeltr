@@ -1,13 +1,13 @@
 //! Attribute kernel dispatches to Python source file:line.
 //!
-//! Joins each `MlxEvalEntered.stack_frames` (top frame) with the
-//! `MetalCbOps` events that fall within the eval's window, aggregating per
+//! Joins each `MlxEvalEntered.stack_frames` (top frame) with the command
+//! buffers committed within the eval's window, aggregating per
 //! `(kind, file_line)` → `(sum_gpu_ns, count)`.
 
 use crate::op_kinds::resolve_kind;
-use crate::windows::{eval_windows, scope_windows, EvalWindow, ScopeSweep};
+use crate::windows::{eval_at, eval_windows, scope_windows, EvalWindow, ScopeSweep};
 use serde::{Deserialize, Serialize};
-use smeltr_core::event::{Event, OpSample, Payload};
+use smeltr_core::event::{Event, OpSample};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -20,15 +20,18 @@ pub struct DispatchOrigin {
 
 /// Compute per-(kind, file:line) dispatch attribution.
 ///
-/// Eval-window matching: for each `MetalCbOps` at ts T, find the
-/// eval window with `t_in ≤ T ≤ t_out` (scanning latest-first). The top
-/// non-smeltr frame on that eval is the attribution.
+/// Each completed command buffer is attributed at its **commit** time, by
+/// the same rules as `breakdown`: the eval window picked by
+/// [`crate::windows::eval_at`] names the file:line; failing that, the
+/// innermost open scope (`scope:<qualname>`). Keying on the time the ops
+/// arrived (after completion) instead dropped CBs committed late in a grace
+/// tail, and a different overlap rule split CBs between evals (#243).
 ///
 /// Empty if no events carry stack_frames (capture disabled).
 pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
     // Only evals carrying a captured frame can name an origin. Keeping the
     // frame-less ones would let them shadow an enclosing eval that does have
-    // one, since `find_window` takes the latest window covering the sample.
+    // one, since `eval_at` takes the latest window covering the commit.
     let evals: Vec<EvalWindow> = eval_windows(events)
         .into_iter()
         .filter(|w| w.top_frame.is_some())
@@ -38,29 +41,33 @@ pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
     // attributed to the innermost scope open at that time, as
     // `scope:<qualname>`.
     let scopes = scope_windows(events);
+
+    // #146: op times clamped to their CB's serialization window.
+    let mut cbs: Vec<(u64, Vec<OpSample>)> = crate::breakdown::clamped_command_buffers(events)
+        .completed
+        .into_iter()
+        .filter_map(|cb| cb.ops.map(|ops| (cb.commit_ts, ops)))
+        .collect();
+    // The scope sweep only moves forward in time.
+    cbs.sort_by_key(|(commit_ts, _)| *commit_ts);
     let mut sweep = ScopeSweep::new(&scopes.windows);
 
-    // #146: op times whose sum exceeds their CB's serialization-clamped
-    // window are rescaled at read time (this consumer only borrows events).
-    let op_scales = crate::op_clamp::compute_op_time_scales(events);
-
     let mut agg: HashMap<(String, String), (u64, u64)> = HashMap::new();
-    for ev in events {
-        if let Payload::MetalCbOps { ops, .. } = &ev.payload {
-            let ts = ev.ts_mono_ns;
-            let file_line = match find_window(&evals, ts).and_then(|w| w.top_frame.clone()) {
-                Some(frame) => frame,
-                None => match sweep.innermost_at(ts) {
-                    Some(win) => format!("scope:{}", win.qualname),
-                    None => continue,
-                },
-            };
-            for op in ops {
-                let kind = op_kind(op);
-                let entry = agg.entry((kind, file_line.clone())).or_insert((0, 0));
-                entry.0 += op_scales.scaled_gpu_ns(ev.seq, op.gpu_ns);
-                entry.1 += op.count as u64;
-            }
+    for (commit_ts, ops) in cbs {
+        let eval_frame = eval_at(&evals, commit_ts).and_then(|i| evals[i].top_frame.clone());
+        let file_line = match eval_frame {
+            Some(frame) => frame,
+            None => match sweep.innermost_at(commit_ts) {
+                Some(win) => format!("scope:{}", win.qualname),
+                None => continue,
+            },
+        };
+        for op in &ops {
+            let entry = agg
+                .entry((op_kind(op), file_line.clone()))
+                .or_insert((0, 0));
+            entry.0 += op.gpu_ns;
+            entry.1 += op.count as u64;
         }
     }
 
@@ -77,10 +84,6 @@ pub fn compute_dispatch_origins(events: &[Event]) -> Vec<DispatchOrigin> {
     out
 }
 
-fn find_window(evals: &[EvalWindow], ts: u64) -> Option<&EvalWindow> {
-    evals.iter().rev().find(|w| w.t_in <= ts && ts <= w.t_out)
-}
-
 fn op_kind(op: &OpSample) -> String {
     if let Some(s) = &op.symbol {
         if let Some(resolved) = resolve_kind(s) {
@@ -94,7 +97,7 @@ fn op_kind(op: &OpSample) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smeltr_core::event::{Source, StackFrame};
+    use smeltr_core::event::{Payload, Source, StackFrame};
     use uuid::Uuid;
 
     fn ev(seq: u64, ts: u64, source: Source, payload: Payload) -> Event {
@@ -202,9 +205,137 @@ mod tests {
             ops(4, 15, 9, "gemm_bf16", 100),
             ret(5, 20, 1),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].gpu_ns, 2);
+    }
+
+    /// The hook always emits `Committed`, `Completed`, then `CbOps`; the
+    /// fixtures above mostly write the `CbOps` alone. Supply the missing
+    /// lifecycle at the same instant, so each fixture keeps its meaning
+    /// now that origins keys on the commit time like breakdown (#243).
+    fn with_lifecycles(evs: Vec<Event>) -> Vec<Event> {
+        let mut out = Vec::new();
+        let mut committed = std::collections::HashSet::new();
+        let mut completed = std::collections::HashSet::new();
+        for e in evs {
+            let cb = match &e.payload {
+                Payload::MetalCbCommitted { cb_id, .. } => {
+                    committed.insert(*cb_id);
+                    None
+                }
+                Payload::MetalCbCompleted { cb_id, .. } => {
+                    completed.insert(*cb_id);
+                    (!committed.contains(cb_id)).then_some((*cb_id, false))
+                }
+                Payload::MetalCbOps { cb_id, .. } => {
+                    (!completed.contains(cb_id)).then_some((*cb_id, true))
+                }
+                _ => None,
+            };
+            if let Some((cb_id, needs_completion)) = cb {
+                if committed.insert(cb_id) {
+                    out.push(ev(
+                        0,
+                        e.ts_mono_ns,
+                        Source::MetalHook,
+                        Payload::MetalCbCommitted {
+                            cb_id,
+                            queue_id: 1,
+                            queue_depth: 1,
+                            label: None,
+                        },
+                    ));
+                }
+                if needs_completion {
+                    completed.insert(cb_id);
+                    out.push(ev(
+                        0,
+                        e.ts_mono_ns,
+                        Source::MetalHook,
+                        Payload::MetalCbCompleted {
+                            cb_id,
+                            queue_id: 1,
+                            status: 4,
+                            error_code: None,
+                            error_domain: None,
+                            in_flight_ns: 0,
+                        },
+                    ));
+                }
+            }
+            out.push(e);
+        }
+        for (i, e) in out.iter_mut().enumerate() {
+            e.seq = i as u64 + 1;
+        }
+        out
+    }
+
+    fn origins(evs: Vec<Event>) -> Vec<DispatchOrigin> {
+        compute_dispatch_origins(&with_lifecycles(evs))
+    }
+
+    fn committed(seq: u64, ts: u64, cb_id: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Source::MetalHook,
+            Payload::MetalCbCommitted {
+                cb_id,
+                queue_id: 1,
+                queue_depth: 1,
+                label: None,
+            },
+        )
+    }
+
+    fn completed(seq: u64, ts: u64, cb_id: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Source::MetalHook,
+            Payload::MetalCbCompleted {
+                cb_id,
+                queue_id: 1,
+                status: 4,
+                error_code: None,
+                error_domain: None,
+                in_flight_ns: 0,
+            },
+        )
+    }
+
+    /// #243: overlapping async evals — same eval as breakdown.
+    #[test]
+    fn overlapping_evals_attribute_to_the_latest_like_breakdown() {
+        let evs = vec![
+            enter(1, 100, 1, "a.py", 1),
+            ret_async(2, 105, 1),
+            enter(3, 110, 2, "b.py", 1),
+            ret_async(4, 115, 2),
+            ops(5, 120, 9, "gemm_bf16", 10),
+        ];
+        let out = origins(evs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].file_line, "b.py:1");
+    }
+
+    /// #243: a CB is attributed at its commit, like in breakdown — not when
+    /// its ops arrive after completion, which may be past the grace tail.
+    #[test]
+    fn cb_is_attributed_at_commit_not_completion() {
+        let grace_end = 15 + crate::windows::ASYNC_GRACE_NS;
+        let evs = vec![
+            enter(1, 10, 1, "/user/script.py", 17),
+            ret_async(2, 15, 1),
+            committed(3, grace_end - 1_000, 9),
+            completed(4, grace_end + 200_000_000, 9),
+            ops(5, grace_end + 200_000_001, 9, "gemm_bf16", 300),
+        ];
+        let out = compute_dispatch_origins(&evs);
+        assert_eq!(out.len(), 1, "CB committed inside the window: {out:?}");
+        assert_eq!(out[0].file_line, "script.py:17");
     }
 
     #[test]
@@ -222,7 +353,7 @@ mod tests {
             ops(5, 35, 10, "gemm_bf16", 200),
             ret(6, 40, 2),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, "Matmul");
         assert_eq!(out[0].file_line, "attention.py:127");
@@ -248,7 +379,7 @@ mod tests {
             ops(2, 15, 9, "gemm_bf16", 100),
             ret(3, 20, 1),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert!(out.is_empty());
     }
 
@@ -262,7 +393,7 @@ mod tests {
             ops(5, 35, 10, "gemm_bf16", 500),
             ret(6, 40, 2),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].kind, "Matmul");
         assert_eq!(out[0].gpu_ns, 500);
@@ -280,7 +411,7 @@ mod tests {
             ops(5, 35, 10, "gemm_bf16", 200),
             ret(6, 40, 2),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 2);
         let lines: Vec<&str> = out.iter().map(|o| o.file_line.as_str()).collect();
         assert!(lines.contains(&"attention.py:100"));
@@ -296,7 +427,7 @@ mod tests {
             ret_async(2, 15, 1),
             ops(3, 100, 9, "gemm_bf16", 300),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].file_line, "script.py:17");
         assert_eq!(out[0].gpu_ns, 300);
@@ -311,7 +442,7 @@ mod tests {
             // 600 ms past return.
             ops(3, 600_000_015, 9, "gemm_bf16", 300),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert!(out.is_empty(), "CB past grace must not be attributed");
     }
 
@@ -353,7 +484,7 @@ mod tests {
             ops(2, 15, 9, "gemm_bf16", 300),
             module_ret(3, 20, 7),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, "Matmul");
         assert_eq!(out[0].file_line, "scope:generate");
@@ -372,7 +503,7 @@ mod tests {
             ret(4, 20, 1),
             module_ret(5, 25, 7),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].file_line, "attention.py:127");
     }
@@ -386,7 +517,7 @@ mod tests {
             module_ret(4, 18, 8),
             module_ret(5, 25, 7),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].file_line, "scope:TransformerBlock");
     }
@@ -399,7 +530,7 @@ mod tests {
             module_ret(2, 15, 7),
             ops(3, 85_000_015, 9, "gemm_bf16", 300),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].file_line, "scope:generate");
     }
@@ -412,7 +543,7 @@ mod tests {
             // 600 ms past the scope exit — outside the grace.
             ops(3, 600_000_015, 9, "gemm_bf16", 300),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert!(out.is_empty());
     }
 
@@ -425,7 +556,7 @@ mod tests {
             ret(2, 15, 1), // existing helper: was_async=false
             ops(3, 100, 9, "gemm_bf16", 300),
         ];
-        let out = compute_dispatch_origins(&evs);
+        let out = origins(evs);
         assert!(
             out.is_empty(),
             "sync return must not extend window via grace"
