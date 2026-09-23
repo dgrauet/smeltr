@@ -2,7 +2,8 @@
 
 use crate::types::ToolError;
 use serde::{Deserialize, Serialize};
-use smeltr_core::reader::{list_sessions, read_events, read_metadata};
+use smeltr_core::reader::{read_events, read_metadata};
+use smeltr_core::session_resolve::sessions_newest_first;
 
 const MIN_USEFUL_EVENT_COUNT: usize = 20;
 
@@ -12,11 +13,23 @@ pub struct Params {
     /// excluded from the listing as likely-orphan daemon-spawn sessions
     /// without workload. Set to true to include them.
     pub include_empty: Option<bool>,
+    /// Page size (default 50). Sessions come newest first by start time.
+    pub limit: Option<usize>,
+    /// Sessions to skip, counted after the `include_empty` filter — pass
+    /// the previous response's `next_offset`.
+    pub offset: Option<usize>,
 }
+
+/// Default page size: a store of 272 sessions used to come back in one
+/// 74k-character response, past an MCP client's tool-output limit (#261).
+const DEFAULT_LIMIT: usize = 50;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub sessions: Vec<SessionSummary>,
+    /// Offset of the next page, when more sessions remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,9 +47,17 @@ pub struct SessionSummary {
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
-    let dirs = list_sessions()?;
+    // Newest first by start time: by directory name the oldest came first
+    // and every post-mortem after every recording (#261).
+    let dirs = sessions_newest_first()?;
     let include_empty = params.include_empty.unwrap_or(false);
-    let mut out = Vec::with_capacity(dirs.len());
+    // At least 1: an empty page pointing at its own offset would loop a
+    // paging client forever.
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).max(1);
+    let offset = params.offset.unwrap_or(0);
+    let mut out = Vec::with_capacity(limit.min(dirs.len()));
+    let mut matched = 0usize;
+    let mut next_offset = None;
     for dir in dirs.iter() {
         let dir_name = dir
             .file_name()
@@ -48,6 +69,16 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
 
         if !include_empty && events.len() < MIN_USEFUL_EVENT_COUNT {
             continue;
+        }
+        matched += 1;
+        if matched <= offset {
+            continue;
+        }
+        if out.len() == limit {
+            // One more match exists past this page; only the page itself
+            // pays for the analysis below.
+            next_offset = Some(offset + limit);
+            break;
         }
 
         let report = smeltr_analyzer::analyze_session(dir, &events);
@@ -79,7 +110,10 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             name,
         });
     }
-    Ok(Response { sessions: out })
+    Ok(Response {
+        sessions: out,
+        next_offset,
+    })
 }
 
 #[cfg(test)]
@@ -132,6 +166,7 @@ mod tests {
         }]);
         let resp = run(Params {
             include_empty: Some(true),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(resp.sessions.len(), 1);
@@ -185,6 +220,7 @@ mod tests {
         // include_empty=true: both listed.
         let resp = run(Params {
             include_empty: Some(true),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(resp.sessions.len(), 2);
@@ -283,6 +319,7 @@ mod tests {
         crashed_run(reports.path());
         let resp = run(Params {
             include_empty: Some(true),
+            ..Default::default()
         });
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
         let title = resp.unwrap().sessions[0].root_cause_title.clone();
@@ -292,5 +329,77 @@ mod tests {
                 .is_some_and(|t| t.starts_with("Recorded process crashed")),
             "got {title:?}"
         );
+    }
+
+    fn session_started(started: &str) -> String {
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.started_rfc3339 = started.into();
+        SessionWriter::create(meta)
+            .unwrap()
+            .finalize(Some(0), "ok".into())
+            .unwrap();
+        id.short()
+    }
+
+    fn page(limit: Option<usize>, offset: Option<usize>) -> Response {
+        run(Params {
+            include_empty: Some(true),
+            limit,
+            offset,
+        })
+        .unwrap()
+    }
+
+    /// #261: newest first by start time — a post-mortem sorted after every
+    /// recording by directory name, and the oldest sessions came first.
+    #[test]
+    #[serial_test::serial]
+    fn sessions_come_newest_first() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let old = session_started("2026-05-01T00:00:00Z");
+        let new = session_started("2026-09-01T00:00:00Z");
+        let mid = session_started("2026-07-01T00:00:00Z");
+        let ids: Vec<String> = page(None, None)
+            .sessions
+            .into_iter()
+            .map(|s| s.short_id)
+            .collect();
+        assert_eq!(ids, vec![new, mid, old]);
+    }
+
+    /// #261: 272 sessions came back in one 74k-character response, over
+    /// the MCP client's tool-output limit.
+    #[test]
+    #[serial_test::serial]
+    fn sessions_are_paged() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let ids: Vec<String> = (1..=5)
+            .map(|d| session_started(&format!("2026-09-0{d}T00:00:00Z")))
+            .rev()
+            .collect();
+        let first = page(Some(2), None);
+        assert_eq!(first.sessions.len(), 2);
+        assert_eq!(first.sessions[0].short_id, ids[0]);
+        assert_eq!(first.next_offset, Some(2));
+        let last = page(Some(2), Some(4));
+        assert_eq!(last.sessions.len(), 1);
+        assert_eq!(last.sessions[0].short_id, ids[4]);
+        assert_eq!(last.next_offset, None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn default_page_holds_fifty() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        for i in 0..55 {
+            session_started(&format!("2026-09-01T00:{:02}:{:02}Z", i / 60, i % 60));
+        }
+        let resp = page(None, None);
+        assert_eq!(resp.sessions.len(), 50);
+        assert_eq!(resp.next_offset, Some(50));
     }
 }

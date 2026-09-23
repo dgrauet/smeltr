@@ -244,7 +244,7 @@ fn tool_list() -> Vec<Tool> {
     vec![
         tool::<crate::tools::list_sessions::Params>(
             "list_sessions",
-            "List recorded smeltr sessions.",
+            "List recorded sessions, newest first, 50 per page: pass `offset` = the returned `next_offset` for the next page (`limit` to change the page size).",
         ),
         tool::<crate::tools::session_summary::Params>(
             "get_session_summary",
