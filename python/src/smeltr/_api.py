@@ -13,7 +13,9 @@ from smeltr._client import ClientError, _Client
 from smeltr._proto import SOURCE_PYTHON_SIDECAR
 
 _client: _Client | None = None
-_client_lock = threading.Lock()
+# Re-entrant: the SIGTERM handler calls detach() on whatever thread the
+# signal interrupted, possibly one inside attach() holding this lock (#239).
+_client_lock = threading.RLock()
 _scope_token: str | None = None
 
 

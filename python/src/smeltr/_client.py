@@ -20,6 +20,10 @@ from smeltr._proto import (
     hello_msg,
 )
 
+# Longest legitimate hold: one frame write plus one Ack read, each bounded
+# by the socket timeout set in connect() (2 s by default).
+_LOCK_TIMEOUT_S = 10.0
+
 
 class ClientError(RuntimeError):
     """Raised when the socket fails or the daemon returns an error."""
@@ -39,6 +43,11 @@ class _Client:
         self._client_name = client_name
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
+        # Thread currently inside a write/read exchange. A signal handler or
+        # GC finalizer that emits runs on an arbitrary thread's stack — often
+        # the one mid-exchange — and must not wait for a lock that thread
+        # holds (#239), nor interleave a frame into its exchange.
+        self._owner: int | None = None
         self.active_session: str | None = None
 
     def connect(self, timeout_s: float = 2.0) -> None:
@@ -69,9 +78,19 @@ class _Client:
     ) -> None:
         if self._sock is None:
             raise ClientError("client is not connected")
-        with self._lock:
+        if self._owner == threading.get_ident():
+            raise ClientError("re-entrant emit dropped (signal handler or finalizer)")
+        # Bounded: a signal landing between acquire() and the owner store
+        # below would otherwise still wait on its own thread forever.
+        if not self._lock.acquire(timeout=_LOCK_TIMEOUT_S):
+            raise ClientError("emit dropped: client busy")
+        try:
+            self._owner = threading.get_ident()
             self._write_frame(emit_msg(source, pid, payload, scope_token=scope_token))
             resp = self._read_frame()
+        finally:
+            self._owner = None
+            self._lock.release()
         if not isinstance(resp, dict) or resp.get("kind") != "Ack":
             if isinstance(resp, dict) and resp.get("kind") == "Error":
                 raise ClientError(f"daemon error: {resp.get('message')}")
