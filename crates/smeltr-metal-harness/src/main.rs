@@ -17,10 +17,16 @@ fn main() {
         free_probe.set_label("smeltr-harness-free-probe");
     }
 
+    // SMELTR_HARNESS_LABEL=<text>: label the no-op command buffer with an
+    // arbitrary (e.g. very long, multibyte) string — the hook copies labels
+    // into fixed-size frame buffers.
+    let noop_label =
+        std::env::var("SMELTR_HARNESS_LABEL").unwrap_or_else(|_| "smeltr-harness-noop".to_string());
+
     // No-op command buffer with a blit encoder.
     {
         let cb = queue.new_command_buffer();
-        cb.set_label("smeltr-harness-noop");
+        cb.set_label(&noop_label);
         let encoder = cb.new_blit_command_encoder();
         encoder.end_encoding();
         cb.commit();
