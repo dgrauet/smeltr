@@ -260,7 +260,7 @@ fn tool_list() -> Vec<Tool> {
         ),
         tool::<crate::tools::crash_report::Params>(
             "get_crash_report",
-            "Retrieve crash reports captured during a session.",
+            "Return the macOS crash report (.ips) behind a session: the one a post-mortem session was written for, or the one joined to a recorded run that crashed.",
         ),
         tool::<crate::tools::metal_cb_history::Params>(
             "get_metal_cb_history",

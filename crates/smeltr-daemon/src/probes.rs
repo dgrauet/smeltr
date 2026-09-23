@@ -68,9 +68,10 @@ impl ProbeRuntime {
         sup.add(Box::new(
             smeltr_probes_mach_exceptions::MachExceptionsProbe::new(pid),
         ));
-        sup.add(Box::new(
-            smeltr_probes_crash_reports::CrashReportsProbe::new().filter_pids(vec![pid]),
-        ));
+        // No per-recording crash-reports probe: the global one emits each
+        // report under the crashed pid, which the router already sends to
+        // this recording. A second watcher only duplicated every report on
+        // the bus — two post-mortem sessions per crash (#242).
         sup.add(Box::new(
             smeltr_probes_proc::footprint_probe::FootprintProbe::new(
                 pid,

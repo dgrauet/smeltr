@@ -296,7 +296,7 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
     };
     let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
 
-    let end_ns = window_end_ns(&meta, &events);
+    let end_ns = window_end_ns(dir, &meta, &events);
 
     // Candidate PIDs: the scoped PID PLUS every PID seen in the footprint
     // samples, which cover the whole traced tree. Under `uv run` /
@@ -358,21 +358,30 @@ pub fn join_jetsam(report: &mut crate::report::Report, dir: &Path) {
 /// after the fact.
 ///
 /// A kill (jetsam or crash alike) often stops the `record` client from
-/// finalizing cleanly (#143): lacking `ended_rfc3339`, we bound on the last
-/// event written. Letting it run to NOW would make the window weeks wide on an
-/// old unfinalized session — leaving only a PID, which macOS recycles, to hold
-/// the verdict. Fall back to now only when there is no event to date.
-fn window_end_ns(meta: &smeltr_core::session::SessionMetadata, events: &[Event]) -> u64 {
-    meta.ended_rfc3339
-        .as_deref()
-        .and_then(rfc3339_unix_ns)
-        .or_else(|| {
-            events
-                .iter()
-                .map(|e| e.ts_wall_ns)
-                .max()
-                .map(|t| t.saturating_add(CRASH_REPORT_GRACE_NS))
-        })
+/// finalizing cleanly (#143): lacking `ended_rfc3339`, we bound on when the
+/// session was last written — the events file's mtime, which is real wall
+/// time. The last event's `ts_wall` alone fell short: it is
+/// `wall_epoch + mono`, and that clock stops while the machine sleeps (#153,
+/// #242), so a report written after a sleep fell outside the window. Letting
+/// it run to NOW would make the window weeks wide on an old unfinalized
+/// session — leaving only a PID, which macOS recycles, to hold the verdict.
+/// Fall back to now only when there is nothing on disk to date.
+fn window_end_ns(
+    dir: &Path,
+    meta: &smeltr_core::session::SessionMetadata,
+    events: &[Event],
+) -> u64 {
+    if let Some(end) = meta.ended_rfc3339.as_deref().and_then(rfc3339_unix_ns) {
+        return end;
+    }
+    let written = std::fs::metadata(smeltr_core::session::events_path_for_read(dir))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64);
+    let last_stamp = events.iter().map(|e| e.ts_wall_ns).max();
+    written
+        .max(last_stamp)
         .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp_nanos() as u64)
 }
 
@@ -388,32 +397,35 @@ fn window_end_ns(meta: &smeltr_core::session::SessionMetadata, events: &[Event])
 /// finalized is covered too; the old block required `ended_rfc3339` and
 /// silently skipped that case, in the CLI as well.
 pub fn join_crash(report: &mut crate::report::Report, dir: &Path) {
-    let Ok(meta) = smeltr_core::reader::read_metadata(dir) else {
-        return;
-    };
+    if let Some(j) = session_crash(dir) {
+        report.findings.insert(0, crash_finding(&j));
+    }
+}
+
+/// The crash report of a recorded run that crashed, joined from
+/// DiagnosticReports on the run's pid and wall-clock window. `None` for
+/// ambient sessions, clean exits, or when no report matches.
+///
+/// Shared by [`join_crash`] and the MCP `get_crash_report`, so the tool that
+/// returns the report and the finding that cites it cannot disagree (#242).
+pub fn session_crash(dir: &Path) -> Option<CrashJoin> {
+    let meta = smeltr_core::reader::read_metadata(dir).ok()?;
     let smeltr_core::session::SessionKind::Scoped { pid, .. } = &meta.kind else {
-        return;
+        return None;
     };
     // A clean exit is not a crash. This guard is deliberately absent from
     // `join_jetsam` (a jetsam kill can still let the shell report a clean
     // code), but legitimate here: ReportCrash writes nothing on an exit 0.
     if meta.exit_code == Some(0) {
-        return;
+        return None;
     }
-    let Some(start_ns) = rfc3339_unix_ns(&meta.started_rfc3339) else {
-        return;
-    };
+    let start_ns = rfc3339_unix_ns(&meta.started_rfc3339)?;
     let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
-    let end_ns = window_end_ns(&meta, &events);
+    let end_ns = window_end_ns(dir, &meta, &events);
 
-    for reports_dir in diagnostic_reports_dirs() {
-        if let Some(j) =
-            find_crash_report(&reports_dir, *pid, start_ns, end_ns, CRASH_REPORT_GRACE_NS)
-        {
-            report.findings.insert(0, crash_finding(&j));
-            return;
-        }
-    }
+    diagnostic_reports_dirs().iter().find_map(|reports_dir| {
+        find_crash_report(reports_dir, *pid, start_ns, end_ns, CRASH_REPORT_GRACE_NS)
+    })
 }
 
 /// Stop signals requested by the user or by a supervisor. Hard-coded rather
@@ -822,6 +834,62 @@ mod tests {
         dir
     }
 
+    /// #242: an unfinalized run's window used to end at its last event's
+    /// `ts_wall`, which is `wall_epoch + mono` and stops while the laptop
+    /// sleeps. The events file's mtime is real wall time.
+    #[test]
+    #[serial_test::serial]
+    fn window_of_an_unfinalized_run_survives_a_sleep() {
+        use std::time::{Duration, SystemTime};
+
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+
+        let now = SystemTime::now();
+        let ago = |min: u64| now - Duration::from_secs(min * 60);
+        let unix_ns = |t: SystemTime| t.duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+        let rfc = |t: SystemTime| {
+            time::OffsetDateTime::from(t)
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        // Last event stamped 20 min ago, but written 10 min ago: the clock
+        // behind ts_wall lost the 10 minutes the machine slept.
+        let last = smeltr_core::event::Event {
+            ts_mono_ns: 1,
+            ts_wall_ns: unix_ns(ago(20)),
+            session_id: uuid::Uuid::nil(),
+            source: smeltr_core::event::Source::Mark,
+            pid: None,
+            seq: 1,
+            payload: Payload::Mark {
+                label: "last".into(),
+                fields: Default::default(),
+            },
+        };
+        let dir = scoped_session(home.path(), 11672, vec![], &rfc(ago(30)), None, &[last]);
+        let set_mtime = |p: &Path, t: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap()
+        };
+        set_mtime(&smeltr_core::session::events_path_for_read(&dir), ago(10));
+        // The crash report lands 5 min after the last stamp — inside the
+        // real run, but past the stopped clock plus grace.
+        let ips = reports.path().join("python-2026-07-16.ips");
+        std::fs::write(&ips, MULTILINE).unwrap();
+        set_mtime(&ips, ago(15));
+
+        let joined = session_crash(&dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+        assert!(joined.is_some(), "report written during the run must join");
+    }
+
     fn footprint_ev(
         seq: u64,
         ts_wall_ns: u64,
@@ -873,6 +941,14 @@ mod tests {
             None,
             &[footprint_ev(1, hour_ago, 4242, "python", true)],
         );
+        // …and last written then: the window is bounded by the events
+        // file's mtime (#242), which the fixture otherwise dates to now.
+        std::fs::File::options()
+            .write(true)
+            .open(smeltr_core::session::events_path_for_read(&dir))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_nanos(hour_ago))
+            .unwrap();
 
         // The report itself is written NOW: well after the session really
         // ended.

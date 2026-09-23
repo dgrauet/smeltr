@@ -47,6 +47,42 @@ pub fn classify(ev: &Event) -> Option<TriggerReason> {
     }
 }
 
+/// Minimum spacing between two post-mortem flushes for the same reason.
+///
+/// One flush snapshots the whole flight recorder (60 s), so a second one a
+/// few seconds later mostly re-writes the same events. Without a limit, a
+/// GPU watchdog that errors N in-flight command buffers wrote N full
+/// post-mortem sessions (#242). A dropped trigger loses nothing: its event
+/// is still in the ambient session and in the next flush's window.
+pub const TRIGGER_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Rate limit for post-mortem triggers, keyed on [`TriggerReason::label`].
+pub struct TriggerGate {
+    min_interval: std::time::Duration,
+    last: std::collections::HashMap<String, std::time::Instant>,
+}
+
+impl TriggerGate {
+    pub fn new(min_interval: std::time::Duration) -> Self {
+        Self {
+            min_interval,
+            last: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Whether `reason` may flush at `now`; records the flush if so.
+    pub fn admit(&mut self, reason: &TriggerReason, now: std::time::Instant) -> bool {
+        let label = reason.label();
+        if let Some(prev) = self.last.get(&label) {
+            if now.saturating_duration_since(*prev) < self.min_interval {
+                return false;
+            }
+        }
+        self.last.insert(label, now);
+        true
+    }
+}
+
 pub struct FlushSummary {
     pub session_dir: std::path::PathBuf,
     pub event_count: usize,
@@ -114,6 +150,45 @@ pub fn flush_post_mortem_events(
 
 #[cfg(test)]
 mod tests {
+    fn metal_error(code: i64) -> TriggerReason {
+        TriggerReason::MetalError {
+            cb_id: 1,
+            error_code: code,
+        }
+    }
+
+    /// #242: a GPU watchdog errors every in-flight command buffer at once;
+    /// each used to write its own full post-mortem.
+    #[test]
+    fn gate_admits_one_flush_per_reason_per_interval() {
+        let mut gate = TriggerGate::new(std::time::Duration::from_secs(30));
+        let t0 = std::time::Instant::now();
+        assert!(gate.admit(&metal_error(5), t0));
+        for i in 1..10 {
+            let t = t0 + std::time::Duration::from_millis(i * 100);
+            assert!(
+                !gate.admit(&metal_error(5), t),
+                "burst #{i} must be dropped"
+            );
+        }
+        assert!(gate.admit(&metal_error(5), t0 + std::time::Duration::from_secs(31)));
+    }
+
+    #[test]
+    fn gate_keys_on_the_reason_label() {
+        let mut gate = TriggerGate::new(std::time::Duration::from_secs(30));
+        let t0 = std::time::Instant::now();
+        assert!(gate.admit(&metal_error(5), t0));
+        assert!(
+            gate.admit(&metal_error(6), t0),
+            "another error code is another reason"
+        );
+        let crash = TriggerReason::CrashReport {
+            path: "/a.ips".into(),
+        };
+        assert!(gate.admit(&crash, t0));
+    }
+
     use super::*;
     use serial_test::serial;
     use smeltr_core::event::Source;
