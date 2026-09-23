@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.10](https://github.com/dgrauet/smeltr/compare/v0.28.9...v0.28.10) (2026-09-23)
+
+
+### Bug Fixes
+
+* docs and conventions drift ([#245](https://github.com/dgrauet/smeltr/issues/245)), with two sidecar bugs and two drifted lists ([#259](https://github.com/dgrauet/smeltr/issues/259)) ([cef8336](https://github.com/dgrauet/smeltr/commit/cef8336619c537009925b689b41f657cfbfb104f))
+
 ## [0.28.9](https://github.com/dgrauet/smeltr/compare/v0.28.8...v0.28.9) (2026-09-23)
 
 
