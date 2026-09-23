@@ -20,6 +20,73 @@ pub struct Params {
     pub offset: Option<usize>,
 }
 
+/// Per-session summary cache, next to the events it summarizes.
+pub(crate) const SUMMARY_CACHE_FILE: &str = ".list-summary.json";
+
+/// A session is summarized once for good only this long after it ended:
+/// ReportCrash and jetsam reports land within seconds (the joins allow a
+/// 120 s grace), and a running session still grows.
+const CACHE_AFTER_END_NS: u64 = 10 * 60 * 1_000_000_000;
+
+/// What `list_sessions` needs from a session that cannot change any more,
+/// keyed on its event file's size and mtime. Reading every event of every
+/// session took 98 s on a real 272-session store (#261).
+#[derive(Serialize, Deserialize)]
+struct CachedSummary {
+    events_len: u64,
+    events_mtime_ns: u64,
+    event_count: usize,
+    root_cause_title: Option<String>,
+}
+
+fn events_key(dir: &std::path::Path) -> Option<(u64, u64)> {
+    let m = std::fs::metadata(smeltr_core::session::events_path_for_read(dir)).ok()?;
+    let mtime = m
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as u64;
+    Some((m.len(), mtime))
+}
+
+fn read_cache(dir: &std::path::Path) -> Option<CachedSummary> {
+    let text = std::fs::read_to_string(dir.join(SUMMARY_CACHE_FILE)).ok()?;
+    let c: CachedSummary = serde_json::from_str(&text).ok()?;
+    (events_key(dir)? == (c.events_len, c.events_mtime_ns)).then_some(c)
+}
+
+/// Ended long enough ago that nothing will change it any more.
+fn settled(meta: Option<&smeltr_core::session::SessionMetadata>) -> bool {
+    let Some(ended) = meta
+        .and_then(|m| m.ended_rfc3339.as_deref())
+        .and_then(smeltr_analyzer::crash_join::rfc3339_unix_ns)
+    else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    now.saturating_sub(ended) >= CACHE_AFTER_END_NS
+}
+
+fn write_cache(dir: &std::path::Path, event_count: usize, root_cause_title: &Option<String>) {
+    let Some((events_len, events_mtime_ns)) = events_key(dir) else {
+        return;
+    };
+    let c = CachedSummary {
+        events_len,
+        events_mtime_ns,
+        event_count,
+        root_cause_title: root_cause_title.clone(),
+    };
+    // Best effort: a read-only store just stays uncached.
+    if let Ok(text) = serde_json::to_string(&c) {
+        let _ = std::fs::write(dir.join(SUMMARY_CACHE_FILE), text);
+    }
+}
+
 /// Default page size: a store of 272 sessions used to come back in one
 /// 74k-character response, past an MCP client's tool-output limit (#261).
 const DEFAULT_LIMIT: usize = 50;
@@ -65,9 +132,14 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             .unwrap_or("?")
             .to_string();
         let meta = read_metadata(dir).ok();
-        let events = read_events(dir).unwrap_or_default();
+        let cached = read_cache(dir);
+        let events = match &cached {
+            Some(_) => Vec::new(),
+            None => read_events(dir).unwrap_or_default(),
+        };
+        let event_count = cached.as_ref().map_or(events.len(), |c| c.event_count);
 
-        if !include_empty && events.len() < MIN_USEFUL_EVENT_COUNT {
+        if !include_empty && event_count < MIN_USEFUL_EVENT_COUNT {
             continue;
         }
         matched += 1;
@@ -81,8 +153,17 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             break;
         }
 
-        let report = smeltr_analyzer::analyze_session(dir, &events);
-        let root_cause_title = report.root_cause().map(|f| f.title.clone());
+        let root_cause_title = match cached {
+            Some(c) => c.root_cause_title,
+            None => {
+                let report = smeltr_analyzer::analyze_session(dir, &events);
+                let title = report.root_cause().map(|f| f.title.clone());
+                if settled(meta.as_ref()) {
+                    write_cache(dir, event_count, &title);
+                }
+                title
+            }
+        };
         let (full_id, started, ended, exit_code, name) = match &meta {
             Some(m) => (
                 m.session_id.to_string(),
@@ -105,7 +186,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             started_rfc3339: started,
             ended_rfc3339: ended,
             exit_code,
-            event_count: events.len(),
+            event_count,
             root_cause_title,
             name,
         });
@@ -401,5 +482,87 @@ mod tests {
         let resp = page(None, None);
         assert_eq!(resp.sessions.len(), 50);
         assert_eq!(resp.next_offset, Some(50));
+    }
+
+    /// A finished session whose last event is a Mark, ended at `ended`.
+    fn finished_session(ended: &str) -> std::path::PathBuf {
+        let id = SessionId::new();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(id)).unwrap();
+        for seq in 0..25 {
+            w.write_event(&Event {
+                ts_mono_ns: seq,
+                ts_wall_ns: seq,
+                session_id: Uuid::nil(),
+                source: Source::Mark,
+                pid: None,
+                seq,
+                payload: Payload::Mark {
+                    label: "m".into(),
+                    fields: Default::default(),
+                },
+            })
+            .unwrap();
+        }
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), ended.into()).unwrap();
+        dir
+    }
+
+    /// #261: reading every event of every listed session took 98 s on a
+    /// real store. A session that ended long ago cannot change: its count
+    /// and root cause are kept next to it and read back.
+    #[test]
+    #[serial_test::serial]
+    fn a_long_finished_session_is_summarized_once() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let dir = finished_session("2026-01-01T00:00:00Z");
+        let first = page(None, None).sessions.remove(0);
+        assert_eq!(first.event_count, 25);
+        let cache = dir.join(SUMMARY_CACHE_FILE);
+        assert!(cache.exists(), "summary cached");
+
+        // Served from the cache: tamper with it and see it come back.
+        let tampered = std::fs::read_to_string(&cache)
+            .unwrap()
+            .replace("\"event_count\":25", "\"event_count\":999");
+        std::fs::write(&cache, tampered).unwrap();
+        assert_eq!(page(None, None).sessions[0].event_count, 999);
+    }
+
+    /// Any change to the event stream invalidates the cached summary.
+    #[test]
+    #[serial_test::serial]
+    fn a_changed_event_stream_is_summarized_again() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let dir = finished_session("2026-01-01T00:00:00Z");
+        page(None, None);
+        let cache = dir.join(SUMMARY_CACHE_FILE);
+        let tampered = std::fs::read_to_string(&cache)
+            .unwrap()
+            .replace("\"event_count\":25", "\"event_count\":999");
+        std::fs::write(&cache, tampered).unwrap();
+        let events = smeltr_core::session::events_path_for_read(&dir);
+        std::fs::File::options()
+            .write(true)
+            .open(&events)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now())
+            .unwrap();
+        assert_eq!(page(None, None).sessions[0].event_count, 25);
+    }
+
+    /// A session that just ended may still get its crash report (#153
+    /// grace), and a running one still grows: neither is cached.
+    #[test]
+    #[serial_test::serial]
+    fn recent_sessions_are_not_cached() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let now = SessionMetadata::now_starting(SessionId::new()).started_rfc3339;
+        let dir = finished_session(&now);
+        page(None, None);
+        assert!(!dir.join(SUMMARY_CACHE_FILE).exists());
     }
 }
