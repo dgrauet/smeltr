@@ -99,18 +99,19 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
 
     if let Some(raw_filter) = params.field_filter.as_ref() {
         if !raw_filter.is_empty() {
-            // Convert JSON values → FieldValue. Unknown shapes are skipped
-            // (treated as no-match, which is the safe default).
-            let filter: BTreeMap<String, FieldValue> = raw_filter
-                .iter()
-                .filter_map(|(k, v)| {
-                    let fv = serde_json::from_value::<FieldValue>(v.clone()).ok()?;
-                    Some((k.clone(), fv))
-                })
-                .collect();
-            if !filter.is_empty() {
-                prune_by_field_filter(&mut root, &filter);
+            // Convert JSON values → FieldValue. A value that is not a scalar
+            // is an error, as in the CLI: dropping it from the filter used to
+            // return the whole tree unfiltered when nothing was left (#243).
+            let mut filter: BTreeMap<String, FieldValue> = BTreeMap::new();
+            for (k, v) in raw_filter {
+                let fv = serde_json::from_value::<FieldValue>(v.clone()).map_err(|_| {
+                    ToolError::BadArgs(format!(
+                        "field_filter[{k:?}] must be a bool, number or string, got {v}"
+                    ))
+                })?;
+                filter.insert(k.clone(), fv);
             }
+            prune_by_field_filter(&mut root, &filter);
         }
     }
 
@@ -1072,5 +1073,27 @@ mod tests {
             .filter(|c| c.qualname == "foo")
             .collect();
         assert_eq!(foos.len(), 0);
+    }
+
+    /// #243: a filter value that is not a scalar used to be dropped from the
+    /// filter; with nothing left, the whole tree came back unfiltered — the
+    /// opposite of a no-match — while the CLI rejects it.
+    #[test]
+    #[serial_test::serial]
+    fn unconvertible_field_filter_is_rejected() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let session = crate::test_util::sampling_disabled_session();
+        let mut filter = BTreeMap::new();
+        filter.insert("step".to_string(), serde_json::Value::Null);
+        let r = run(Params {
+            session,
+            field_filter: Some(filter),
+            ..Default::default()
+        });
+        match r {
+            Err(ToolError::BadArgs(msg)) => assert!(msg.contains("step"), "{msg}"),
+            other => panic!("expected BadArgs, got {other:?}"),
+        }
     }
 }

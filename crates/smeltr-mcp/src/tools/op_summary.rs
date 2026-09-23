@@ -8,6 +8,7 @@ use smeltr_core::reader::read_events;
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
     pub session: String,
+    /// Max rows returned (default 20, like `smeltr breakdown --ops-flat`).
     pub top_n: Option<u32>,
     /// Aggregate by `"name"` (default) or `"kind"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,7 +55,8 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let root =
         compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
-    let top = params.top_n.unwrap_or(10) as usize;
+    // Same default as `smeltr breakdown --ops-flat --top` (#243).
+    let top = params.top_n.unwrap_or(20) as usize;
     let rows = smeltr_analyzer::aggregate_ops_flat(&root, group_by);
     let total: u64 = rows.iter().map(|r| r.gpu_ns).sum::<u64>().max(1);
     let mut ops: Vec<OpSummary> = rows
@@ -519,5 +521,68 @@ mod tests {
         })
         .unwrap();
         crate::test_util::assert_degraded(resp.degraded);
+    }
+
+    /// #243: same default row cap as `smeltr breakdown --ops-flat` (20).
+    #[test]
+    #[serial_test::serial]
+    fn default_row_cap_matches_the_cli() {
+        use smeltr_core::event::{Event, OpSample, Payload, Source};
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = smeltr_core::session::SessionId::new();
+        let mut w = smeltr_core::writer::SessionWriter::create(
+            smeltr_core::session::SessionMetadata::now_starting(id),
+        )
+        .unwrap();
+        let ev = |seq: u64, payload: Payload| Event {
+            ts_mono_ns: seq,
+            ts_wall_ns: seq,
+            session_id: uuid::Uuid::nil(),
+            source: Source::MetalHook,
+            pid: None,
+            seq,
+            payload,
+        };
+        w.write_event(&ev(
+            1,
+            Payload::MetalCbCommitted {
+                cb_id: 1,
+                queue_id: 1,
+                queue_depth: 1,
+                label: None,
+            },
+        ))
+        .unwrap();
+        w.write_event(&ev(
+            2,
+            Payload::MetalCbCompleted {
+                cb_id: 1,
+                queue_id: 1,
+                status: 4,
+                error_code: None,
+                error_domain: None,
+                in_flight_ns: 1,
+            },
+        ))
+        .unwrap();
+        let ops = (0..15)
+            .map(|i| OpSample {
+                name: format!("K_{i}"),
+                symbol: None,
+                gpu_ns: 100 + i,
+                count: 1,
+            })
+            .collect();
+        w.write_event(&ev(3, Payload::MetalCbOps { cb_id: 1, ops }))
+            .unwrap();
+        w.finalize(Some(0), "ok".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(resp.ops.len(), 15);
     }
 }
