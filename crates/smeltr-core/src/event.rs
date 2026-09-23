@@ -37,8 +37,6 @@ pub struct ProcEntry {
     pub cpu_pct: f32,
 }
 
-impl Eq for ProcEntry {}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProbeHealthState {
     Ok,

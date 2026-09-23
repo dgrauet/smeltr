@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, Payload};
 use std::collections::HashMap;
 
-/// Async grace window: Metal CB-committed/completed events arrive up to
-/// ~500 ms after the Python scope that triggered them has already returned.
+// Async grace window: Metal CB-committed/completed events arrive up to
+// ~500 ms after the Python scope that triggered them has already returned.
 use crate::windows::ASYNC_GRACE_NS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

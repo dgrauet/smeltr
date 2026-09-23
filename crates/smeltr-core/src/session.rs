@@ -89,7 +89,7 @@ const SESSION_NAME_MAX_LEN: usize = 200;
 /// - Trims surrounding whitespace.
 /// - Drops if empty after trim.
 /// - Drops (with `warn`) if it contains NUL, other control chars, or `/`.
-/// - Truncates to 200 chars (with `warn`).
+/// - Truncates to 200 bytes, on a character boundary (with `warn`).
 fn validate_session_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -108,7 +108,7 @@ fn validate_session_name(raw: &str) -> Option<String> {
         return None;
     }
     if trimmed.len() > SESSION_NAME_MAX_LEN {
-        tracing::warn!("SMELTR_SESSION_NAME longer than {SESSION_NAME_MAX_LEN} chars — truncating");
+        tracing::warn!("SMELTR_SESSION_NAME longer than {SESSION_NAME_MAX_LEN} bytes — truncating");
         let mut end = SESSION_NAME_MAX_LEN;
         while !trimmed.is_char_boundary(end) {
             end -= 1;
