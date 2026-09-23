@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.5](https://github.com/dgrauet/smeltr/compare/v0.28.4...v0.28.5) (2026-09-23)
+
+
+### Bug Fixes
+
+* **probes:** decode mach exceptions at the real offsets and reply to them ([#247](https://github.com/dgrauet/smeltr/issues/247)) ([5a93f96](https://github.com/dgrauet/smeltr/commit/5a93f96b6fc1e7a7ce77b82ff1f3229c2087fe94)), closes [#240](https://github.com/dgrauet/smeltr/issues/240)
+* stop smeltr from damaging the traced process ([#246](https://github.com/dgrauet/smeltr/issues/246)) ([2993227](https://github.com/dgrauet/smeltr/commit/2993227a85f85f7ca99446ac16f1327ff490d9bc))
+
 ## [0.28.4](https://github.com/dgrauet/smeltr/compare/v0.28.3...v0.28.4) (2026-09-23)
 
 
