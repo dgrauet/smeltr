@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.11](https://github.com/dgrauet/smeltr/compare/v0.28.10...v0.28.11) (2026-09-23)
+
+
+### Bug Fixes
+
+* **mcp:** page list_sessions and cache settled session summaries ([#262](https://github.com/dgrauet/smeltr/issues/262)) ([86ea96c](https://github.com/dgrauet/smeltr/commit/86ea96cfe91fd88143d78e52418d9d966cfff71f))
+
 ## [0.28.10](https://github.com/dgrauet/smeltr/compare/v0.28.9...v0.28.10) (2026-09-23)
 
 
