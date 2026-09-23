@@ -381,10 +381,12 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     }
 
     // 6. Build the output tree.
-    fn build(cid: u64, calls: &HashMap<u64, CallNode>) -> ModuleBreakdown {
-        let n = calls.get(&cid).expect("call must exist");
+    // `None` only for an id missing from `calls`, which the indexing above
+    // never produces (children are linked to entered nodes).
+    fn build(cid: u64, calls: &HashMap<u64, CallNode>) -> Option<ModuleBreakdown> {
+        let n = calls.get(&cid)?;
         let mut children: Vec<ModuleBreakdown> =
-            n.children.iter().map(|c| build(*c, calls)).collect();
+            n.children.iter().filter_map(|c| build(*c, calls)).collect();
         let subtree: u64 = n.gpu_ns_self + children.iter().map(|c| c.gpu_ns_subtree).sum::<u64>();
         children.sort_by_key(|b| std::cmp::Reverse(b.gpu_ns_subtree));
         let mut ops: Vec<OpAttribution> = n
@@ -405,7 +407,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             })
             .collect();
         ops.sort_by_key(|o| std::cmp::Reverse(o.gpu_ns));
-        ModuleBreakdown {
+        Some(ModuleBreakdown {
             qualname: n.qualname.clone(),
             class_name: n.class_name.clone(),
             calls: 1,
@@ -417,7 +419,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
             ops,
             diagnostics: None,
             fields: n.fields.clone(),
-        }
+        })
     }
 
     // A node whose parent never entered (lost `ModuleEntered`: ring drop,
@@ -428,7 +430,8 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         .filter(|(_, n)| n.parent.is_none_or(|p| !calls.contains_key(&p)))
         .map(|(k, _)| *k)
         .collect();
-    let mut root_children: Vec<ModuleBreakdown> = roots.iter().map(|r| build(*r, &calls)).collect();
+    let mut root_children: Vec<ModuleBreakdown> =
+        roots.iter().filter_map(|r| build(*r, &calls)).collect();
     let total_subtree: u64 = root_children.iter().map(|c| c.gpu_ns_subtree).sum();
     let grand_total = total_subtree + unscoped_gpu_ns;
     if unscoped_gpu_ns > 0 || unscoped_eval_count > 0 || unmatched_cb_count > 0 {

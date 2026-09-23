@@ -67,12 +67,7 @@ fn is_arm64e_only_binary(cmd: &str) -> bool {
 }
 
 fn smeltr_home() -> PathBuf {
-    std::env::var_os("SMELTR_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").expect("HOME must be set");
-            PathBuf::from(home).join(".smeltr")
-        })
+    smeltr_core::session::smeltr_home()
 }
 
 /// Spawn `cmd` with `args`, attach scoped probes (and optionally the Metal

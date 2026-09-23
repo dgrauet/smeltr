@@ -89,14 +89,9 @@ fn stats(arg: &str) -> Result<(SessionStats, Vec<Event>), ToolError> {
 }
 
 fn stats_from_events(dir: &std::path::Path, events: &[Event]) -> SessionStats {
-    let duration_ns = if events.len() < 2 {
-        0
-    } else {
-        events
-            .last()
-            .unwrap()
-            .ts_mono_ns
-            .saturating_sub(events.first().unwrap().ts_mono_ns)
+    let duration_ns = match (events.first(), events.last()) {
+        (Some(first), Some(last)) => last.ts_mono_ns.saturating_sub(first.ts_mono_ns),
+        _ => 0,
     };
     let mut counts: HashMap<String, usize> = HashMap::new();
     for ev in events {

@@ -125,7 +125,7 @@ impl SessionMetadata {
             .and_then(|raw| validate_session_name(&raw));
         Self {
             session_id,
-            started_rfc3339: OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            started_rfc3339: rfc3339_now(),
             ended_rfc3339: None,
             host: hostname_or_unknown(),
             mlx_version: None,
@@ -150,25 +150,39 @@ fn hostname_or_unknown() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// Returns `$SMELTR_HOME/sessions` (defaulting to `$HOME/.smeltr/sessions`).
-pub fn sessions_root() -> PathBuf {
-    if let Ok(p) = std::env::var("SMELTR_HOME") {
-        PathBuf::from(p).join("sessions")
-    } else {
-        dirs_home().join(".smeltr").join("sessions")
+/// smeltr's state directory: `$SMELTR_HOME`, else `$HOME/.smeltr` — the
+/// one rule for every crate (the daemon's pid file, the CLI, sessions).
+/// Without HOME (a stripped environment) it falls back to the temp dir
+/// rather than panicking.
+pub fn smeltr_home() -> PathBuf {
+    if let Some(p) = std::env::var_os("SMELTR_HOME") {
+        return PathBuf::from(p);
     }
-}
-
-fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .expect("HOME must be set")
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".smeltr")
 }
 
-/// Directory name for a session: `YYYY-MM-DD-HHMMSS-<8 hex>`.
+/// Returns `smeltr_home()/sessions`.
+pub fn sessions_root() -> PathBuf {
+    smeltr_home().join("sessions")
+}
+
+/// Now as RFC 3339. Formatting a UTC `OffsetDateTime` cannot fail for any
+/// year this code will see; the epoch stands in rather than a panic.
+fn rfc3339_now() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
+}
+
+/// Directory name for a session: `YYYY-MM-DD-HHMMSS-<8 hex>`. A start time
+/// that does not parse (hand-edited metadata) names the directory after
+/// the epoch rather than panicking.
 pub fn session_dir_name(meta: &SessionMetadata) -> String {
     let t = OffsetDateTime::parse(&meta.started_rfc3339, &Rfc3339)
-        .expect("metadata wrote a valid RFC3339 timestamp");
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
     format!(
         "{:04}-{:02}-{:02}-{:02}{:02}{:02}-{}",
         t.year(),
@@ -427,5 +441,29 @@ argv = []
         let text = std::fs::read_to_string(metadata_path(dir.path())).unwrap();
         let back: SessionMetadata = toml::from_str(&text).unwrap();
         assert_eq!(back.end_reason.as_deref(), Some("recovered-after-crash"));
+    }
+
+    /// #245: four copies of this rule had drifted (`var` vs `var_os`) and
+    /// all panicked without HOME — reachable from any library call.
+    #[test]
+    #[serial_test::serial]
+    fn smeltr_home_honours_the_env_and_never_panics() {
+        let (home, sm) = (std::env::var_os("HOME"), std::env::var_os("SMELTR_HOME"));
+        std::env::set_var("SMELTR_HOME", "/x/y");
+        assert_eq!(smeltr_home(), PathBuf::from("/x/y"));
+        assert_eq!(sessions_root(), PathBuf::from("/x/y/sessions"));
+        std::env::remove_var("SMELTR_HOME");
+        std::env::set_var("HOME", "/h");
+        assert_eq!(smeltr_home(), PathBuf::from("/h/.smeltr"));
+        std::env::remove_var("HOME");
+        let fallback = smeltr_home();
+        match home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        if let Some(v) = sm {
+            std::env::set_var("SMELTR_HOME", v);
+        }
+        assert!(fallback.ends_with(".smeltr"), "{fallback:?}");
     }
 }

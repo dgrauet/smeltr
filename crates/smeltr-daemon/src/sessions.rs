@@ -8,9 +8,11 @@ use smeltr_core::session::{SessionId, SessionMetadata};
 use smeltr_core::writer::SessionWriter;
 use std::sync::{Arc, Mutex};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use uuid::Uuid;
 
 pub struct ActiveSession {
+    /// Immutable, so readable after finalization (`id()` used to panic
+    /// once `inner` was taken).
+    id: SessionId,
     inner: Mutex<Option<Inner>>,
     flight_recorder: Option<Arc<FlightRecorder>>,
     bus: Option<Bus>,
@@ -58,6 +60,7 @@ impl ActiveSession {
         let clock = MonoClock::new();
         let wall_epoch_ns = now_unix_ns();
         let s = Self {
+            id,
             inner: Mutex::new(Some(Inner {
                 writer,
                 session_id: id,
@@ -105,6 +108,7 @@ impl ActiveSession {
         let clock = MonoClock::new();
         let wall_epoch_ns = now_unix_ns();
         let s = Self {
+            id,
             inner: Mutex::new(Some(Inner {
                 writer,
                 session_id: id,
@@ -128,12 +132,7 @@ impl ActiveSession {
     }
 
     pub fn id(&self) -> SessionId {
-        self.inner
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("session not finalized")
-            .session_id
+        self.id
     }
 
     pub fn scope_token(&self) -> Option<&str> {
@@ -243,20 +242,19 @@ impl ActiveSession {
             guard.take()
         };
         let Some(inner) = inner else { return Ok(()) };
-        let ended = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let ended = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into());
         inner
             .writer
             .finalize_with_signal(exit_code, term_signal, ended)
     }
 }
 
-#[allow(dead_code)]
-fn _suppress_unused_uuid(_u: Uuid) {}
-
 fn now_unix_ns() -> u64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
+        .unwrap_or_default();
     now.as_secs() * 1_000_000_000 + (now.subsec_nanos() as u64)
 }
 
