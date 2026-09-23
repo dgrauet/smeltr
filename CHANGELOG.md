@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.3](https://github.com/dgrauet/smeltr/compare/v0.28.2...v0.28.3) (2026-09-23)
+
+
+### Bug Fixes
+
+* **cli:** route daemon start/stop through launchd when the agent is installed ([#234](https://github.com/dgrauet/smeltr/issues/234)) ([723c0ad](https://github.com/dgrauet/smeltr/commit/723c0adf7576023b5fab6f23d5bac6486980d0e6))
+
 ## [0.28.2](https://github.com/dgrauet/smeltr/compare/v0.28.1...v0.28.2) (2026-08-23)
 
 
