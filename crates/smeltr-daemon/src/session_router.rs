@@ -52,6 +52,21 @@ impl SessionRouter {
         target.append(source, pid, payload).map(|_| ())
     }
 
+    /// [`append`](Self::append) for an event stamped where it happened
+    /// (Metal hook ring frames, #244).
+    pub fn append_at(
+        &self,
+        source: Source,
+        pid: Option<u32>,
+        uptime_raw_ns: u64,
+        payload: Payload,
+    ) -> std::io::Result<()> {
+        let target = self.route_for(source, None, pid);
+        target
+            .append_at(source, pid, uptime_raw_ns, payload)
+            .map(|_| ())
+    }
+
     fn route_for(
         &self,
         source: Source,

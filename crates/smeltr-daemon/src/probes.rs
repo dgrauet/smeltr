@@ -22,6 +22,12 @@ impl EventSink for DaemonSink {
             tracing::warn!(error = %e, "session append failed");
         }
     }
+
+    fn emit_at(&self, source: Source, pid: Option<u32>, uptime_raw_ns: u64, payload: Payload) {
+        if let Err(e) = self.router.append_at(source, pid, uptime_raw_ns, payload) {
+            tracing::warn!(error = %e, "session append failed");
+        }
+    }
 }
 
 pub struct ProbeRuntime {

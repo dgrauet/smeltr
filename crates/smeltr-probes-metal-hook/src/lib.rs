@@ -75,7 +75,9 @@ impl Probe for MetalHookProbe {
                 match reader.next() {
                     Ok(Some(ev)) => {
                         let payload = translate::frame_to_payload(ev.frame);
-                        sink.emit(Source::MetalHook, Some(pid), payload);
+                        // The hook's own stamp (mach_absolute_time in ns),
+                        // not the drain time (#244).
+                        sink.emit_at(Source::MetalHook, Some(pid), ev.ts_mono_ns, payload);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -150,6 +152,35 @@ mod tests {
         assert!(evs
             .iter()
             .all(|(s, p, _)| matches!(s, Source::MetalHook) && *p == Some(1234)));
+    }
+
+    /// #244: each event keeps the hook's own timestamp. Stamped on receipt,
+    /// a whole 10 ms drain landed on one instant: CB windows collapsed to
+    /// microseconds and the #146 clamp crushed op times to match.
+    #[tokio::test]
+    async fn probe_keeps_the_hooks_timestamps() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ring.bin");
+        {
+            let mut w = create_ring(&path, 1 << 16).unwrap();
+            w.write_cb_committed(1_000, 0x42, 0xa1, 1, None).unwrap();
+            w.write_cb_scheduled(2_000, 0x42, 0xa1).unwrap();
+            w.write_cb_completed(9_000, 0x42, 0xa1, 4, None, None, 7_000)
+                .unwrap();
+        }
+        let sink: Arc<CapturingSink> = Arc::default();
+        let mut probe = MetalHookProbe::new(1234, path);
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel2.cancel();
+        });
+        let sink_dyn: SharedSink = sink.clone();
+        probe.run(sink_dyn, cancel).await.unwrap();
+
+        let stamps = sink.stamps.lock().unwrap();
+        assert_eq!(*stamps, vec![Some(1_000), Some(2_000), Some(9_000)]);
     }
 
     /// #113 regression: a corrupt frame in the middle of the ring must not
