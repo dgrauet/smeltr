@@ -2,9 +2,7 @@
 
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
-use smeltr_analyzer::memory::{
-    compute_heap_breakdown, compute_memory_breakdown, HeapMemory, ScopeMemory,
-};
+use smeltr_analyzer::memory::{HeapMemory, ScopeMemory};
 use smeltr_core::reader::read_events;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -53,28 +51,14 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let timeline = params
         .include_timeline
         .then(|| smeltr_analyzer::memory::compute_memory_timeline(&events, params.bucket_seconds));
-    let mlx_allocator = smeltr_analyzer::memory::compute_mlx_allocator(&events);
-    let scope_memory = compute_memory_breakdown(&events);
-    let heap_memory = compute_heap_breakdown(&events);
-    let process_footprint = smeltr_analyzer::footprint::compute_footprint_summary(&events);
-
-    let mut notes = Vec::new();
-    if scope_memory.is_empty() && heap_memory.is_empty() {
-        use smeltr_analyzer::rules::sidecar_absent::{detect, detect_nothing_instrumented};
-        if let Some(nothing) = detect_nothing_instrumented(&events) {
-            notes.push(nothing.advice());
-        } else if let Some(absent) = detect(&events) {
-            notes.push(absent.advice());
-        }
-    }
-
+    let report = smeltr_analyzer::memory::memory_report(&events);
     Ok(Response {
-        scope_memory,
-        heap_memory,
+        scope_memory: report.scope_memory,
+        heap_memory: report.heap_memory,
         timeline,
-        notes,
-        process_footprint,
-        mlx_allocator,
+        notes: report.notes,
+        process_footprint: report.process_footprint,
+        mlx_allocator: report.mlx_allocator,
     })
 }
 

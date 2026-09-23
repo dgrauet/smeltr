@@ -25,6 +25,42 @@ pub struct HeapMemory {
     pub peak_heap_bytes: u64,
 }
 
+/// Everything the memory surfaces show for one session: per-scope device
+/// memory, heaps, the process footprint jetsam decides on, the MLX
+/// allocator's cache, and why the tables are empty when they are.
+///
+/// Built once here so `smeltr memory` and `get_memory_breakdown` cannot
+/// drift: the CLI used to render only the first two (#243).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MemoryReport {
+    pub scope_memory: Vec<ScopeMemory>,
+    pub heap_memory: Vec<HeapMemory>,
+    pub process_footprint: Vec<crate::footprint::ProcFootprintSummary>,
+    pub mlx_allocator: Option<MlxAllocator>,
+    pub notes: Vec<String>,
+}
+
+pub fn memory_report(events: &[Event]) -> MemoryReport {
+    let scope_memory = compute_memory_breakdown(events);
+    let heap_memory = compute_heap_breakdown(events);
+    let mut notes = Vec::new();
+    if scope_memory.is_empty() && heap_memory.is_empty() {
+        use crate::rules::sidecar_absent::{detect, detect_nothing_instrumented};
+        if let Some(nothing) = detect_nothing_instrumented(events) {
+            notes.push(nothing.advice());
+        } else if let Some(absent) = detect(events) {
+            notes.push(absent.advice());
+        }
+    }
+    MemoryReport {
+        scope_memory,
+        heap_memory,
+        process_footprint: crate::footprint::compute_footprint_summary(events),
+        mlx_allocator: compute_mlx_allocator(events),
+        notes,
+    }
+}
+
 /// Compute per-scope device memory stats from `MetalDeviceMemSample`
 /// events. Returns one `ScopeMemory` per qualname, with the max-peak
 /// record kept across multiple call sites of the same qualname. Sorted
