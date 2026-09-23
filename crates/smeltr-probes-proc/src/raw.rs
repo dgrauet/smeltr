@@ -63,8 +63,11 @@ pub fn read_sys() -> std::io::Result<Vec<ProcSample>> {
     use std::process::Command;
     // -c: executable name only, untruncated. COMM last so a name containing
     // spaces cannot be confused with the following column.
+    // LC_ALL=C: a decimal-comma locale prints `%cpu` as `0,1`, and every
+    // row then failed to parse — an empty ProcTop, silently (#244).
     let out = Command::new("/bin/ps")
         .args(["-axco", "pid,%cpu,comm"])
+        .env("LC_ALL", "C")
         .output()?;
     if !out.status.success() {
         return Err(std::io::Error::other(format!("ps exited {:?}", out.status)));
@@ -104,6 +107,26 @@ pub fn parse_ps(stdout: &str) -> Vec<ProcSample> {
         });
     }
     samples
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod locale_tests {
+    use super::*;
+
+    /// #244: under a French locale `ps` prints `%cpu` as `0,1`, every row
+    /// failed to parse, and `ProcTop` came back empty with no error.
+    #[test]
+    #[serial_test::serial]
+    fn read_sys_survives_a_decimal_comma_locale() {
+        let before = std::env::var_os("LC_ALL");
+        std::env::set_var("LC_ALL", "fr_FR.UTF-8");
+        let rows = read_sys();
+        match before {
+            Some(v) => std::env::set_var("LC_ALL", v),
+            None => std::env::remove_var("LC_ALL"),
+        }
+        assert!(!rows.unwrap().is_empty(), "no process parsed");
+    }
 }
 
 #[cfg(test)]

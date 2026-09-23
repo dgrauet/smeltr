@@ -77,9 +77,9 @@ The `libmetal_hook.dylib` is built and **embedded into the `smeltr` binary** at 
 |---|---|
 | `vm` | wired / active / compressed memory, swap, page-out rate |
 | `proc` | top-N CPU via `ps`; flags `ReportCrash` / `diagnosticservicesd` / `UserNotificationCenter` / `spindump` when above threshold |
-| `thermal` | `kern.thermalstate` (Nominal/Light/Moderate/Heavy) |
+| `thermal` | system thermal pressure level (0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping), on change |
 | `oslog` | GPU subsystems + kernel "GPU watchdog" messages via `/usr/bin/log stream` |
-| `ioreport` | v1 stub — real IOReport residency lands in a future plan |
+| `ioreport` | not implemented: reports itself unavailable and records nothing (GPU timing comes from the Metal hook) |
 | `crash-reports` | parses `.ips` files dropped in `~/Library/Logs/DiagnosticReports/`, once per incident; smeltrd's own reports are left to its panic hook |
 | `mach-exceptions` | attached only to children spawned by `smeltr record` (same-UID PIDs) |
 

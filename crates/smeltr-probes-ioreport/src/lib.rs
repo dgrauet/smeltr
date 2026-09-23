@@ -1,17 +1,14 @@
 use async_trait::async_trait;
-use smeltr_core::event::{Payload, Source};
 use smeltr_probes_core::sink::SharedSink;
 use smeltr_probes_core::{Probe, ProbeError, ProbeHealth};
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub struct IoReportProbe {
-    period: Duration,
-}
+#[derive(Default)]
+pub struct IoReportProbe;
 
 impl IoReportProbe {
-    pub fn new(period: Duration) -> Self {
-        Self { period }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -21,33 +18,23 @@ impl Probe for IoReportProbe {
         "ioreport"
     }
     fn health(&self) -> ProbeHealth {
-        ProbeHealth::Degraded(
-            "v1: user-space IOReport limited; precise GPU residency comes from metal-hook (Plan 3)"
-                .into(),
-        )
+        ProbeHealth::Failed(NOT_IMPLEMENTED.into())
     }
-    async fn run(&mut self, sink: SharedSink, cancel: CancellationToken) -> Result<(), ProbeError> {
-        let mut interval = tokio::time::interval(self.period);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = interval.tick() => {}
-            }
-            sink.emit(
-                Source::IoReport,
-                None,
-                Payload::IoReportSample {
-                    gpu_residency_pct: None,
-                    ane_residency_pct: None,
-                    cpu_residency_pct: None,
-                    gpu_power_mw: None,
-                    gpu_freq_mhz: None,
-                },
-            );
-        }
+    /// Not implemented: IOReport residency needs private frameworks, and
+    /// precise GPU timing comes from the Metal hook. The stub used to write
+    /// an all-`None` sample every second — 40 % of an ambient session's
+    /// events, carrying nothing (#244). It now reports itself unavailable.
+    async fn run(
+        &mut self,
+        _sink: SharedSink,
+        _cancel: CancellationToken,
+    ) -> Result<(), ProbeError> {
+        Err(ProbeError::Unavailable(NOT_IMPLEMENTED.into()))
     }
 }
+
+const NOT_IMPLEMENTED: &str =
+    "IOReport residency not implemented; GPU timing comes from the Metal hook";
 
 #[cfg(test)]
 mod tests {
@@ -55,18 +42,14 @@ mod tests {
     use smeltr_probes_core::sink::test_util::CapturingSink;
     use std::sync::Arc;
 
+    /// #244: no more empty samples — the probe says it is unavailable.
     #[tokio::test]
-    async fn ioreport_emits_at_least_one_sample() {
+    async fn ioreport_reports_unavailable_and_emits_nothing() {
         let sink = Arc::new(CapturingSink::default());
-        let token = CancellationToken::new();
-        let token2 = token.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            token2.cancel();
-        });
-        let mut p = IoReportProbe::new(Duration::from_millis(50));
+        let mut p = IoReportProbe::new();
         let s: SharedSink = sink.clone();
-        p.run(s, token).await.unwrap();
-        assert!(!sink.events.lock().unwrap().is_empty());
+        let r = p.run(s, CancellationToken::new()).await;
+        assert!(matches!(r, Err(ProbeError::Unavailable(_))), "{r:?}");
+        assert!(sink.events.lock().unwrap().is_empty());
     }
 }

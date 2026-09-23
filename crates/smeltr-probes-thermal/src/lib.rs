@@ -15,23 +15,43 @@ impl ThermalProbe {
     }
 }
 
+/// The system's thermal pressure level (`OSThermalPressureLevel`):
+/// 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping.
+///
+/// Read from the `com.apple.system.thermalpressurelevel` notification state
+/// (libSystem's notify API, unprivileged) — the value
+/// `NSProcessInfo.thermalState` reflects. The `kern.thermalstate` sysctl
+/// read before does not exist on Apple Silicon (#244).
 pub fn read_state() -> std::io::Result<u32> {
     #[cfg(target_os = "macos")]
-    unsafe {
-        let mut val: i32 = 0;
-        let mut size = std::mem::size_of::<i32>();
-        let name = std::ffi::CString::new("kern.thermalstate").unwrap();
-        let rc = libc::sysctlbyname(
-            name.as_ptr(),
-            &mut val as *mut _ as *mut _,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        );
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error());
+    {
+        extern "C" {
+            fn notify_register_check(name: *const std::ffi::c_char, token: *mut i32) -> u32;
+            fn notify_get_state(token: i32, state: *mut u64) -> u32;
         }
-        Ok(val.max(0) as u32)
+        static TOKEN: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+        let token = TOKEN.get_or_init(|| {
+            let mut token = 0;
+            let status = unsafe {
+                notify_register_check(
+                    c"com.apple.system.thermalpressurelevel".as_ptr(),
+                    &mut token,
+                )
+            };
+            (status == 0).then_some(token)
+        });
+        let Some(token) = *token else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "thermal pressure notification unavailable",
+            ));
+        };
+        let mut state: u64 = 0;
+        let status = unsafe { notify_get_state(token, &mut state) };
+        if status != 0 {
+            return Err(std::io::Error::other(format!("notify_get_state: {status}")));
+        }
+        Ok(u32::try_from(state).unwrap_or(u32::MAX))
     }
     #[cfg(not(target_os = "macos"))]
     Err(std::io::Error::new(
@@ -46,7 +66,7 @@ impl Probe for ThermalProbe {
         "thermal"
     }
     fn health(&self) -> ProbeHealth {
-        ProbeHealth::Degraded("coarse: kern.thermalstate only (root for SMC)".into())
+        ProbeHealth::Degraded("coarse: thermal pressure level only (root for SMC)".into())
     }
     async fn run(&mut self, sink: SharedSink, cancel: CancellationToken) -> Result<(), ProbeError> {
         let mut interval = tokio::time::interval(self.period);
@@ -64,7 +84,7 @@ impl Probe for ThermalProbe {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(ProbeError::Unavailable(format!(
-                        "kern.thermalstate not available: {e}"
+                        "thermal pressure level not available: {e}"
                     )))
                 }
                 Err(e) => return Err(ProbeError::Transient(e.to_string())),
@@ -81,16 +101,12 @@ impl Probe for ThermalProbe {
 mod tests {
     use super::*;
 
+    /// #244: the probe read `kern.thermalstate`, which does not exist on
+    /// Apple Silicon (`sysctl: unknown oid` on an M2 Pro), so thermal state
+    /// was never captured on the only hardware smeltr targets.
     #[test]
-    fn read_state_does_not_error_on_macos() {
-        // kern.thermalstate is only exposed on some macOS hardware (e.g. Intel
-        // Macs). On Apple Silicon it may be absent — accept NotFound as a
-        // graceful degradation path; otherwise the read should produce a
-        // plausible level.
-        match read_state() {
-            Ok(v) => assert!(v <= 10, "implausible thermal level: {v}"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => panic!("kern.thermalstate read failed: {e:?}"),
-        }
+    fn read_state_works_on_apple_silicon() {
+        let level = read_state().expect("thermal pressure level");
+        assert!(level <= 4, "implausible thermal pressure level: {level}");
     }
 }

@@ -6,7 +6,6 @@ use smeltr_probes_core::sink::SharedSink;
 use smeltr_probes_core::{Probe, ProbeError, ProbeHealth};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc as std_mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Process whose crash reports the daemon declines to ingest: a crashed
@@ -55,6 +54,10 @@ impl SeenReports {
 
 pub struct CrashReportsProbe {
     dirs: Vec<PathBuf>,
+    /// Signalled once the directories are watched (tests: FSEvents takes
+    /// seconds to start, and writes made before that are never seen).
+    #[cfg(test)]
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl CrashReportsProbe {
@@ -63,10 +66,14 @@ impl CrashReportsProbe {
         if let Some(home) = std::env::var_os("HOME") {
             dirs.push(PathBuf::from(home).join("Library/Logs/DiagnosticReports"));
         }
-        Self { dirs }
+        Self::with_dirs(dirs)
     }
     pub fn with_dirs(dirs: Vec<PathBuf>) -> Self {
-        Self { dirs }
+        Self {
+            dirs,
+            #[cfg(test)]
+            ready: None,
+        }
     }
 }
 
@@ -86,24 +93,55 @@ impl Probe for CrashReportsProbe {
     }
 
     async fn run(&mut self, sink: SharedSink, cancel: CancellationToken) -> Result<(), ProbeError> {
-        let (tx, rx) = std_mpsc::channel::<notify::Result<Event>>();
-        let mut watcher: RecommendedWatcher =
-            notify::recommended_watcher(tx).map_err(|e| ProbeError::Transient(e.to_string()))?;
-        for d in &self.dirs {
-            if d.exists() {
-                watcher
-                    .watch(d, RecursiveMode::NonRecursive)
-                    .map_err(|e| ProbeError::Transient(format!("watch {d:?}: {e}")))?;
+        // A tokio channel, awaited: waiting on a std channel inside this async
+        // fn held its worker thread (#244).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<notify::Result<Event>>();
+        // Starting (and stopping) an FSEvents stream blocks for seconds —
+        // `watch()` measured at 1.4-5.7 s: keep both off the async workers.
+        let dirs = self.dirs.clone();
+        let watcher = tokio::task::spawn_blocking(move || {
+            let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+                let _ = tx.send(res);
+            })
+            .map_err(|e| ProbeError::Transient(e.to_string()))?;
+            for d in &dirs {
+                if d.exists() {
+                    watcher
+                        .watch(d, RecursiveMode::NonRecursive)
+                        .map_err(|e| ProbeError::Transient(format!("watch {d:?}: {e}")))?;
+                }
             }
+            Ok::<_, ProbeError>(watcher)
+        })
+        .await
+        .map_err(|e| ProbeError::Transient(e.to_string()))??;
+        #[cfg(test)]
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(());
         }
+        let result = self.drain(&mut rx, &sink, &cancel).await;
+        tokio::task::spawn_blocking(move || drop(watcher))
+            .await
+            .ok();
+        result
+    }
+}
+
+impl CrashReportsProbe {
+    async fn drain(
+        &self,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<notify::Result<Event>>,
+        sink: &SharedSink,
+        cancel: &CancellationToken,
+    ) -> Result<(), ProbeError> {
         let mut seen = SeenReports::default();
         loop {
-            if cancel.is_cancelled() {
-                return Ok(());
-            }
-            tokio::task::yield_now().await;
-            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                Ok(Ok(ev)) => {
+            let msg = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                msg = rx.recv() => msg,
+            };
+            match msg {
+                Some(Ok(ev)) => {
                     if !matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(_)) {
                         continue;
                     }
@@ -156,9 +194,8 @@ impl Probe for CrashReportsProbe {
                         }
                     }
                 }
-                Ok(Err(e)) => tracing::warn!("watcher error: {e}"),
-                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                Some(Err(e)) => tracing::warn!("watcher error: {e}"),
+                None => {
                     return Err(ProbeError::Transient("watcher disconnected".into()));
                 }
             }
@@ -193,7 +230,9 @@ mod tests {
     async fn emitted_with_pid_for(writes: &[(&str, &str)]) -> Vec<(Option<u32>, Payload)> {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
-        let probe = CrashReportsProbe::with_dirs(vec![dir.clone()]);
+        let mut probe = CrashReportsProbe::with_dirs(vec![dir.clone()]);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        probe.ready = Some(ready_tx);
         let sink: Arc<CapturingSink> = Arc::default();
         let token = CancellationToken::new();
         let sink_dyn: SharedSink = sink.clone();
@@ -203,7 +242,10 @@ mod tests {
             p.run(sink_dyn, token2).await
         });
 
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::timeout(Duration::from_secs(30), ready_rx)
+            .await
+            .expect("watcher never started")
+            .unwrap();
         for (name, content) in writes {
             std::fs::write(dir.join(name), content).unwrap();
             tokio::time::sleep(Duration::from_millis(700)).await;
@@ -227,6 +269,31 @@ mod tests {
         let evs = emitted_with_pid_for(&[("python-2026-05-13.ips", FIXTURE)]).await;
         assert_eq!(evs.len(), 1, "got {evs:?}");
         assert_eq!(evs[0].0, Some(38291));
+    }
+
+    /// #244: the probe waited on a std channel (`recv_timeout(200 ms)`)
+    /// inside its async fn, holding the worker thread. On a single-threaded
+    /// runtime, a task beside it must keep its 10 ms cadence.
+    #[tokio::test(flavor = "current_thread")]
+    async fn probe_does_not_block_its_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let probe = CrashReportsProbe::with_dirs(vec![tmp.path().to_path_buf()]);
+        let sink: Arc<CapturingSink> = Arc::default();
+        let token = CancellationToken::new();
+        let (sink_dyn, token2): (SharedSink, _) = (sink.clone(), token.clone());
+        let h = tokio::spawn(async move {
+            let mut p = probe;
+            p.run(sink_dyn, token2).await
+        });
+        let start = std::time::Instant::now();
+        let mut ticks = 0;
+        while start.elapsed() < Duration::from_millis(500) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            ticks += 1;
+        }
+        token.cancel();
+        let _ = h.await;
+        assert!(ticks >= 25, "only {ticks} ticks of 10 ms in 500 ms");
     }
 
     #[tokio::test]

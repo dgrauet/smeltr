@@ -22,6 +22,12 @@ impl EventSink for DaemonSink {
             tracing::warn!(error = %e, "session append failed");
         }
     }
+
+    fn emit_at(&self, source: Source, pid: Option<u32>, uptime_raw_ns: u64, payload: Payload) {
+        if let Err(e) = self.router.append_at(source, pid, uptime_raw_ns, payload) {
+            tracing::warn!(error = %e, "session append failed");
+        }
+    }
 }
 
 pub struct ProbeRuntime {
@@ -47,9 +53,7 @@ impl ProbeRuntime {
             Duration::from_secs(2),
         )));
         sup.add(Box::new(smeltr_probes_oslog::OsLogProbe::new()));
-        sup.add(Box::new(smeltr_probes_ioreport::IoReportProbe::new(
-            Duration::from_secs(1),
-        )));
+        sup.add(Box::new(smeltr_probes_ioreport::IoReportProbe::new()));
         sup.add(Box::new(
             smeltr_probes_crash_reports::CrashReportsProbe::new(),
         ));
@@ -79,7 +83,11 @@ impl ProbeRuntime {
             ),
         ));
         let handle = sup.spawn();
-        self.scoped.lock().await.insert(pid, handle);
+        // A pid recorded twice: stop the previous probes, don't orphan them.
+        let replaced = self.scoped.lock().await.insert(pid, handle);
+        if let Some(old) = replaced {
+            old.shutdown().await;
+        }
     }
 
     pub async fn detach_scoped(&self, pid: u32) {
@@ -96,7 +104,10 @@ impl ProbeRuntime {
         sup.add(Box::new(smeltr_probes_metal_hook::MetalHookProbe::new(
             pid, ring_path,
         )));
-        self.metal_hooks.lock().await.insert(pid, sup.spawn());
+        let replaced = self.metal_hooks.lock().await.insert(pid, sup.spawn());
+        if let Some(old) = replaced {
+            old.shutdown().await;
+        }
     }
 
     pub async fn detach_metal_hook(&self, pid: u32) {

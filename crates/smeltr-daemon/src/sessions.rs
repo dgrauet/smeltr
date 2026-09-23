@@ -72,6 +72,7 @@ impl ActiveSession {
         s.append_internal(
             Source::System,
             None,
+            None,
             Payload::SessionStarted {
                 wall_unix_ns: wall_epoch_ns,
             },
@@ -118,6 +119,7 @@ impl ActiveSession {
         s.append_internal(
             Source::System,
             Some(pid),
+            None,
             Payload::SessionStarted {
                 wall_unix_ns: wall_epoch_ns,
             },
@@ -144,20 +146,36 @@ impl ActiveSession {
         pid: Option<u32>,
         payload: Payload,
     ) -> std::io::Result<Event> {
-        self.append_internal(source, pid, payload)
+        self.append_internal(source, pid, None, payload)
+    }
+
+    /// [`append`](Self::append) for an event stamped where it happened, on
+    /// the `uptime_raw_ns` clock (the Metal hook's ring frames, #244).
+    pub fn append_at(
+        &self,
+        source: Source,
+        pid: Option<u32>,
+        uptime_raw_ns: u64,
+        payload: Payload,
+    ) -> std::io::Result<Event> {
+        self.append_internal(source, pid, Some(uptime_raw_ns), payload)
     }
 
     fn append_internal(
         &self,
         source: Source,
         pid: Option<u32>,
+        uptime_raw_ns: Option<u64>,
         payload: Payload,
     ) -> std::io::Result<Event> {
         let mut guard = self.inner.lock().unwrap();
         let inner = guard
             .as_mut()
             .ok_or_else(|| std::io::Error::other("session already finalized"))?;
-        let ts_mono = inner.clock.now_ns();
+        let ts_mono = match uptime_raw_ns {
+            Some(raw) => inner.clock.at_raw_ns(raw),
+            None => inner.clock.now_ns(),
+        };
         let ts_wall = inner.wall_epoch_ns + ts_mono;
         inner.seq += 1;
         let ev = Event {
@@ -290,6 +308,44 @@ mod tests {
             started.pid,
             Some(1234),
             "SessionStarted must carry pid=Some(pid)"
+        );
+    }
+
+    /// #244: an event carrying the Metal hook's raw stamp is dated when it
+    /// happened, not when the ring was drained.
+    #[test]
+    #[serial]
+    fn append_at_dates_the_event_from_its_raw_stamp() {
+        let _home = temp_home();
+        let s = ActiveSession::open_new().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let raw = smeltr_core::clock::uptime_raw_ns() - 5_000_000;
+        let ev = s
+            .append_at(
+                Source::MetalHook,
+                None,
+                raw,
+                Payload::Mark {
+                    label: "hook".into(),
+                    fields: Default::default(),
+                },
+            )
+            .unwrap();
+        let now = s
+            .append(
+                Source::Mark,
+                None,
+                Payload::Mark {
+                    label: "now".into(),
+                    fields: Default::default(),
+                },
+            )
+            .unwrap();
+        let lag = now.ts_mono_ns - ev.ts_mono_ns;
+        assert!((5_000_000..6_000_000).contains(&lag), "lag {lag}");
+        assert_eq!(
+            ev.ts_wall_ns - ev.ts_mono_ns,
+            now.ts_wall_ns - now.ts_mono_ns
         );
     }
 

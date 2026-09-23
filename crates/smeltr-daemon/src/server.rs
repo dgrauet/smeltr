@@ -269,17 +269,22 @@ async fn handle_msg(
             // task is first polled, so no scoped sample can leak into the
             // ambient session.
             match router.attach_scoped(pid, argv, scope_token, name, chunked, gputrace_path) {
-                Ok(_) => probe_runtime.attach_scoped(pid).await,
+                Ok(_) => {
+                    probe_runtime.attach_scoped(pid).await;
+                    DaemonToClient::Ack
+                }
                 Err(e) => {
                     // The session failed to open, so there is nowhere
-                    // correct to route this pid's events yet. Starting the
-                    // probes anyway would just feed the ambient session with
-                    // samples for a pid the caller believes is scoped —
-                    // leave them off rather than attach.
+                    // correct to route this pid's events. Leave the probes
+                    // off, and say so: answering Ack let `record` carry on
+                    // as if the run were recorded while everything landed
+                    // in the ambient session (#244).
                     tracing::warn!(error = %e, pid = pid, "failed to open scoped session");
+                    DaemonToClient::Error {
+                        message: format!("could not open the scoped session: {e}"),
+                    }
                 }
             }
-            DaemonToClient::Ack
         }
         ClientToDaemon::DetachScopedProbes {
             pid,
@@ -357,6 +362,45 @@ mod tests {
         std::env::set_var("SMELTR_HOME", d.path());
         std::env::set_var("SMELTR_SOCKET", d.path().join("smeltr.sock"));
         d
+    }
+
+    /// #244: when the scoped session cannot be opened, `record` must hear
+    /// it — the daemon answered Ack, so the run went on believing it was
+    /// recorded while every event it sent landed in the ambient session.
+    #[tokio::test]
+    #[serial]
+    async fn attach_reports_a_session_that_failed_to_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_env();
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let router = Arc::new(SessionRouter::new(ambient, None, None));
+        let sink = Arc::new(DaemonSink {
+            router: router.clone(),
+        });
+        let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        // No new session directory can be created.
+        let sessions = home.path().join("sessions");
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let resp = handle_msg(
+            ClientToDaemon::AttachScopedProbes {
+                pid: std::process::id(),
+                argv: vec!["x".into()],
+                scope_token: None,
+                name: None,
+                chunked: false,
+                gputrace_path: None,
+            },
+            &router,
+            &Bus::new(),
+            &probe_runtime,
+            &tx,
+        )
+        .await;
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o755)).unwrap();
+        probe_runtime.shutdown().await;
+        assert!(matches!(resp, DaemonToClient::Error { .. }), "{resp:?}");
     }
 
     #[tokio::test]

@@ -61,13 +61,13 @@ fn check_thermal() -> ProbeCheck {
     match smeltr_probes_thermal::read_state() {
         Ok(level) => ProbeCheck {
             name: "thermal",
-            status: Status::Degraded,
-            detail: format!("kern.thermalstate={level} (root needed for SMC keys)"),
+            status: Status::Ok,
+            detail: format!("thermal pressure level {level} (0 nominal … 4 sleeping)"),
         },
         Err(e) => ProbeCheck {
             name: "thermal",
-            status: Status::Degraded,
-            detail: format!("kern.thermalstate unavailable: {e}"),
+            status: Status::Failed,
+            detail: format!("thermal pressure level unavailable: {e}"),
         },
     }
 }
@@ -98,7 +98,7 @@ fn check_ioreport() -> ProbeCheck {
     ProbeCheck {
         name: "ioreport",
         status: Status::Degraded,
-        detail: "v1 stub: precise GPU residency requires metal-hook (Plan 3)".into(),
+        detail: "not implemented: records nothing; GPU timing comes from the Metal hook".into(),
     }
 }
 
