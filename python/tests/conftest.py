@@ -8,6 +8,7 @@ import socket
 import struct
 import tempfile
 import threading
+import time
 from typing import Any
 
 import cbor2
@@ -23,6 +24,9 @@ class FakeDaemon:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        # Seconds to wait before acking an Emit: a slow daemon keeps the
+        # client inside emit(), holding its lock, most of the time.
+        self.ack_delay_s = 0.0
 
     def start(self) -> None:
         if os.path.exists(self.sock_path):
@@ -73,6 +77,8 @@ class FakeDaemon:
                 elif op == "Emit":
                     with self._lock:
                         self.received.append(msg)
+                    if self.ack_delay_s:
+                        time.sleep(self.ack_delay_s)
                     self._write_frame(conn, {"kind": "Ack"})
                 else:
                     self._write_frame(conn, {"kind": "Error", "message": f"unknown op {op}"})

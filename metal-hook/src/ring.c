@@ -125,9 +125,22 @@ static void write_frame(smeltr_ring_t *r, uint32_t kind, uint64_t ts,
 #define BUF_PUSH_I32(buf, off, v) do { int32_t  _t = (v); BUF_PUSH(buf, off, _t, 4); } while (0)
 #define BUF_PUSH_U64(buf, off, v) do { uint64_t _t = (v); BUF_PUSH(buf, off, _t, 8); } while (0)
 #define BUF_PUSH_I64(buf, off, v) do { int64_t  _t = (v); BUF_PUSH(buf, off, _t, 8); } while (0)
+/* Labels come from the traced app (MTLCommandBuffer/MTLResource.label,
+ * NSError.domain) and have no length limit, while the frame buffers below
+ * are fixed-size stack arrays: an unbounded copy smashed the app's stack
+ * (#239). Cap them — the largest fixed field set is 36 bytes, so 192 fits
+ * both the 256- and 512-byte buffers — and back off to a UTF-8 character
+ * boundary: the daemon decodes labels with str::from_utf8. */
+#define SMELTR_LABEL_MAX 192
 static void push_label(uint8_t *buf, size_t *off, const char *s) {
     if (!s) { uint32_t z = 0; memcpy(buf + *off, &z, 4); *off += 4; return; }
-    uint32_t n = (uint32_t)strlen(s);
+    size_t len = strnlen(s, SMELTR_LABEL_MAX + 1);
+    if (len > SMELTR_LABEL_MAX) {
+        len = SMELTR_LABEL_MAX;
+        /* Drop continuation bytes (10xxxxxx) of a character cut in half. */
+        while (len > 0 && ((unsigned char)s[len] & 0xC0) == 0x80) len--;
+    }
+    uint32_t n = (uint32_t)len;
     memcpy(buf + *off, &n, 4); *off += 4;
     memcpy(buf + *off, s, n); *off += n;
 }
