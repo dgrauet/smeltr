@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.6](https://github.com/dgrauet/smeltr/compare/v0.28.5...v0.28.6) (2026-09-23)
+
+
+### Bug Fixes
+
+* **cli:** resolve sessions by start time and by exact id, not by name ([#250](https://github.com/dgrauet/smeltr/issues/250)) ([6695ecb](https://github.com/dgrauet/smeltr/commit/6695ecbed3bf982defd7b810afdbf6ed5b7d657c)), closes [#241](https://github.com/dgrauet/smeltr/issues/241)
+
 ## [0.28.5](https://github.com/dgrauet/smeltr/compare/v0.28.4...v0.28.5) (2026-09-23)
 
 
