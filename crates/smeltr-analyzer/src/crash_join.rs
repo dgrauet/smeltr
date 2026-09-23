@@ -388,32 +388,35 @@ fn window_end_ns(meta: &smeltr_core::session::SessionMetadata, events: &[Event])
 /// finalized is covered too; the old block required `ended_rfc3339` and
 /// silently skipped that case, in the CLI as well.
 pub fn join_crash(report: &mut crate::report::Report, dir: &Path) {
-    let Ok(meta) = smeltr_core::reader::read_metadata(dir) else {
-        return;
-    };
+    if let Some(j) = session_crash(dir) {
+        report.findings.insert(0, crash_finding(&j));
+    }
+}
+
+/// The crash report of a recorded run that crashed, joined from
+/// DiagnosticReports on the run's pid and wall-clock window. `None` for
+/// ambient sessions, clean exits, or when no report matches.
+///
+/// Shared by [`join_crash`] and the MCP `get_crash_report`, so the tool that
+/// returns the report and the finding that cites it cannot disagree (#242).
+pub fn session_crash(dir: &Path) -> Option<CrashJoin> {
+    let meta = smeltr_core::reader::read_metadata(dir).ok()?;
     let smeltr_core::session::SessionKind::Scoped { pid, .. } = &meta.kind else {
-        return;
+        return None;
     };
     // A clean exit is not a crash. This guard is deliberately absent from
     // `join_jetsam` (a jetsam kill can still let the shell report a clean
     // code), but legitimate here: ReportCrash writes nothing on an exit 0.
     if meta.exit_code == Some(0) {
-        return;
+        return None;
     }
-    let Some(start_ns) = rfc3339_unix_ns(&meta.started_rfc3339) else {
-        return;
-    };
+    let start_ns = rfc3339_unix_ns(&meta.started_rfc3339)?;
     let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
     let end_ns = window_end_ns(&meta, &events);
 
-    for reports_dir in diagnostic_reports_dirs() {
-        if let Some(j) =
-            find_crash_report(&reports_dir, *pid, start_ns, end_ns, CRASH_REPORT_GRACE_NS)
-        {
-            report.findings.insert(0, crash_finding(&j));
-            return;
-        }
-    }
+    diagnostic_reports_dirs().iter().find_map(|reports_dir| {
+        find_crash_report(reports_dir, *pid, start_ns, end_ns, CRASH_REPORT_GRACE_NS)
+    })
 }
 
 /// Stop signals requested by the user or by a supervisor. Hard-coded rather
