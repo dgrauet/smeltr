@@ -331,7 +331,11 @@ async fn start() -> anyhow::Result<()> {
             return Ok(());
         }
     }
-    let spawned = match start_action(supervision()) {
+    // Both launchd (plist) and the detached spawn below append the daemon's
+    // output here; errors written after this offset are this start's.
+    let err_path = smeltr_home_dir().join("smeltrd.err");
+    let err_offset = std::fs::metadata(&err_path).map(|m| m.len()).unwrap_or(0);
+    let mut child = match start_action(supervision()) {
         StartAction::Kickstart => {
             launchctl(&["kickstart", &launchd_target()])?;
             None
@@ -350,27 +354,69 @@ async fn start() -> anyhow::Result<()> {
                 Some(p) if p.exists() => p,
                 _ => PathBuf::from("smeltrd"),
             };
-            let child = std::process::Command::new(&smeltrd)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .stdin(std::process::Stdio::null())
-                .spawn()?;
-            Some(child.id())
+            std::fs::create_dir_all(smeltr_home_dir())?;
+            let append = |p: PathBuf| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(p)
+            };
+            Some(
+                std::process::Command::new(&smeltrd)
+                    .stdout(append(smeltr_home_dir().join("smeltrd.log"))?)
+                    .stderr(append(err_path.clone())?)
+                    .stdin(std::process::Stdio::null())
+                    .spawn()?,
+            )
         }
     };
-    // Give it a moment to write the pid file (launchd may also be inside
-    // its ThrottleInterval right after a stop).
-    for _ in 0..200 {
-        if let Some(pid) = read_pid().filter(|p| process_alive(*p)) {
-            match spawned {
-                Some(_) => println!("smeltrd started (pid {pid})"),
-                None => println!("smeltrd started by launchd (pid {pid})"),
+    let launchd = child.is_none();
+    // Healthy = the socket accepts a connection. The pid file alone is not
+    // enough: smeltrd claims it before binding, so a daemon failing at bind
+    // looked started (#236). The deadline covers launchd's ThrottleInterval
+    // right after a stop, and a loaded machine.
+    let sock = smeltr_daemon::server::socket_path();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+            let pid = read_pid().map_or_else(|| "?".into(), |p| p.to_string());
+            match launchd {
+                false => println!("smeltrd started (pid {pid})"),
+                true => println!("smeltrd started by launchd (pid {pid})"),
             }
             return Ok(());
         }
+        if let Some(status) = child.as_mut().map(|c| c.try_wait()).transpose()?.flatten() {
+            anyhow::bail!(
+                "smeltrd exited ({status}) before serving {}{}",
+                sock.display(),
+                errors_since(&err_path, err_offset)
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    anyhow::bail!("smeltrd did not become healthy within 10s")
+    anyhow::bail!(
+        "smeltrd did not serve {} within 30s{}",
+        sock.display(),
+        errors_since(&err_path, err_offset)
+    )
+}
+
+/// What the daemon wrote to its stderr log past `offset`, formatted for an
+/// error message (empty when nothing was written).
+fn errors_since(err_path: &std::path::Path, offset: u64) -> String {
+    use std::io::{Read, Seek};
+    let mut text = String::new();
+    let read = std::fs::File::open(err_path).and_then(|mut f| {
+        f.seek(std::io::SeekFrom::Start(offset))?;
+        f.read_to_string(&mut text)
+    });
+    match read {
+        Ok(_) if !text.trim().is_empty() => {
+            format!(":\n{}\n({})", text.trim_end(), err_path.display())
+        }
+        _ => String::new(),
+    }
 }
 
 async fn stop() -> anyhow::Result<()> {
@@ -549,6 +595,20 @@ mod install_tests {
         assert_eq!(outside_launchd(loaded(Some(1277)), Some(1277)), None);
         assert_eq!(outside_launchd(loaded(None), None), None);
         assert_eq!(outside_launchd(Supervision::Unmanaged, Some(82120)), None);
+    }
+
+    #[test]
+    fn errors_since_reports_only_this_start() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("smeltrd.err");
+        std::fs::write(&p, "Error: from an earlier start\n").unwrap();
+        let offset = std::fs::metadata(&p).unwrap().len();
+        assert_eq!(errors_since(&p, offset), "");
+        std::fs::write(&p, "Error: from an earlier start\nError: bind failed\n").unwrap();
+        let msg = errors_since(&p, offset);
+        assert!(msg.contains("Error: bind failed"), "{msg}");
+        assert!(!msg.contains("earlier"), "{msg}");
+        assert_eq!(errors_since(&d.path().join("missing"), 0), "");
     }
 
     #[test]
