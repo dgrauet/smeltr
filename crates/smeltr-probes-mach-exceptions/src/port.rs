@@ -526,6 +526,27 @@ mod tests {
         }
     }
 
+    /// Set once the receiver thread has printed what it decoded.
+    static DECODED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// Exit status of a fault that reached the Unix signal stage.
+    const FAULT_HANDLED_EXIT: i32 = 42;
+
+    /// Catches the SIGSEGV/SIGBUS the fault turns into once our handler has
+    /// replied, and exits cleanly: a process killed by the signal would
+    /// leave a real crash report — and the developer's daemon a post-mortem
+    /// session — on every `cargo test` (#227).
+    extern "C" fn exit_on_fault(_sig: i32) {
+        // Atomic loads and nanosleep are async-signal-safe; give the
+        // receiver thread up to 2 s to print before exiting.
+        for _ in 0..200 {
+            if DECODED.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            unsafe { libc::usleep(10_000) };
+        }
+        unsafe { libc::_exit(FAULT_HANDLED_EXIT) };
+    }
+
     /// Child half of `real_fault_is_decoded_and_the_faulting_process_dies`.
     /// `task_for_pid` on another process is refused without root or an
     /// entitlement, but always allowed on oneself: the child watches its
@@ -536,6 +557,9 @@ mod tests {
         if std::env::var_os("SMELTR_MACH_EXC_FAULT").is_none() {
             return;
         }
+        for sig in [libc::SIGSEGV, libc::SIGBUS] {
+            unsafe { libc::signal(sig, exit_on_fault as *const () as libc::sighandler_t) };
+        }
         let receiver = install_for_pid(std::process::id()).unwrap();
         std::thread::spawn(move || {
             if let Some(e) = receiver.next(Duration::from_secs(10)) {
@@ -543,6 +567,7 @@ mod tests {
                     "decoded pid={} type={} codes={:?}",
                     e.target_pid, e.exception_type, e.codes
                 );
+                DECODED.store(true, std::sync::atomic::Ordering::Release);
             }
         });
         std::thread::sleep(Duration::from_millis(200));
@@ -552,7 +577,6 @@ mod tests {
     #[test]
     fn real_fault_is_decoded_and_the_faulting_process_dies() {
         use std::io::Read;
-        use std::os::unix::process::ExitStatusExt;
 
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -567,7 +591,7 @@ mod tests {
             .spawn()
             .unwrap();
         // The faulting thread waits for the receiver's reply: without one it
-        // never reaches the default handler and the process hangs.
+        // never reaches the Unix signal stage and the process hangs.
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let status = loop {
             if let Some(s) = child.try_wait().unwrap() {
@@ -589,7 +613,11 @@ mod tests {
         let Some(status) = status else {
             panic!("faulting process must terminate after the exception; stdout: {out:?}");
         };
-        assert!(status.signal().is_some(), "killed by a signal: {status:?}");
+        assert_eq!(
+            status.code(),
+            Some(FAULT_HANDLED_EXIT),
+            "the fault must reach the signal handler: {status:?}, stdout: {out:?}"
+        );
         let want = format!("decoded pid={} type=1 codes=[1, 16]", child.id());
         assert!(
             out.contains(&want),
