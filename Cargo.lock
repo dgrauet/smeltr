@@ -2543,7 +2543,6 @@ name = "smeltr-probes-thermal"
 version = "0.28.8"
 dependencies = [
  "async-trait",
- "libc",
  "smeltr-core",
  "smeltr-probes-core",
  "tokio",
