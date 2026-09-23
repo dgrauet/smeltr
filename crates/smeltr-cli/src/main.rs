@@ -201,7 +201,12 @@ enum Cmd {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Logs go to stderr: stdout is `smeltr mcp`'s JSON-RPC channel, and the
+    // data every other command prints (tables, NDJSON, exports) that users
+    // pipe. The default writer is stdout, so a reader warning about an open
+    // session used to land between MCP frames.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )

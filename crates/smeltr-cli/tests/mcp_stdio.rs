@@ -21,10 +21,12 @@ fn read_json_line<R: BufRead>(r: &mut R, deadline: Instant) -> Option<serde_json
                 if t.is_empty() {
                     continue;
                 }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
-                    return Some(v);
-                }
-                // Not JSON, treat as log noise — continue.
+                // stdout carries JSON-RPC only; anything else is a bug
+                // (see `mcp_stdout_carries_only_json_rpc_while_logging`).
+                return Some(
+                    serde_json::from_str(t)
+                        .unwrap_or_else(|e| panic!("non-JSON line on the MCP stdout: {t:?} ({e})")),
+                );
             }
             Err(_) => return None,
         }
@@ -138,4 +140,86 @@ fn mcp_stdio_initialize_then_list_tools() {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// stdout is the JSON-RPC channel: nothing else may be written to it. A
+/// session still being recorded makes the reader warn ("zstd stream not
+/// sealed"), and that warning used to land on stdout, between frames.
+#[test]
+#[serial_test::serial]
+fn mcp_stdout_carries_only_json_rpc_while_logging() {
+    use smeltr_core::event::{Event, Payload, Source};
+    use smeltr_core::session::{SessionId, SessionMetadata};
+    use smeltr_core::writer::SessionWriter;
+
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("SMELTR_HOME", home.path());
+    // An open (unfinalized) session with one event: reading it warns.
+    let mut w = SessionWriter::create(SessionMetadata::now_starting(SessionId::new())).unwrap();
+    w.write_event(&Event {
+        ts_mono_ns: 1,
+        ts_wall_ns: 1,
+        session_id: uuid::Uuid::nil(),
+        source: Source::Mark,
+        pid: None,
+        seq: 1,
+        payload: Payload::Mark {
+            label: "open".into(),
+            fields: Default::default(),
+        },
+    })
+    .unwrap();
+    w.flush().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_smeltr"))
+        .env("SMELTR_HOME", home.path())
+        .env("RUST_LOG", "warn")
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    write_line(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+    );
+    write_line(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+    );
+    write_line(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_sessions","arguments":{"include_empty":true}}}"#,
+    );
+
+    let mut foreign = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut answered = false;
+    while Instant::now() < deadline && !answered {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(t) {
+            Ok(v) => answered = v.get("id").and_then(|i| i.as_i64()) == Some(2),
+            Err(_) => foreign.push(t.to_string()),
+        }
+    }
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(w);
+
+    assert!(answered, "no list_sessions response");
+    assert!(
+        foreign.is_empty(),
+        "non-JSON-RPC output on stdout: {foreign:?}"
+    );
 }
