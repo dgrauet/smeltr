@@ -672,7 +672,33 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
         }
         let dur_us = (n.gpu_ns_subtree / 1000).max(1);
         let start = *cursor_us;
-        events.push(serde_json::json!({
+        let slot = events.len();
+        events.push(serde_json::Value::Null); // this node, filled in below
+                                              // Children first, then the node's own ops (its self time) after
+                                              // them: both sit on track depth + 1, and starting both at `start`
+                                              // made them overlap, which viewers nest wrongly (#243).
+        let mut next = start;
+        for c in &n.children {
+            walk(c, depth + 1, &mut next, events);
+        }
+        for op in &n.ops {
+            let op_dur = (op.gpu_ns / 1000).max(1);
+            events.push(serde_json::json!({
+                "name": op.name,
+                "cat": "op",
+                "ph": "X",
+                "ts": next,
+                "dur": op_dur,
+                "pid": 0,
+                "tid": depth + 1,
+                "args": { "count": op.count, "gpu_ns": op.gpu_ns },
+            }));
+            next += op_dur;
+        }
+        // Rounding each slice up to 1 µs can outgrow the node; keep it
+        // enclosing what it contains.
+        let dur_us = dur_us.max(next - start);
+        events[slot] = serde_json::json!({
             "name": n.qualname,
             "cat": n.class_name,
             "ph": "X",
@@ -686,26 +712,7 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
                 "eval_count": n.eval_count,
                 "cb_count": n.cb_count,
             }
-        }));
-        let mut op_cursor = start;
-        for op in &n.ops {
-            let dur_us = (op.gpu_ns / 1000).max(1);
-            events.push(serde_json::json!({
-                "name": op.name,
-                "cat": "op",
-                "ph": "X",
-                "ts": op_cursor,
-                "dur": dur_us,
-                "pid": 0,
-                "tid": depth + 1,
-                "args": { "count": op.count, "gpu_ns": op.gpu_ns },
-            }));
-            op_cursor += dur_us;
-        }
-        let mut child_cursor = start;
-        for c in &n.children {
-            walk(c, depth + 1, &mut child_cursor, events);
-        }
+        });
         *cursor_us = start + dur_us;
     }
     walk(root, 0, &mut cursor_us, &mut events);
@@ -2351,6 +2358,56 @@ mod tests {
         let arr = parsed["traceEvents"].as_array().unwrap();
         assert!(arr.iter().any(|e| e["name"] == "Linear" && e["ph"] == "X"));
         assert_eq!(parsed["displayTimeUnit"], "us");
+    }
+
+    /// #243: a node's op slices and its children share the child track
+    /// (`tid = depth + 1`); both started at the node's start, so viewers
+    /// nested them wrongly. Slices on one track must never overlap.
+    #[test]
+    fn render_chrome_trace_slices_on_a_track_do_not_overlap() {
+        let node = |name: &str, self_ns: u64, children: Vec<ModuleBreakdown>, ops| {
+            let subtree = self_ns
+                + children
+                    .iter()
+                    .map(|c: &ModuleBreakdown| c.gpu_ns_subtree)
+                    .sum::<u64>();
+            ModuleBreakdown {
+                qualname: name.into(),
+                class_name: String::new(),
+                calls: 1,
+                gpu_ns_self: self_ns,
+                gpu_ns_subtree: subtree,
+                eval_count: 0,
+                cb_count: 0,
+                children,
+                ops,
+                diagnostics: None,
+                fields: Default::default(),
+            }
+        };
+        let op = OpAttribution {
+            name: "Matmul".into(),
+            gpu_ns: 1_000_000,
+            count: 1,
+            symbol: None,
+            kind: None,
+        };
+        let child = node("Child", 2_000_000, vec![], vec![]);
+        let parent = node("Parent", 1_000_000, vec![child], vec![op]);
+        let root = node("<root>", 0, vec![parent], vec![]);
+
+        let json = render_chrome_trace(&root);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut track: Vec<(u64, u64)> = parsed["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tid"] == 1)
+            .map(|e| (e["ts"].as_u64().unwrap(), e["dur"].as_u64().unwrap()))
+            .collect();
+        track.sort();
+        assert_eq!(track.len(), 2, "child slice + op slice: {track:?}");
+        assert!(track[0].0 + track[0].1 <= track[1].0, "overlap: {track:?}");
     }
 
     #[test]
