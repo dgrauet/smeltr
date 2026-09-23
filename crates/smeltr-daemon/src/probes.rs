@@ -53,9 +53,7 @@ impl ProbeRuntime {
             Duration::from_secs(2),
         )));
         sup.add(Box::new(smeltr_probes_oslog::OsLogProbe::new()));
-        sup.add(Box::new(smeltr_probes_ioreport::IoReportProbe::new(
-            Duration::from_secs(1),
-        )));
+        sup.add(Box::new(smeltr_probes_ioreport::IoReportProbe::new()));
         sup.add(Box::new(
             smeltr_probes_crash_reports::CrashReportsProbe::new(),
         ));
