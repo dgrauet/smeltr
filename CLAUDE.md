@@ -53,6 +53,10 @@ Project: Metal/MLX observability tool for macOS Apple Silicon.
   `smeltr_cli::session_resolver::resolve_arg` — `--last` = most recent non-ambient session.
   "Most recent" is by `started_rfc3339` via `session_resolve::sessions_newest_first`, never by
   directory name: `post-mortem-*` directories sort after every dated one (#241).
+- **Per-session caches**: `list_sessions` keeps `.list-summary.json` (event count, root
+  cause) in each session directory once the session ended more than 10 min ago, keyed on
+  the event file's size and mtime (#261). Anything that summarizes every session should
+  follow the same rule rather than re-reading the whole store on each call.
 - **New MCP tool**: file in `crates/smeltr-mcp/src/tools/<name>.rs` with `Params`/`Response`/`run`,
   register `pub mod` in `tools.rs`, add dispatch arm in `server.rs::call_tool` AND a
   `tool::<Params>(...)` entry in `list_tools()`.
