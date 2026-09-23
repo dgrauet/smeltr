@@ -97,7 +97,7 @@ fn stats_from_events(dir: &std::path::Path, events: &[Event]) -> SessionStats {
     for ev in events {
         *counts.entry(source_str(&ev.source).into()).or_insert(0) += 1;
     }
-    let report = smeltr_analyzer::analyze(events);
+    let report = smeltr_analyzer::analyze_session(dir, events);
     let root_cause_title = report.root_cause().map(|f| f.title.clone());
     SessionStats {
         session_id: dir
@@ -518,5 +518,49 @@ mod tests {
         assert!(origin.delta_ns < 0);
         assert_eq!(origin.a_gpu_ns, 2_000_000_000);
         assert_eq!(origin.b_gpu_ns, 1_000_000_000);
+    }
+
+    /// A recorded run (the fixture's pid) that crashed, with its report in
+    /// the test DiagnosticReports directory.
+    fn crashed_run(reports: &std::path::Path) -> String {
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.kind = smeltr_core::session::SessionKind::Scoped {
+            pid: 11672,
+            argv: vec!["python".into()],
+        };
+        drop(SessionWriter::create(meta).unwrap());
+        std::fs::write(
+            reports.join("python-2026-07-16.ips"),
+            include_str!(
+                "../../../smeltr-probes-crash-reports/tests/fixtures/sample_multiline.ips"
+            ),
+        )
+        .unwrap();
+        id.short()
+    }
+
+    /// #242: `root_cause_title` / `root_cause_match` must see the joined
+    /// crash report, like `get_session_summary`.
+    #[test]
+    #[serial_test::serial]
+    fn root_cause_includes_the_joined_crash_report() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+        let crashed = crashed_run(reports.path());
+        let resp = run(Params {
+            session_a: crashed.clone(),
+            session_b: crashed,
+        });
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+        let title = resp.unwrap().a.root_cause_title;
+        assert!(
+            title
+                .as_deref()
+                .is_some_and(|t| t.starts_with("Recorded process crashed")),
+            "got {title:?}"
+        );
     }
 }

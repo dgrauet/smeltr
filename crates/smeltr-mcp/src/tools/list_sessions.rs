@@ -50,7 +50,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             continue;
         }
 
-        let report = smeltr_analyzer::analyze(&events);
+        let report = smeltr_analyzer::analyze_session(dir, &events);
         let root_cause_title = report.root_cause().map(|f| f.title.clone());
         let (full_id, started, ended, exit_code, name) = match &meta {
             Some(m) => (
@@ -249,5 +249,48 @@ mod tests {
 
         let resp = run(Params::default()).unwrap();
         assert_eq!(resp.sessions[0].name, None);
+    }
+
+    /// A recorded run (the fixture's pid) that crashed, with its report in
+    /// the test DiagnosticReports directory.
+    fn crashed_run(reports: &std::path::Path) -> String {
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.kind = smeltr_core::session::SessionKind::Scoped {
+            pid: 11672,
+            argv: vec!["python".into()],
+        };
+        drop(SessionWriter::create(meta).unwrap());
+        std::fs::write(
+            reports.join("python-2026-07-16.ips"),
+            include_str!(
+                "../../../smeltr-probes-crash-reports/tests/fixtures/sample_multiline.ips"
+            ),
+        )
+        .unwrap();
+        id.short()
+    }
+
+    /// #242: the listed root cause must match `get_session_summary`, which
+    /// joins the crash report — a crashed run showed no root cause here.
+    #[test]
+    #[serial_test::serial]
+    fn root_cause_includes_the_joined_crash_report() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+        crashed_run(reports.path());
+        let resp = run(Params {
+            include_empty: Some(true),
+        });
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+        let title = resp.unwrap().sessions[0].root_cause_title.clone();
+        assert!(
+            title
+                .as_deref()
+                .is_some_and(|t| t.starts_with("Recorded process crashed")),
+            "got {title:?}"
+        );
     }
 }

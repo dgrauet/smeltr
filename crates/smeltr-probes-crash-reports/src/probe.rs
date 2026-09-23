@@ -55,7 +55,6 @@ impl SeenReports {
 
 pub struct CrashReportsProbe {
     dirs: Vec<PathBuf>,
-    pub pid_filter: Option<Vec<u32>>,
 }
 
 impl CrashReportsProbe {
@@ -64,20 +63,10 @@ impl CrashReportsProbe {
         if let Some(home) = std::env::var_os("HOME") {
             dirs.push(PathBuf::from(home).join("Library/Logs/DiagnosticReports"));
         }
-        Self {
-            dirs,
-            pid_filter: None,
-        }
+        Self { dirs }
     }
     pub fn with_dirs(dirs: Vec<PathBuf>) -> Self {
-        Self {
-            dirs,
-            pid_filter: None,
-        }
-    }
-    pub fn filter_pids(mut self, pids: Vec<u32>) -> Self {
-        self.pid_filter = Some(pids);
-        self
+        Self { dirs }
     }
 }
 
@@ -107,7 +96,6 @@ impl Probe for CrashReportsProbe {
                     .map_err(|e| ProbeError::Transient(format!("watch {d:?}: {e}")))?;
             }
         }
-        let pid_filter = self.pid_filter.clone();
         let mut seen = SeenReports::default();
         loop {
             if cancel.is_cancelled() {
@@ -153,22 +141,18 @@ impl Probe for CrashReportsProbe {
                             if !seen.insert(key) {
                                 continue;
                             }
-                            if let Some(filter) = &pid_filter {
-                                if let smeltr_core::event::Payload::CrashReportEmitted {
+                            // Emitted as the crashed process: the daemon routes
+                            // by pid, so the report joins that process's
+                            // recording when it is still open, and the ambient
+                            // session otherwise (#242).
+                            let crashed_pid = match &payload {
+                                smeltr_core::event::Payload::CrashReportEmitted {
                                     crashed_pid,
                                     ..
-                                } = &payload
-                                {
-                                    if let Some(pid) = crashed_pid {
-                                        if !filter.contains(pid) {
-                                            continue;
-                                        }
-                                    } else {
-                                        continue;
-                                    }
-                                }
-                            }
-                            sink.emit(Source::CrashReport, None, payload);
+                                } => *crashed_pid,
+                                _ => None,
+                            };
+                            sink.emit(Source::CrashReport, crashed_pid, payload);
                         }
                     }
                 }
@@ -198,6 +182,15 @@ mod tests {
     /// Each write is a separate filesystem event: writing the same name twice
     /// is exactly the Create-then-Modify sequence ReportCrash produces.
     async fn emitted_for(writes: &[(&str, &str)]) -> Vec<Payload> {
+        emitted_with_pid_for(writes)
+            .await
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect()
+    }
+
+    /// Like [`emitted_for`], keeping the pid each event was emitted with.
+    async fn emitted_with_pid_for(writes: &[(&str, &str)]) -> Vec<(Option<u32>, Payload)> {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         let probe = CrashReportsProbe::with_dirs(vec![dir.clone()]);
@@ -222,8 +215,18 @@ mod tests {
         let evs = sink.events.lock().unwrap();
         evs.iter()
             .filter(|(src, _, _)| matches!(src, Source::CrashReport))
-            .map(|(_, _, payload)| payload.clone())
+            .map(|(_, pid, payload)| (*pid, payload.clone()))
             .collect()
+    }
+
+    /// #242: emitted with the crashed pid, so the daemon routes the report
+    /// into that process's recording while it is still open — with `None`
+    /// every report landed in the ambient session.
+    #[tokio::test]
+    async fn emits_with_the_crashed_pid() {
+        let evs = emitted_with_pid_for(&[("python-2026-05-13.ips", FIXTURE)]).await;
+        assert_eq!(evs.len(), 1, "got {evs:?}");
+        assert_eq!(evs[0].0, Some(38291));
     }
 
     #[tokio::test]

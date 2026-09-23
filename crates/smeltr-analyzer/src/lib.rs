@@ -49,6 +49,26 @@ pub fn analyze(events: &[Event]) -> Report {
     report
 }
 
+/// The report every surface shows for the session stored in `dir`, whose
+/// `events` the caller has already read: the rules, plus the retroactive
+/// crash and jetsam joins (#153, #200), named after the session analyzed.
+///
+/// One function so no surface can skip a join again: `smeltr analyze` and
+/// `get_session_summary` did them while `list_sessions` and
+/// `compare_sessions` did not, and reported no root cause for a crashed
+/// run (#204, #242).
+pub fn analyze_session(dir: &std::path::Path, events: &[Event]) -> Report {
+    let mut report = analyze(events);
+    if let Ok(meta) = smeltr_core::reader::read_metadata(dir) {
+        // #170: post-mortem sessions carry events stamped with the ambient
+        // session that ingested them — name the session actually analyzed.
+        report.session_short = Some(meta.session_id.short());
+    }
+    crash_join::join_crash(&mut report, dir);
+    crash_join::join_jetsam(&mut report, dir);
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

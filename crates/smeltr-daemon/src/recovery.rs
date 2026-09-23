@@ -11,19 +11,49 @@ use smeltr_core::session::{events_path_for_read, write_metadata};
 use std::path::Path;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-/// Returns Some(pid) when `pid_path` names a process that is still alive.
+/// Executable name of the daemon, as the kernel reports it.
+pub const DAEMON_EXE: &str = "smeltrd";
+
+/// Returns Some(pid) when `pid_path` names a running smeltrd.
+///
+/// Checking only that the pid is alive (`kill(pid, 0)`) was not enough: the
+/// pid file outlives an unclean stop — panic abort, `kill -9`, power loss —
+/// and the pid is then reused, at boot by anything. smeltrd refused to start
+/// against that stranger and launchd's KeepAlive relaunched it in a loop,
+/// and `smeltr daemon stop` would have signalled it (#242).
 pub fn live_daemon_pid(pid_path: &Path) -> Option<u32> {
+    live_pid_named(pid_path, DAEMON_EXE)
+}
+
+/// Returns Some(pid) when `pid_path` names a live process whose executable
+/// is called `exe`.
+pub fn live_pid_named(pid_path: &Path, exe: &str) -> Option<u32> {
     let pid: u32 = std::fs::read_to_string(pid_path)
         .ok()?
         .trim()
         .parse()
         .ok()?;
-    // kill(pid, 0) probes existence without signaling. EPERM means the
-    // process exists but belongs to another user — still alive.
-    if unsafe { libc::kill(pid as i32, 0) } == 0 {
-        return Some(pid);
+    (process_exe_name(pid)? == exe).then_some(pid)
+}
+
+/// Basename of a live process's executable; `None` once it has exited.
+/// `proc_pidpath` answers for other users' processes too (root included),
+/// unlike `proc_pidinfo(PROC_PIDTBSDINFO)`.
+fn process_exe_name(pid: u32) -> Option<String> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe {
+        libc::proc_pidpath(
+            i32::try_from(pid).ok()?,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return None;
     }
-    (std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)).then_some(pid)
+    buf.truncate(n as usize);
+    let path = String::from_utf8(buf).ok()?;
+    path.rsplit('/').next().map(str::to_string)
 }
 
 /// Atomically claims the pid file (`O_EXCL`). Fails with `AlreadyExists`
@@ -156,13 +186,17 @@ mod tests {
     }
 
     #[test]
-    fn live_daemon_pid_treats_eperm_as_alive() {
-        // kill(1, 0) targets launchd: EPERM as non-root, 0 as root — either
-        // way the process exists, so it must read as alive.
+    fn a_process_that_is_not_smeltrd_is_not_a_live_daemon() {
+        // #242: after an unclean stop (panic abort, kill -9, power loss) the
+        // pid file survives and the pid gets reused — at boot, by anything.
+        // pid 1 is launchd: alive, and not a smeltrd.
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("smeltrd.pid");
         std::fs::write(&p, "1").unwrap();
-        assert_eq!(live_daemon_pid(&p), Some(1));
+        assert_eq!(live_daemon_pid(&p), None);
+        // Nor is this test binary, alive as it is.
+        std::fs::write(&p, std::process::id().to_string()).unwrap();
+        assert_eq!(live_daemon_pid(&p), None);
     }
 
     #[test]
@@ -216,16 +250,18 @@ mod tests {
     fn live_daemon_pid_detects_dead_and_alive() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("smeltrd.pid");
-        // Our own pid is alive.
+        // Our own pid is alive — under the name of our own executable.
+        let me = std::env::current_exe().unwrap();
+        let me = me.file_name().unwrap().to_str().unwrap();
         std::fs::write(&p, std::process::id().to_string()).unwrap();
-        assert_eq!(live_daemon_pid(&p), Some(std::process::id()));
+        assert_eq!(live_pid_named(&p, me), Some(std::process::id()));
         // A certainly-dead pid (pid_max on macOS is 99998; 4_000_000 never exists).
         std::fs::write(&p, "4000000").unwrap();
-        assert_eq!(live_daemon_pid(&p), None);
+        assert_eq!(live_pid_named(&p, me), None);
         // Missing / garbage files.
         std::fs::write(&p, "not-a-pid").unwrap();
-        assert_eq!(live_daemon_pid(&p), None);
+        assert_eq!(live_pid_named(&p, me), None);
         std::fs::remove_file(&p).unwrap();
-        assert_eq!(live_daemon_pid(&p), None);
+        assert_eq!(live_pid_named(&p, me), None);
     }
 }

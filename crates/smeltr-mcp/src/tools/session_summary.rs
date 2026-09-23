@@ -24,12 +24,7 @@ pub struct Response {
 pub fn run(params: Params) -> Result<Response, ToolError> {
     let dir = resolve_session(&params.session)?;
     let events = smeltr_core::reader::read_events(&dir)?;
-    let mut report = smeltr_analyzer::analyze(&events);
-    // Same joins as `smeltr analyze`: a crash verdict must surface through
-    // both, otherwise the MCP layer substitutes the memory-death presumption
-    // for a perfectly real crash (#204).
-    smeltr_analyzer::crash_join::join_crash(&mut report, &dir);
-    smeltr_analyzer::crash_join::join_jetsam(&mut report, &dir);
+    let report = smeltr_analyzer::analyze_session(&dir, &events);
     let gputrace_path = smeltr_core::reader::read_metadata(&dir)
         .ok()
         .and_then(|m| m.gputrace_path);

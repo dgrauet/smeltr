@@ -2,8 +2,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use smeltr_analyzer::analyze;
-use smeltr_core::reader::{read_events, read_metadata};
+use smeltr_core::reader::read_events;
 
 pub fn run(arg_last: bool, session_id: Option<String>, include_ambient: bool) -> Result<()> {
     let dir = crate::session_resolver::resolve(session_id, arg_last, include_ambient)?;
@@ -15,21 +14,7 @@ pub fn run(arg_last: bool, session_id: Option<String>, include_ambient: bool) ->
 fn build_report(dir: &std::path::Path) -> Result<smeltr_analyzer::report::Report> {
     let events =
         read_events(dir).with_context(|| format!("reading events from {}", dir.display()))?;
-    let mut report = analyze(&events);
-
-    if let Ok(meta) = read_metadata(dir) {
-        // #170: post-mortem sessions carry events stamped with the ambient
-        // session that ingested them — name the session actually analyzed.
-        report.session_short = Some(meta.session_id.short());
-    }
-
-    // Both retroactive joins (#153, #200) live in the analyzer and are called
-    // identically by the MCP layer: having them here only is what deprived
-    // `get_session_summary` of the crash verdict (#204).
-    smeltr_analyzer::crash_join::join_crash(&mut report, dir);
-    smeltr_analyzer::crash_join::join_jetsam(&mut report, dir);
-
-    Ok(report)
+    Ok(smeltr_analyzer::analyze_session(dir, &events))
 }
 
 #[cfg(test)]

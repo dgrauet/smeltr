@@ -5,31 +5,36 @@
 use smeltr_core::event::Event;
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::Instant;
 
 pub struct FlightRecorder {
-    window_ns: u64,
-    inner: Mutex<VecDeque<Event>>,
+    window: std::time::Duration,
+    /// Events with the instant they were pushed. Eviction goes by that
+    /// arrival time, not `ts_mono_ns`: each session stamps events from its
+    /// own clock (the ambient one days old, a recording's near 0), so the
+    /// stamps of two sessions are not comparable (#242).
+    inner: Mutex<VecDeque<(Instant, Event)>>,
 }
 
 impl FlightRecorder {
     pub fn new(window: std::time::Duration) -> Self {
         Self {
-            window_ns: window.as_nanos() as u64,
+            window,
             inner: Mutex::new(VecDeque::with_capacity(8192)),
         }
     }
 
-    /// Push an event. Evicts events older than `newest.ts_mono_ns - window`.
+    /// Push an event. Evicts events that arrived more than `window` ago.
     pub fn push(&self, ev: Event) {
+        self.push_at(ev, Instant::now());
+    }
+
+    /// [`push`](Self::push) with an explicit arrival time, for tests.
+    pub fn push_at(&self, ev: Event, now: Instant) {
         let mut q = self.inner.lock().unwrap();
-        q.push_back(ev);
-        let cutoff = q
-            .back()
-            .map(|e| e.ts_mono_ns)
-            .unwrap_or(0)
-            .saturating_sub(self.window_ns);
-        while let Some(front) = q.front() {
-            if front.ts_mono_ns < cutoff {
+        q.push_back((now, ev));
+        while let Some((arrived, _)) = q.front() {
+            if now.saturating_duration_since(*arrived) > self.window {
                 q.pop_front();
             } else {
                 break;
@@ -37,16 +42,17 @@ impl FlightRecorder {
         }
     }
 
-    /// Returns a copy of the events currently in the ring.
+    /// Returns a copy of the events currently in the ring, oldest first.
     pub fn snapshot(&self) -> Vec<Event> {
         let q = self.inner.lock().unwrap();
-        q.iter().cloned().collect()
+        q.iter().map(|(_, e)| e.clone()).collect()
     }
 
     /// Panic-safe snapshot: never blocks, never panics. Returns `None` only
     /// when another thread holds the lock; a poisoned lock is recovered.
     pub fn try_snapshot(&self) -> Option<Vec<Event>> {
-        crate::sync_util::try_lock_recover(&self.inner).map(|q| q.iter().cloned().collect())
+        crate::sync_util::try_lock_recover(&self.inner)
+            .map(|q| q.iter().map(|(_, e)| e.clone()).collect())
     }
 
     pub fn len(&self) -> usize {
@@ -94,17 +100,26 @@ mod tests {
     #[test]
     fn evicts_events_older_than_window() {
         let fr = FlightRecorder::new(std::time::Duration::from_secs(60));
+        let t0 = std::time::Instant::now();
         for i in 0..120 {
-            fr.push(ev(i * 1_000_000_000));
+            fr.push_at(ev(i), t0 + std::time::Duration::from_secs(i));
         }
         let snap = fr.snapshot();
-        assert!(!snap.is_empty());
-        assert!(
-            snap[0].ts_mono_ns >= 59 * 1_000_000_000,
-            "front ts {} should be >= 59s",
-            snap[0].ts_mono_ns
-        );
-        assert_eq!(snap.last().unwrap().ts_mono_ns, 119 * 1_000_000_000);
+        assert_eq!(snap.first().unwrap().seq, 59, "arrived more than 60 s ago");
+        assert_eq!(snap.last().unwrap().seq, 119);
+    }
+
+    /// #242: every session stamps `ts_mono_ns` from its own clock — the
+    /// ambient session's is days old, a recording's starts near 0. Evicting
+    /// on it threw a recording's events out as soon as an ambient event
+    /// arrived, so a post-mortem missed the very run that crashed.
+    #[test]
+    fn a_recordings_events_survive_an_ambient_event() {
+        let fr = FlightRecorder::new(std::time::Duration::from_secs(60));
+        let days = 3 * 24 * 3600 * 1_000_000_000u64;
+        fr.push(ev(1_000_000_000)); // recording, 1 s after it started
+        fr.push(ev(days)); // ambient, days after the daemon started
+        assert_eq!(fr.len(), 2);
     }
 
     #[test]
