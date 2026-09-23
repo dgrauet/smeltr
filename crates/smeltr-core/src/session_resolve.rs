@@ -1,7 +1,7 @@
 //! Turn a user-typed session reference into a directory on disk.
 //!
-//! Every surface accepts the same three forms — short id, full UUID, or
-//! `SessionMetadata.name` — so the rule that maps them to a directory lives
+//! Every surface accepts the same forms — short id, full UUID, directory
+//! name, or `SessionMetadata.name` — so the rule that maps them to a directory lives
 //! here, next to the on-disk format it reads, rather than in whichever crate
 //! happened to need it first. `smeltr-mcp` and `smeltr-cli` each wrap
 //! [`resolve_session`] in their own error type.
@@ -18,29 +18,59 @@ pub enum ResolveError {
     NotFound(String),
 }
 
+/// Every session directory, newest first by `started_rfc3339`.
+///
+/// Directory names do not sort by age: every `post-mortem-<label>-…`
+/// directory sorts after every dated `YYYY-MM-DD-…` one, and post-mortems
+/// among themselves sort by label first (#241). Sessions whose metadata is
+/// unreadable come last; ties fall back to the directory name, descending.
+pub fn sessions_newest_first() -> std::io::Result<Vec<PathBuf>> {
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+
+    let mut keyed: Vec<(Option<OffsetDateTime>, PathBuf)> = list_sessions()?
+        .into_iter()
+        .map(|dir| {
+            let started = read_metadata(&dir)
+                .ok()
+                .and_then(|m| OffsetDateTime::parse(&m.started_rfc3339, &Rfc3339).ok());
+            (started, dir)
+        })
+        .collect();
+    // `None < Some(_)`, so a descending sort puts unreadable sessions last.
+    keyed.sort_by(|(ta, da), (tb, db)| tb.cmp(ta).then_with(|| db.cmp(da)));
+    Ok(keyed.into_iter().map(|(_, dir)| dir).collect())
+}
+
+/// Whether `arg` names `dir`: its full directory name, or its 8-hex short
+/// id (the directory's last `-`-separated component). Deliberately not a
+/// substring match — directory names are mostly digits, so a substring
+/// match let any numeric session name resolve to an unrelated session.
+fn names_directory(dir: &std::path::Path, arg: &str) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name == arg
+        || (arg.len() == 8
+            && arg.bytes().all(|b| b.is_ascii_hexdigit())
+            && name.rsplit('-').next() == Some(arg))
+}
+
 /// Resolve a session ref to a directory path. Tries (in order):
-///   1. Directory-name suffix match (short id / partial). Returns the
-///      most recent matching session.
+///   1. Full directory name or 8-hex short id; newest session wins.
 ///   2. Full-UUID match against `metadata.session_id` (for callers that
 ///      pass back the full UUID returned by a previous call).
 ///   3. Exact `SessionMetadata.name` match, most-recent wins
 ///      ([`resolve_session_dir_by_name`]).
 pub fn resolve_session(arg: &str) -> Result<PathBuf, ResolveError> {
-    let sessions = list_sessions()?;
-    for dir in sessions.iter().rev() {
-        if dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.contains(arg))
-            .unwrap_or(false)
-        {
-            return Ok(dir.clone());
-        }
+    let sessions = sessions_newest_first()?;
+    if let Some(dir) = sessions.iter().find(|d| names_directory(d, arg)) {
+        return Ok(dir.clone());
     }
     // Full-UUID match: a 32-hex (or dashed) UUID does not appear in the
     // short-id-based directory name, so match it against metadata.session_id.
     if let Ok(want) = arg.parse::<SessionId>() {
-        for dir in sessions.iter().rev() {
+        for dir in &sessions {
             if read_metadata(dir)
                 .map(|m| m.session_id == want)
                 .unwrap_or(false)
@@ -52,26 +82,23 @@ pub fn resolve_session(arg: &str) -> Result<PathBuf, ResolveError> {
     resolve_session_dir_by_name(arg).ok_or_else(|| ResolveError::NotFound(arg.to_string()))
 }
 
-/// Most recently started recording (directory names sort chronologically:
-/// `YYYY-MM-DD-HHMMSS-<short>`). Ambient sessions are skipped — the daemon
+/// Most recently started recording. Ambient sessions (including
+/// post-mortems, whose metadata carries no kind) are skipped — the daemon
 /// reopens one at every boot, so right after a daemon restart the newest
-/// directory is an (empty) ambient session, not the run the user means by
-/// "last". Falls back to the newest session of any kind when no non-ambient
-/// session exists. `NotFound("<latest>")` when there is none at all. Used
-/// by CLI `--last` flags to skip the list-then-copy-paste dance.
+/// session is an (empty) ambient one, not the run the user means by
+/// "last". Falls back to the newest session of any kind when no
+/// non-ambient session exists. `NotFound("<latest>")` when there is none
+/// at all. Backs every CLI `--last` flag.
 pub fn latest_session() -> Result<PathBuf, ResolveError> {
-    let sessions = list_sessions()?;
-    for dir in sessions.iter().rev() {
-        let is_ambient = read_metadata(dir)
-            .map(|m| matches!(m.kind, SessionKind::Ambient))
-            .unwrap_or(false);
-        if !is_ambient {
-            return Ok(dir.clone());
-        }
-    }
-    sessions
-        .into_iter()
-        .next_back()
+    let sessions = sessions_newest_first()?;
+    let recording = sessions.iter().find(|dir| {
+        read_metadata(dir)
+            .map(|m| !matches!(m.kind, SessionKind::Ambient))
+            .unwrap_or(false)
+    });
+    recording
+        .or_else(|| sessions.first())
+        .cloned()
         .ok_or_else(|| ResolveError::NotFound("<latest>".to_string()))
 }
 
@@ -248,6 +275,49 @@ mod tests {
         // not the decoy session via name.
         let resolved = resolve_session(&short).unwrap();
         assert_eq!(resolved, dir_real);
+    }
+
+    /// #241: a name must not be shadowed by another session whose
+    /// directory name merely contains it (timestamps are full of digits).
+    #[test]
+    #[serial_test::serial]
+    fn resolve_name_is_not_shadowed_by_a_directory_substring() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let mut named = SessionMetadata::now_starting(SessionId::new());
+        named.started_rfc3339 = "2026-07-01T08:00:00Z".into();
+        named.name = Some("15".into());
+        let named_dir = SessionWriter::create(named).unwrap().dir().to_path_buf();
+        let mut other = SessionMetadata::now_starting(SessionId::new());
+        other.started_rfc3339 = "2026-07-01T10:15:30Z".into(); // dir …-101530-…
+        drop(SessionWriter::create(other).unwrap());
+
+        assert_eq!(resolve_session("15").unwrap(), named_dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_rejects_an_empty_ref() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        drop(SessionWriter::create(SessionMetadata::now_starting(SessionId::new())).unwrap());
+        assert!(matches!(
+            resolve_session(""),
+            Err(ResolveError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_accepts_a_full_directory_name() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let dir = SessionWriter::create(SessionMetadata::now_starting(SessionId::new()))
+            .unwrap()
+            .dir()
+            .to_path_buf();
+        let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+        assert_eq!(resolve_session(&name).unwrap(), dir);
     }
 
     #[test]
