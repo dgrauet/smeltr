@@ -13,6 +13,11 @@ pub struct Params {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub origins: Vec<DispatchOrigin>,
+    /// Set when op-timing sampling auto-disabled during the run (#165):
+    /// the per-op `gpu_ns` below are incomplete over those spans. Same
+    /// wording as the CLI and `get_inference_breakdown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<String>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -20,6 +25,9 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let events = read_events(&dir)?;
     Ok(Response {
         origins: compute_dispatch_origins(&events),
+        degraded: smeltr_analyzer::degraded_advice(
+            smeltr_analyzer::diff::sampling_disable_episodes(&events),
+        ),
     })
 }
 
@@ -134,5 +142,16 @@ mod tests {
         assert_eq!(resp.origins[0].file_line, "attention.py:127");
         assert_eq!(resp.origins[0].gpu_ns, 1_000_000);
         assert_eq!(resp.origins[0].dispatch_count, 5);
+    }
+
+    /// #165 parity (#243): `smeltr origins` warns; the tool did not.
+    #[test]
+    #[serial_test::serial]
+    fn sampling_disabled_session_surfaces_degraded_notice() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let session = crate::test_util::sampling_disabled_session();
+        let resp = run(Params { session }).unwrap();
+        crate::test_util::assert_degraded(resp.degraded);
     }
 }

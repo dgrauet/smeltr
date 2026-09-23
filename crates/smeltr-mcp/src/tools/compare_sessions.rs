@@ -41,6 +41,11 @@ pub struct SessionStats {
     pub duration_ns: u64,
     pub source_counts: HashMap<String, usize>,
     pub root_cause_title: Option<String>,
+    /// Set when op-timing sampling auto-disabled during the run (#165):
+    /// this side's op deltas are partial over those spans. Same
+    /// wording as `get_inference_breakdown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,6 +114,9 @@ fn stats_from_events(dir: &std::path::Path, events: &[Event]) -> SessionStats {
         duration_ns,
         source_counts: counts,
         root_cause_title,
+        degraded: smeltr_analyzer::degraded_advice(
+            smeltr_analyzer::diff::sampling_disable_episodes(events),
+        ),
     }
 }
 
@@ -588,5 +596,27 @@ mod tests {
                 .is_some_and(|t| t.starts_with("Recorded process crashed")),
             "got {title:?}"
         );
+    }
+
+    /// #165 parity (#243): `smeltr compare` banners each degraded side;
+    /// the tool did not, so phantom deltas passed as regressions.
+    #[test]
+    #[serial_test::serial]
+    fn degraded_side_is_flagged() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let degraded = crate::test_util::sampling_disabled_session();
+        let clean = SessionId::new();
+        SessionWriter::create(SessionMetadata::now_starting(clean))
+            .unwrap()
+            .finalize(Some(0), "ok".into())
+            .unwrap();
+        let resp = run(Params {
+            session_a: clean.short(),
+            session_b: degraded,
+        })
+        .unwrap();
+        assert_eq!(resp.a.degraded, None);
+        crate::test_util::assert_degraded(resp.b.degraded);
     }
 }
