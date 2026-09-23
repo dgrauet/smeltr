@@ -4,6 +4,9 @@ pub mod server;
 pub mod tools;
 pub mod types;
 
+#[cfg(test)]
+mod test_util;
+
 #[cfg(feature = "http")]
 pub mod http;
 

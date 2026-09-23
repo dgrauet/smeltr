@@ -108,6 +108,22 @@ pub struct CompletedCbs {
 /// a real run (#127). The hook emits `CbOps` immediately after the matching
 /// `CbCompleted`, which is what makes the chronological pairing exact.
 pub fn completed_command_buffers(events: &[Event]) -> CompletedCbs {
+    pair_command_buffers(events, None)
+}
+
+/// [`completed_command_buffers`] with every op time rescaled by the #146
+/// clamp, for consumers that only borrow the events (breakdown clamps its
+/// own copy in place first). Without it, the lazy-eval rule and origins
+/// summed raw op times that exceed wall clock on pipelined runs.
+pub fn clamped_command_buffers(events: &[Event]) -> CompletedCbs {
+    let scales = crate::op_clamp::compute_op_time_scales(events);
+    pair_command_buffers(events, Some(&scales))
+}
+
+fn pair_command_buffers(
+    events: &[Event],
+    scales: Option<&crate::op_clamp::OpTimeScales>,
+) -> CompletedCbs {
     let mut cb_commit_ts: HashMap<u64, u64> = HashMap::new();
     let mut completed: Vec<CompletedCb> = Vec::new();
     let mut last_completed_idx: HashMap<u64, usize> = HashMap::new();
@@ -134,7 +150,13 @@ pub fn completed_command_buffers(events: &[Event]) -> CompletedCbs {
             Payload::MetalCbOps { cb_id, ops } => {
                 seen_any_cb_ops = true;
                 if let Some(&i) = last_completed_idx.get(cb_id) {
-                    completed[i].ops = Some(ops.clone());
+                    let mut ops = ops.clone();
+                    if let Some(scales) = scales {
+                        for op in &mut ops {
+                            op.gpu_ns = scales.scaled_gpu_ns(ev.seq, op.gpu_ns);
+                        }
+                    }
+                    completed[i].ops = Some(ops);
                 }
             }
             _ => {}
@@ -216,9 +238,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     let mut no_eval_window: Vec<(u64, u64, Option<&Vec<OpSample>>)> = Vec::new();
     for cb in &cb_completed {
         let commit_ts = &cb.commit_ts;
-        let idx = eval_intervals
-            .iter()
-            .position(|e| e.t_in <= *commit_ts && *commit_ts <= e.t_out);
+        let idx = crate::windows::eval_at(&eval_intervals, *commit_ts);
         let ops_for_cb = cb.ops.as_ref();
         if seen_any_cb_ops && ops_for_cb.is_none() {
             ops_cbs_without_samples += 1;
@@ -400,9 +420,12 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         }
     }
 
+    // A node whose parent never entered (lost `ModuleEntered`: ring drop,
+    // sidecar attached mid-run) is a root too — otherwise its time is
+    // counted as attributed yet shown nowhere (#243).
     let roots: Vec<u64> = calls
         .iter()
-        .filter(|(_, n)| n.parent.is_none())
+        .filter(|(_, n)| n.parent.is_none_or(|p| !calls.contains_key(&p)))
         .map(|(k, _)| *k)
         .collect();
     let mut root_children: Vec<ModuleBreakdown> = roots.iter().map(|r| build(*r, &calls)).collect();
@@ -649,7 +672,33 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
         }
         let dur_us = (n.gpu_ns_subtree / 1000).max(1);
         let start = *cursor_us;
-        events.push(serde_json::json!({
+        let slot = events.len();
+        events.push(serde_json::Value::Null); // this node, filled in below
+                                              // Children first, then the node's own ops (its self time) after
+                                              // them: both sit on track depth + 1, and starting both at `start`
+                                              // made them overlap, which viewers nest wrongly (#243).
+        let mut next = start;
+        for c in &n.children {
+            walk(c, depth + 1, &mut next, events);
+        }
+        for op in &n.ops {
+            let op_dur = (op.gpu_ns / 1000).max(1);
+            events.push(serde_json::json!({
+                "name": op.name,
+                "cat": "op",
+                "ph": "X",
+                "ts": next,
+                "dur": op_dur,
+                "pid": 0,
+                "tid": depth + 1,
+                "args": { "count": op.count, "gpu_ns": op.gpu_ns },
+            }));
+            next += op_dur;
+        }
+        // Rounding each slice up to 1 µs can outgrow the node; keep it
+        // enclosing what it contains.
+        let dur_us = dur_us.max(next - start);
+        events[slot] = serde_json::json!({
             "name": n.qualname,
             "cat": n.class_name,
             "ph": "X",
@@ -663,26 +712,7 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
                 "eval_count": n.eval_count,
                 "cb_count": n.cb_count,
             }
-        }));
-        let mut op_cursor = start;
-        for op in &n.ops {
-            let dur_us = (op.gpu_ns / 1000).max(1);
-            events.push(serde_json::json!({
-                "name": op.name,
-                "cat": "op",
-                "ph": "X",
-                "ts": op_cursor,
-                "dur": dur_us,
-                "pid": 0,
-                "tid": depth + 1,
-                "args": { "count": op.count, "gpu_ns": op.gpu_ns },
-            }));
-            op_cursor += dur_us;
-        }
-        let mut child_cursor = start;
-        for c in &n.children {
-            walk(c, depth + 1, &mut child_cursor, events);
-        }
+        });
         *cursor_us = start + dur_us;
     }
     walk(root, 0, &mut cursor_us, &mut events);
@@ -1291,6 +1321,79 @@ mod tests {
             .iter()
             .find(|c| c.qualname == qualname)
             .unwrap_or_else(|| panic!("missing child {qualname}"))
+    }
+
+    fn module_entered(seq: u64, ts: u64, id: u64, name: &str, parent: Option<u64>) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::ModuleEntered {
+                module_call_id: id,
+                module_def_id: id,
+                qualname: name.into(),
+                class_name: name.into(),
+                parent_call_id: parent,
+                depth: 0,
+                fields: Default::default(),
+            },
+            Source::PythonSidecar,
+        )
+    }
+
+    fn eval_pair(seq: u64, t_in: u64, t_ret: u64, call_id: u64, module: u64) -> Vec<Event> {
+        vec![
+            ev(
+                seq,
+                t_in,
+                Payload::MlxEvalEntered {
+                    call_id,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![module],
+                    stack_frames: vec![],
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                seq + 1,
+                t_ret,
+                Payload::MlxEvalReturned {
+                    call_id,
+                    duration_ns: t_ret - t_in,
+                    was_async: true,
+                },
+                Source::PythonSidecar,
+            ),
+        ]
+    }
+
+    /// #243: a CB committed while two async grace tails overlap goes to the
+    /// latest eval — the rule `origins` and the lazy-eval rule share.
+    #[test]
+    fn overlapping_evals_attribute_to_the_latest() {
+        let mut events = vec![
+            module_entered(1, 10, 1, "first", None),
+            module_entered(2, 11, 2, "second", None),
+        ];
+        events.extend(eval_pair(3, 100, 105, 7, 1));
+        events.extend(eval_pair(5, 110, 115, 8, 2));
+        events.extend(cb_lifecycle(10, 120, 0xa, "Op", 50));
+        let root = compute(events).unwrap();
+        assert_eq!(find_child(&root, "second").gpu_ns_subtree, 50);
+        assert_eq!(find_child(&root, "first").gpu_ns_subtree, 0);
+    }
+
+    /// #243: a scope whose parent's `ModuleEntered` was lost (ring drop,
+    /// sidecar attached mid-run) was neither a root nor a child: its GPU
+    /// time counted as attributed yet appeared nowhere in the tree.
+    #[test]
+    fn scope_with_a_lost_parent_stays_in_the_tree() {
+        let mut events = vec![module_entered(1, 10, 2, "orphan", Some(99))];
+        events.extend(eval_pair(2, 100, 105, 7, 2));
+        events.extend(cb_lifecycle(10, 101, 0xa, "Op", 1_000));
+        let root = compute(events).unwrap();
+        assert_eq!(root.gpu_ns_subtree, 1_000, "tree: {root:#?}");
+        assert_eq!(find_child(&root, "orphan").gpu_ns_subtree, 1_000);
     }
 
     #[test]
@@ -2255,6 +2358,56 @@ mod tests {
         let arr = parsed["traceEvents"].as_array().unwrap();
         assert!(arr.iter().any(|e| e["name"] == "Linear" && e["ph"] == "X"));
         assert_eq!(parsed["displayTimeUnit"], "us");
+    }
+
+    /// #243: a node's op slices and its children share the child track
+    /// (`tid = depth + 1`); both started at the node's start, so viewers
+    /// nested them wrongly. Slices on one track must never overlap.
+    #[test]
+    fn render_chrome_trace_slices_on_a_track_do_not_overlap() {
+        let node = |name: &str, self_ns: u64, children: Vec<ModuleBreakdown>, ops| {
+            let subtree = self_ns
+                + children
+                    .iter()
+                    .map(|c: &ModuleBreakdown| c.gpu_ns_subtree)
+                    .sum::<u64>();
+            ModuleBreakdown {
+                qualname: name.into(),
+                class_name: String::new(),
+                calls: 1,
+                gpu_ns_self: self_ns,
+                gpu_ns_subtree: subtree,
+                eval_count: 0,
+                cb_count: 0,
+                children,
+                ops,
+                diagnostics: None,
+                fields: Default::default(),
+            }
+        };
+        let op = OpAttribution {
+            name: "Matmul".into(),
+            gpu_ns: 1_000_000,
+            count: 1,
+            symbol: None,
+            kind: None,
+        };
+        let child = node("Child", 2_000_000, vec![], vec![]);
+        let parent = node("Parent", 1_000_000, vec![child], vec![op]);
+        let root = node("<root>", 0, vec![parent], vec![]);
+
+        let json = render_chrome_trace(&root);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut track: Vec<(u64, u64)> = parsed["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["tid"] == 1)
+            .map(|e| (e["ts"].as_u64().unwrap(), e["dur"].as_u64().unwrap()))
+            .collect();
+        track.sort();
+        assert_eq!(track.len(), 2, "child slice + op slice: {track:?}");
+        assert!(track[0].0 + track[0].1 <= track[1].0, "overlap: {track:?}");
     }
 
     #[test]

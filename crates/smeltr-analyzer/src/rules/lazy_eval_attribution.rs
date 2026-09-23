@@ -14,7 +14,6 @@ use crate::finding::{Category, EvidenceRef, Finding, Severity};
 use crate::rule::Rule;
 use crate::windows::eval_windows;
 use smeltr_core::event::{Event, Payload};
-use std::collections::HashMap;
 
 /// Minimum share (percent of total attributed GPU time) landing in
 /// empty-module-stack eval windows before the gap is reported.
@@ -77,62 +76,31 @@ pub fn detect(events: &[Event]) -> Option<LazyEvalGap> {
     // 2. Module instrumentation presence (drives the advice wording only —
     //    CBs outside eval windows are attributable via the #131 scope
     //    fallback and never count toward the gap).
-    let mut module_call_count: u64 = 0;
-    // 3. Completed CBs: (commit_ts, gpu_ns) with the same GPU-ns choice as
-    //    breakdown::compute (op sum; 0 for op-less CBs once any CB carried
-    //    ops; in_flight fallback only when op capture was off).
-    let mut cb_commit_ts: HashMap<u64, u64> = HashMap::new();
-    let mut cb_completed: Vec<(u64, u64, u64)> = Vec::new(); // (cb_id, commit, in_flight)
-    let mut last_completed_idx: HashMap<u64, usize> = HashMap::new();
-    let mut cb_ops_ns: HashMap<usize, u64> = HashMap::new();
-    let mut seen_any_cb_ops = false;
+    let module_call_count = events
+        .iter()
+        .filter(|e| matches!(e.payload, Payload::ModuleEntered { .. }))
+        .count() as u64;
+    // 3. Completed CBs, op times clamped (#146) — the same pairing and the
+    //    same GPU-ns choice as breakdown::compute (op sum; 0 for op-less CBs
+    //    once any CB carried ops; in_flight only when op capture was off).
+    //    This rule used to carry its own copy of the pairing, unclamped, so
+    //    its percentage disagreed with the breakdown it explains (#243).
+    let cbs = crate::breakdown::clamped_command_buffers(events);
 
-    for ev in events {
-        match &ev.payload {
-            Payload::ModuleEntered { .. } => {
-                module_call_count += 1;
-            }
-            Payload::MetalCbCommitted { cb_id, .. } => {
-                cb_commit_ts.insert(*cb_id, ev.ts_mono_ns);
-            }
-            Payload::MetalCbCompleted {
-                cb_id,
-                in_flight_ns,
-                ..
-            } => {
-                if let Some(commit_ts) = cb_commit_ts.remove(cb_id) {
-                    last_completed_idx.insert(*cb_id, cb_completed.len());
-                    cb_completed.push((*cb_id, commit_ts, *in_flight_ns));
-                }
-            }
-            Payload::MetalCbOps { cb_id, ops } => {
-                seen_any_cb_ops = true;
-                if let Some(&i) = last_completed_idx.get(cb_id) {
-                    cb_ops_ns.insert(i, ops.iter().map(|o| o.gpu_ns).sum());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // 4. Bucket each CB by the same precedence as breakdown::compute:
-    //    containing eval window first, module/scope window second.
+    // 4. Bucket each CB by the same eval rule as breakdown::compute.
     let mut gap_gpu_ns: u64 = 0;
     let mut total_gpu_ns: u64 = 0;
     let mut lazy_evals: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut first: Option<(u64, u64)> = None;
-    for (i, (_cb_id, commit_ts, in_flight_ns)) in cb_completed.iter().enumerate() {
-        let ns = match cb_ops_ns.get(&i) {
-            Some(ns) => *ns,
-            None if seen_any_cb_ops => 0,
-            None => *in_flight_ns,
+    for cb in &cbs.completed {
+        let ns = match &cb.ops {
+            Some(ops) => ops.iter().map(|o| o.gpu_ns).sum(),
+            None if cbs.seen_any_cb_ops => 0,
+            None => cb.in_flight_ns,
         };
         total_gpu_ns += ns;
-        let hit = intervals
-            .iter()
-            .enumerate()
-            .find(|(_, e)| e.t_in <= *commit_ts && *commit_ts <= e.t_out);
-        if let Some((idx, interval)) = hit {
+        if let Some(idx) = crate::windows::eval_at(&intervals, cb.commit_ts) {
+            let interval = &intervals[idx];
             if interval.module_stack.is_empty() && ns > 0 {
                 gap_gpu_ns += ns;
                 lazy_evals.insert(idx);
@@ -377,5 +345,33 @@ mod tests {
         assert!(gap.advice().contains("no module or scope instrumentation"));
         let gap_instr = detect(&lazy_session()).unwrap();
         assert!(gap_instr.advice().contains("instrumentation is active"));
+    }
+
+    fn scheduled(ts: u64, cb_id: u64) -> Event {
+        ev(
+            ts,
+            Source::MetalHook,
+            Payload::MetalCbScheduled { cb_id, queue_id: 1 },
+        )
+    }
+
+    /// #243: the gap must be measured on the same clamped op times as the
+    /// breakdown it explains (#146). The lazy CB claims 100 ns of ops in a
+    /// 2 ns execution window: unclamped, the gap reads 50 % and fires.
+    #[test]
+    fn gap_is_measured_on_clamped_op_times() {
+        let mut events = vec![module_entered(1, 1), eval_entered(10, 7, vec![])];
+        let mut lazy = cb(11, 14, 0xa, 100);
+        lazy.insert(1, scheduled(12, 0xa));
+        events.extend(lazy);
+        events.push(eval_returned(20, 7));
+        events.push(eval_entered(30, 8, vec![1]));
+        let mut attributed = cb(31, 1031, 0xb, 98);
+        attributed.insert(1, scheduled(32, 0xb));
+        events.extend(attributed);
+        events.push(eval_returned(2000, 8));
+        events.push(module_returned(2001, 1));
+
+        assert_eq!(detect(&events), None, "clamped gap is 2 %");
     }
 }

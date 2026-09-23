@@ -636,8 +636,34 @@ mod tests {
                         }],
                     },
                 ),
+                // Origins keys on the commit (#243): the full lifecycle the
+                // hook always emits.
                 ev(
                     2,
+                    14,
+                    Source::MetalHook,
+                    Payload::MetalCbCommitted {
+                        cb_id: 9,
+                        queue_id: 1,
+                        queue_depth: 1,
+                        label: None,
+                    },
+                ),
+                ev(
+                    3,
+                    15,
+                    Source::MetalHook,
+                    Payload::MetalCbCompleted {
+                        cb_id: 9,
+                        queue_id: 1,
+                        status: 4,
+                        error_code: None,
+                        error_domain: None,
+                        in_flight_ns: 1,
+                    },
+                ),
+                ev(
+                    4,
                     15,
                     Source::MetalHook,
                     Payload::MetalCbOps {
@@ -651,7 +677,7 @@ mod tests {
                     },
                 ),
                 ev(
-                    3,
+                    5,
                     20,
                     Source::PythonSidecar,
                     Payload::MlxEvalReturned {

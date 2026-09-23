@@ -219,15 +219,40 @@ def _get_mx_metal() -> Any | None:
     return None
 
 
+# recommendedMaxWorkingSetSize, read once: a device constant.
+_recommended_working_set: int | None = None
+
+
+def _read_recommended_working_set(api: Any) -> int:
+    """MTLDevice.recommendedMaxWorkingSetSize, via MLX's device_info()
+    (`mx.device_info` since 0.30, `mx.metal.device_info` before). 0 when
+    unavailable."""
+    global _recommended_working_set
+    if _recommended_working_set is not None:
+        return _recommended_working_set
+    info_fn = getattr(api, "device_info", None) or getattr(
+        getattr(api, "metal", None), "device_info", None
+    )
+    try:
+        value = int(info_fn()["max_recommended_working_set_size"]) if info_fn else 0
+    except Exception:
+        value = 0
+    _recommended_working_set = value
+    return value
+
+
 def read_device_memory_bytes() -> tuple[int, int] | None:
-    """Synchronously read (allocated, recommended_max) from mx.metal.
+    """Synchronously read (allocated, recommended_max) in the units the
+    Metal hook reports for the same `MetalDeviceMemSample` event:
+    MTLDevice.currentAllocatedSize and recommendedMaxWorkingSetSize.
 
-    Returns None if mx.metal is unavailable. Never raises — observability
-    must not break user code.
+    MLX's share of the former is active + cache: cached buffers were freed
+    by the program but are still allocated from Metal. Active memory alone
+    understated every scope peak, and `get_memory_limit()` (absent from MLX
+    0.31 anyway) is MLX's own limit, not the device budget (#243).
 
-    `recommended_max` falls back to 0 if the MLX build doesn't expose
-    `get_memory_limit()`. The analyzer only uses `allocated_bytes` for
-    peak/avg, so 0 is harmless.
+    Returns None if the MLX memory API is unavailable. Never raises —
+    observability must not break user code.
     """
     metal = _get_mlx_memory_api()
     if metal is None:
@@ -236,13 +261,12 @@ def read_device_memory_bytes() -> tuple[int, int] | None:
         allocated = int(metal.get_active_memory())
     except Exception:
         return None
-    max_b = 0
     try:
-        if hasattr(metal, "get_memory_limit"):
-            max_b = int(metal.get_memory_limit())
+        if hasattr(metal, "get_cache_memory"):
+            allocated += int(metal.get_cache_memory())
     except Exception:
         pass
-    return allocated, max_b
+    return allocated, _read_recommended_working_set(metal)
 
 
 def start_polling(poll_hz: float) -> None:
