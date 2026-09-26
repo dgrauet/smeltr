@@ -324,30 +324,32 @@ static const void *kSmeltrCbTrackedKey = &kSmeltrCbTrackedKey;
 /// swizzle, which otherwise only sees buffers of other classes.
 static BOOL g_test_no_cb_class_commit = NO;
 
-/// Returns YES exactly once per CB (nested calls happen on one thread, so a
-/// plain associated-object check is race-free).
-static BOOL smeltr_cb_mark_tracked(id cb) {
-    if (objc_getAssociatedObject(cb, kSmeltrCbTrackedKey)) return NO;
+static void smeltr_cb_set_tracked(id cb) {
     objc_setAssociatedObject(cb, kSmeltrCbTrackedKey, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return YES;
 }
 
-/// Mark every command buffer a wrapper CB wraps as tracked (#264). Under
-/// MTL_CAPTURE_ENABLED, MTL_DEBUG_LAYER or MTL_SHADER_VALIDATION the app
-/// commits a wrapper (MTLToolsObject subclass: CaptureMTLCommandBuffer,
-/// MTLDebugCommandBuffer, …) whose commit commits the inner buffer. The
-/// class `commit` swizzle sees the wrapper and the queue swizzle sees the
-/// inner buffer: two objects, so without this each CB was recorded twice.
-/// Layers can stack (capture over debug), hence the walk.
-static void smeltr_cb_mark_wrapped_tracked(id cb) {
+/// Returns YES exactly once per commit (nested calls happen on one thread,
+/// so a plain associated-object check is race-free).
+///
+/// A commit also claims every command buffer the claimed one wraps (#264).
+/// Under MTL_CAPTURE_ENABLED, MTL_DEBUG_LAYER or MTL_SHADER_VALIDATION the
+/// app commits a wrapper (MTLToolsObject subclass: CaptureMTLCommandBuffer,
+/// MTLDebugCommandBuffer, …) whose commit commits the inner buffer; either
+/// interception point may see either object (macOS 14's debug queue goes
+/// through the queue swizzle twice), and the per-object check alone let
+/// both through, recording every CB twice. Layers stack, hence the walk.
+static BOOL smeltr_cb_mark_tracked(id cb) {
+    if (objc_getAssociatedObject(cb, kSmeltrCbTrackedKey)) return NO;
+    smeltr_cb_set_tracked(cb);
     SEL base_sel = sel_registerName("baseObject");
     id obj = cb;
     for (int depth = 0; depth < 8 && [obj respondsToSelector:base_sel]; depth++) {
         obj = ((id (*)(id, SEL))objc_msgSend)(obj, base_sel);
         if (!obj) break;
-        (void)smeltr_cb_mark_tracked(obj);
+        smeltr_cb_set_tracked(obj);
     }
+    return YES;
 }
 
 /* In-flight CB tracking for warning timer. Keys: NSNumber(cb_id). Values:
@@ -1225,7 +1227,6 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
                  class_getName([self class]), self);
     if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring
         && smeltr_cb_mark_tracked(self)) {
-        smeltr_cb_mark_wrapped_tracked(self);
         smeltr_track_commit(self, [(id<MTLCommandBuffer>)self commandQueue]);
     }
     // Tail call: invoke original commit.
