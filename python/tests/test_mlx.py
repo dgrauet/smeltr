@@ -23,6 +23,9 @@ def test_track_emits_array_alive(fake_daemon):
     try:
         a = _FakeArray(64, "float32", (4, 4))
         _mlx.track(a, stream="gpu")
+        assert fake_daemon.wait_for(
+            lambda ms: any(m["payload"]["kind"] == "MlxArrayAlive" for m in ms)
+        )
         alives = [m for m in fake_daemon.received if m["payload"]["kind"] == "MlxArrayAlive"]
         assert len(alives) == 1
         p = alives[0]["payload"]
@@ -41,6 +44,9 @@ def test_array_freed_on_gc(fake_daemon):
         _mlx.track(a, stream="gpu")
         del a
         gc.collect()
+        assert fake_daemon.wait_for(
+            lambda ms: any(m["payload"]["kind"] == "MlxArrayFreed" for m in ms)
+        )
         time.sleep(0.05)
         freed = [m for m in fake_daemon.received if m["payload"]["kind"] == "MlxArrayFreed"]
         assert len(freed) == 1

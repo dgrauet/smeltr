@@ -27,9 +27,14 @@ class FakeDaemon:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._conns: list[socket.socket] = []
         # Seconds to wait before acking an Emit: a slow daemon keeps the
         # client inside emit(), holding its lock, most of the time.
         self.ack_delay_s = 0.0
+        # Cleared = a stalled daemon (SIGSTOP-like): Emits are read but
+        # neither recorded nor acked until it is set again.
+        self.gate = threading.Event()
+        self.gate.set()
 
     def start(self) -> None:
         if os.path.exists(self.sock_path):
@@ -48,6 +53,30 @@ class FakeDaemon:
             self._listener.close()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        # A stopped daemon drops its clients, like a killed smeltrd.
+        with self._lock:
+            conns, self._conns = self._conns, []
+        for c in conns:
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        if os.path.exists(self.sock_path):
+            os.unlink(self.sock_path)
+
+    def emits(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self.received)
+
+    def wait_for(self, predicate, timeout_s: float = 3.0) -> bool:
+        """Poll until predicate(emits()) holds: the sidecar sends from a
+        background thread, so delivery trails the emit call."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if predicate(self.emits()):
+                return True
+            time.sleep(0.01)
+        return predicate(self.emits())
 
     def _serve(self) -> None:
         while not self._stop.is_set():
@@ -59,7 +88,11 @@ class FakeDaemon:
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn: socket.socket) -> None:
-        conn.settimeout(1.0)
+        # Short timeout so the handler notices stop(); an idle client is not
+        # an error (the sidecar's connection stays open between events).
+        conn.settimeout(0.1)
+        with self._lock:
+            self._conns.append(conn)
         try:
             while not self._stop.is_set():
                 msg = self._read_frame(conn)
@@ -81,6 +114,9 @@ class FakeDaemon:
                         },
                     )
                 elif op == "Emit":
+                    while not self.gate.wait(0.05):
+                        if self._stop.is_set():
+                            return
                     with self._lock:
                         self.received.append(msg)
                     if self.ack_delay_s:
@@ -93,21 +129,28 @@ class FakeDaemon:
         finally:
             conn.close()
 
-    @staticmethod
-    def _read_frame(conn: socket.socket) -> dict[str, Any] | None:
-        header = b""
-        while len(header) < 4:
-            chunk = conn.recv(4 - len(header))
+    def _recv(self, conn: socket.socket, n: int) -> bytes | None:
+        buf = b""
+        while len(buf) < n:
+            try:
+                chunk = conn.recv(n - len(buf))
+            except TimeoutError:
+                if self._stop.is_set():
+                    return None
+                continue
             if not chunk:
                 return None
-            header += chunk
+            buf += chunk
+        return buf
+
+    def _read_frame(self, conn: socket.socket) -> dict[str, Any] | None:
+        header = self._recv(conn, 4)
+        if header is None:
+            return None
         (length,) = struct.unpack("<I", header)
-        body = b""
-        while len(body) < length:
-            chunk = conn.recv(length - len(body))
-            if not chunk:
-                return None
-            body += chunk
+        body = self._recv(conn, length)
+        if body is None:
+            return None
         return cbor2.loads(body)
 
     @staticmethod
