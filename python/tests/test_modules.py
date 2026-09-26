@@ -40,7 +40,7 @@ def test_install_idempotent():
     _modules.install()
     import mlx.nn as nn
 
-    assert getattr(nn.Module.__call__, "_smeltr_wrapped", False) is True
+    assert getattr(nn.Linear.__call__, "_smeltr_wrapped", False) is True
 
 
 def test_call_emits_entered_and_returned():
@@ -140,7 +140,7 @@ def test_disable_env_var_makes_install_noop(monkeypatch):
     import mlx.nn as nn
 
     _modules.install()
-    assert getattr(nn.Module.__call__, "_smeltr_wrapped", False) is False
+    assert getattr(nn.Linear.__call__, "_smeltr_wrapped", False) is False
 
 
 def test_install_without_mlx_is_noop(monkeypatch):
@@ -168,13 +168,13 @@ def test_uninstall_restores_original_call():
     before_module_call = nn.Module.__dict__.get("__call__")
     before_linear_call = nn.Linear.__dict__.get("__call__")
     _modules.install()
-    assert getattr(nn.Module.__call__, "_smeltr_wrapped", False) is True
+    assert getattr(nn.Linear.__call__, "_smeltr_wrapped", False) is True
     _modules.uninstall()
     after_module_call = nn.Module.__dict__.get("__call__")
     after_linear_call = nn.Linear.__dict__.get("__call__")
     assert after_module_call == before_module_call
     assert after_linear_call == before_linear_call
-    assert getattr(nn.Module.__call__, "_smeltr_wrapped", False) is False
+    assert getattr(nn.Linear.__call__, "_smeltr_wrapped", False) is False
 
 
 def test_mlx_eval_payload_includes_module_stack():
@@ -215,3 +215,161 @@ def test_mlx_eval_payload_includes_module_stack():
         f"expected at least one MlxEvalEntered with a non-empty module_stack; "
         f"got: {[ev['module_stack'] for ev in entered]}"
     )
+
+
+# ---- #266: the wrapper must never change or break the user's forward ----
+
+
+def _entered(events):
+    return [e for e in events if e["kind"] == "ModuleEntered"]
+
+
+def test_array_valued_name_attribute_does_not_break_the_forward():
+    """`getattr(module, "name", None) or cls` called bool() on an mx.array:
+    ValueError raised inside the user's forward (#266)."""
+    _modules._reset_for_tests()
+    pytest.importorskip("mlx.nn")
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    class Named(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.name = mx.array([1.0, 2.0])
+
+        def __call__(self, x):
+            return x + 1
+
+    events, fake = _fake_emit_recorder()
+    with patch.object(_modules, "_emit", fake):
+        _modules.install()
+        try:
+            out = Named()(mx.zeros((2,)))
+        finally:
+            _modules.uninstall()
+    assert out.tolist() == [1.0, 1.0]
+    assert _entered(events)[0]["qualname"] == "Named"
+
+
+def test_only_a_non_empty_str_name_labels_the_qualname():
+    class Plain:
+        pass
+
+    m = Plain()
+    assert _modules._qualname_for(m) == "Plain"
+    m.name = 42
+    assert _modules._qualname_for(m) == "Plain"
+    m.name = ""
+    assert _modules._qualname_for(m) == "Plain"
+    m.name = "encoder"
+    assert _modules._qualname_for(m) == "Plain:encoder"
+
+
+def test_bookkeeping_failure_never_reaches_the_user_call():
+    _modules._reset_for_tests()
+    pytest.importorskip("mlx.nn")
+    import mlx.nn as nn
+
+    class Echo(nn.Module):
+        def __call__(self, x):
+            return x
+
+    def boom(*_a, **_k):
+        raise RuntimeError("bookkeeping broke")
+
+    _modules.install()
+    try:
+        with patch.object(_modules, "_push", boom), patch.object(_modules, "_pop", boom):
+            assert Echo()(7) == 7
+    finally:
+        _modules.uninstall()
+
+
+def test_user_exception_propagates_unchanged():
+    _modules._reset_for_tests()
+    pytest.importorskip("mlx.nn")
+    import mlx.nn as nn
+
+    class Fails(nn.Module):
+        def __call__(self, x):
+            raise KeyError("user error")
+
+    _modules.install()
+    try:
+        with pytest.raises(KeyError, match="user error"):
+            Fails()(1)
+    finally:
+        _modules.uninstall()
+
+
+def test_wrapper_preserves_the_call_signature():
+    """mlx_lm.utils.does_model_support_input_embeddings() checks
+    `'input_embeddings' in inspect.signature(model.__call__).parameters`;
+    a `(*args, **kwargs)` wrapper turned it False under `smeltr record`."""
+    import inspect
+
+    _modules._reset_for_tests()
+    pytest.importorskip("mlx.nn")
+    import mlx.nn as nn
+
+    class Model(nn.Module):
+        def __call__(self, inputs, cache=None, input_embeddings=None):
+            """Forward docstring."""
+            return inputs
+
+    _modules.install()
+    try:
+        params = inspect.signature(Model().__call__).parameters
+        assert list(params) == ["inputs", "cache", "input_embeddings"]
+        assert Model.__call__.__doc__ == "Forward docstring."
+        assert Model.__call__.__name__ == "__call__"
+        assert getattr(Model.__call__, "_smeltr_wrapped", False) is True
+    finally:
+        _modules.uninstall()
+
+
+def test_module_without_call_stays_non_callable():
+    _modules._reset_for_tests()
+    pytest.importorskip("mlx.nn")
+    import mlx.nn as nn
+
+    class Container(nn.Module):
+        pass
+
+    _modules.install()
+    try:
+        assert not callable(Container())
+        assert "__call__" not in nn.Module.__dict__
+    finally:
+        _modules.uninstall()
+
+
+def test_super_call_records_the_scope_once():
+    _modules._reset_for_tests()
+    pytest.importorskip("mlx.nn")
+    import mlx.nn as nn
+
+    class Base(nn.Module):
+        def __call__(self, x):
+            return x + 1
+
+    class Child(Base):
+        def __call__(self, x):
+            return super().__call__(x) * 2
+
+    class Inherits(Base):
+        pass
+
+    events, fake = _fake_emit_recorder()
+    with patch.object(_modules, "_emit", fake):
+        _modules.install()
+        try:
+            assert Child()(1) == 4
+            assert Inherits()(1) == 2
+        finally:
+            _modules.uninstall()
+    entered = _entered(events)
+    assert [e["class_name"] for e in entered] == ["Child", "Inherits"]
+    returned = [e for e in events if e["kind"] == "ModuleReturned"]
+    assert len(returned) == 2
+    assert _modules._current_stack() == []

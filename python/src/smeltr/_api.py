@@ -148,7 +148,12 @@ def now() -> int:
 
 @contextlib.contextmanager
 def session(name: str) -> Generator[None, None, None]:
-    _require_attached()
+    """Bracket a block with `session-open: <name>` / `session-close: <name>`
+    marks.
+
+    A no-op when not attached, like `scope()` and `mark()`: the same program
+    must run unchanged with or without `smeltr record` (#266).
+    """
     mark(f"session-open: {name}")
     try:
         yield
