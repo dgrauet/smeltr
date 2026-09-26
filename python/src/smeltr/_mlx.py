@@ -27,6 +27,20 @@ _STACK_CAPTURE_DEPTH = 3  # top N non-smeltr frames
 _SMELTR_PKG_DIR = os.path.realpath(os.path.dirname(os.path.abspath(__file__))) + os.sep
 
 
+# filename -> "is inside the smeltr package". A code object's file does not
+# move while the process runs, and realpath on every frame of every eval
+# cost ~50 Âµs per mx.eval (#266). Bounded by the number of source files.
+_smeltr_file_cache: dict[str, bool] = {}
+
+
+def _is_smeltr_file(filename: str) -> bool:
+    hit = _smeltr_file_cache.get(filename)
+    if hit is None:
+        hit = os.path.realpath(filename).startswith(_SMELTR_PKG_DIR)
+        _smeltr_file_cache[filename] = hit
+    return hit
+
+
 def _stack_capture_enabled() -> bool:
     return os.environ.get("SMELTR_STACK_CAPTURE") == "1"
 
@@ -49,7 +63,7 @@ def _capture_stack(depth: int = _STACK_CAPTURE_DEPTH) -> list[dict]:
         return out
     while frame is not None and len(out) < depth:
         filename = frame.f_code.co_filename
-        if not os.path.realpath(filename).startswith(_SMELTR_PKG_DIR):
+        if not _is_smeltr_file(filename):
             out.append(
                 {
                     "filename": filename,

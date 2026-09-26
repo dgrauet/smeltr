@@ -200,7 +200,8 @@ CBOR length-prefixed frames over a Unix socket. See
   is NEVER bracketed — bracketing is limited to `_scope_cm` to keep Module-granular
   instrumentation free of MTL reads.
 - `SMELTR_STACK_CAPTURE=1` — opt-in: capture top 3 Python frames at each `mx.eval`
-  (~1-5 µs/eval). Fills `MlxEvalEntered.stack_frames`; consumed by `smeltr origins` /
+  (stack walk measured at 1.4 µs/eval on an M2 Pro; it was ~53 µs while every frame went
+  through `os.path.realpath` — now cached per filename, #266). Fills `MlxEvalEntered.stack_frames`; consumed by `smeltr origins` /
   `get_dispatch_origins`.
 - `SMELTR_GPUTRACE_SCOPE=<name>` / `SMELTR_GPUTRACE_PATH=<path>` — set ONLY by
   `smeltr record --gputrace-scope <NAME>`. The Python sidecar wraps the named

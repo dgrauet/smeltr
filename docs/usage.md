@@ -463,7 +463,7 @@ smeltr origins --last --top 10
 ```
 
 The `SMELTR_STACK_CAPTURE=1` env var is **opt-in** because the stack
-walk adds ~1–5 µs per `mx.eval`. Without it the session works as
+walk adds ~1.5 µs per `mx.eval` (measured on an M2 Pro). Without it the session works as
 normal and `smeltr origins` shows an empty table with a hint.
 
 Output: per-(kind, file:line), sum GPU time + dispatch count.
