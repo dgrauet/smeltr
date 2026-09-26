@@ -48,8 +48,26 @@ impl SessionRouter {
         scope_token: Option<&str>,
         payload: Payload,
     ) -> std::io::Result<()> {
+        self.append_stamped(source, pid, scope_token, None, payload)
+    }
+
+    /// [`append`](Self::append), dated from `uptime_raw_ns` when the client
+    /// stamped the event where it happened (the Python sidecar sends its
+    /// queued events later — #266).
+    pub fn append_stamped(
+        &self,
+        source: Source,
+        pid: Option<u32>,
+        scope_token: Option<&str>,
+        uptime_raw_ns: Option<u64>,
+        payload: Payload,
+    ) -> std::io::Result<()> {
         let target = self.route_for(source, scope_token, pid);
-        target.append(source, pid, payload).map(|_| ())
+        match uptime_raw_ns {
+            Some(raw) => target.append_at(source, pid, raw, payload),
+            None => target.append(source, pid, payload),
+        }
+        .map(|_| ())
     }
 
     /// [`append`](Self::append) for an event stamped where it happened
@@ -61,10 +79,7 @@ impl SessionRouter {
         uptime_raw_ns: u64,
         payload: Payload,
     ) -> std::io::Result<()> {
-        let target = self.route_for(source, None, pid);
-        target
-            .append_at(source, pid, uptime_raw_ns, payload)
-            .map(|_| ())
+        self.append_stamped(source, pid, None, Some(uptime_raw_ns), payload)
     }
 
     fn route_for(
