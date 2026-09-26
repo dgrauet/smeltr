@@ -64,10 +64,32 @@ fn wrapper_layers_record_each_command_buffer_once() {
         "MTL_CAPTURE_ENABLED",
         "MTL_SHADER_VALIDATION",
     ] {
+        let got = counts(dir.path(), Some(layer));
         assert_eq!(
-            counts(dir.path(), Some(layer)),
+            got,
             bare,
-            "(committed, completed, cb_ops) under {layer} vs no layer"
+            "(committed, completed, cb_ops) under {layer} vs no layer; commit paths:\n{}",
+            commit_trace(dir.path(), layer)
         );
     }
+}
+
+/// The hook's commit-path trace for a failing layer: which classes each
+/// interception point saw (the macOS 14 CI runner differs from local).
+fn commit_trace(dir: &Path, layer: &str) -> String {
+    let ring = dir.join("trace.bin");
+    drop(create_ring(&ring, 1 << 22).unwrap());
+    let out = Command::new(env!("CARGO_BIN_EXE_smeltr-metal-harness"))
+        .env("DYLD_INSERT_LIBRARIES", dylib_path())
+        .env("SMELTR_RING_PATH", &ring)
+        .env("SMELTR_HOOK_TRACE", "1")
+        .env(layer, "1")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.contains("commit") || l.contains("tracking"))
+        .map(|l| l.chars().take(160).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

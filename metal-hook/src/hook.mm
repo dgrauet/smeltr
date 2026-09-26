@@ -343,12 +343,21 @@ static BOOL smeltr_cb_mark_tracked(id cb) {
     if (objc_getAssociatedObject(cb, kSmeltrCbTrackedKey)) return NO;
     smeltr_cb_set_tracked(cb);
     SEL base_sel = sel_registerName("baseObject");
+    id wrapped[8];
+    int n = 0;
     id obj = cb;
-    for (int depth = 0; depth < 8 && [obj respondsToSelector:base_sel]; depth++) {
+    while (n < 8 && [obj respondsToSelector:base_sel]) {
         obj = ((id (*)(id, SEL))objc_msgSend)(obj, base_sel);
         if (!obj) break;
-        smeltr_cb_set_tracked(obj);
+        wrapped[n++] = obj;
     }
+    // Either object can be seen first: when the buffer this one wraps was
+    // already recorded, this commit is the same one.
+    for (int i = 0; i < n; i++) {
+        if (objc_getAssociatedObject(wrapped[i], kSmeltrCbTrackedKey)) return NO;
+    }
+    for (int i = 0; i < n; i++) smeltr_cb_set_tracked(wrapped[i]);
+    SMELTR_TRACE("tracking commit of %s (%d wrapped)", class_getName(object_getClass(cb)), n);
     return YES;
 }
 
