@@ -118,9 +118,9 @@ fn record_captures_child_lifecycle() {
     );
 }
 
-#[test]
-#[cfg_attr(not(target_os = "macos"), ignore)]
-fn record_with_metal_hook_captures_cb_lifecycle() {
+/// The built hook dylib and the metal harness binary, or `None` (soft-skip)
+/// when either is missing.
+fn hook_fixture() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let dylib_rel = std::path::PathBuf::from("metal-hook/build/libmetal_hook.dylib");
     let candidates = [
         dylib_rel.clone(),
@@ -130,7 +130,7 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
     let dylib = candidates.iter().find(|p| p.exists()).cloned();
     let Some(dylib) = dylib else {
         eprintln!("metal-hook dylib not built — run `make -C metal-hook` first. Soft-skipping.");
-        return;
+        return None;
     };
     let dylib_abs = std::fs::canonicalize(&dylib).unwrap();
 
@@ -159,9 +159,18 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
                  Run `cargo build -p smeltr-metal-harness` first.",
                 candidate.display()
             );
-            return;
+            return None;
         }
         candidate
+    };
+    Some((dylib_abs, harness))
+}
+
+#[test]
+#[cfg_attr(not(target_os = "macos"), ignore)]
+fn record_with_metal_hook_captures_cb_lifecycle() {
+    let Some((dylib_abs, harness)) = hook_fixture() else {
+        return;
     };
 
     let tmp = tempfile::tempdir().unwrap();
@@ -230,6 +239,68 @@ fn record_with_metal_hook_captures_cb_lifecycle() {
     );
     assert!(seen_completed, "no MetalCbCompleted in session");
     assert!(seen_buffer, "no MetalBufferAlloc in session");
+}
+
+/// #264: a launcher that loads the hook first and touches Metal (a Python
+/// launcher once the sidecar autoload imports mlx) must not keep the child's
+/// command buffers out of the recording, and every ring the recording
+/// produced — the main one and each per-process sibling — is removed.
+#[test]
+#[cfg_attr(not(target_os = "macos"), ignore)]
+fn record_through_a_launcher_captures_the_childs_command_buffers() {
+    let Some((dylib_abs, harness)) = hook_fixture() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    let sock = tmp.path().join("smeltr.sock");
+    let mut daemon = DaemonGuard::spawn(&home, &sock);
+
+    Command::cargo_bin("smeltr")
+        .unwrap()
+        .env("SMELTR_HOME", &home)
+        .env("SMELTR_SOCKET", &sock)
+        .env("SMELTR_DYLIB", &dylib_abs)
+        .env("SMELTR_HARNESS_LAUNCHER", "1")
+        .args(["record", harness.to_str().unwrap()])
+        .assert()
+        .success();
+    daemon.stop();
+    std::thread::sleep(Duration::from_millis(100));
+
+    use smeltr_core::session::SessionKind;
+    let scoped_dir = std::fs::read_dir(home.join("sessions"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            smeltr_core::reader::read_metadata(p)
+                .is_ok_and(|m| matches!(m.kind, SessionKind::Scoped { .. }))
+        })
+        .expect("scoped session");
+    let committed = smeltr_core::reader::read_events(&scoped_dir)
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.payload,
+                smeltr_core::event::Payload::MetalCbCommitted { .. }
+            )
+        })
+        .count();
+    // At least the child's two; the exact count depends on the Metal stack
+    // (a macOS 14 CI runner reports 3 — see the wrapper double count, #264).
+    assert!(
+        committed >= 2,
+        "the child's command buffers, got {committed}"
+    );
+
+    let rings: Vec<_> = std::fs::read_dir(home.join("rings"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .collect();
+    assert!(rings.is_empty(), "rings left behind: {rings:?}");
 }
 
 #[test]

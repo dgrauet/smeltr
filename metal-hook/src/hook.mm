@@ -30,6 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <os/lock.h>
+#include <unistd.h>
 #include "smeltr_ring.h"
 #include "smeltr_ring_writer.h"
 #import "pso_map.h"
@@ -920,12 +922,14 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
 
     // Build C arrays for smeltr_write_cb_ops.
     uint32_t n = (uint32_t)agg.count;
+    enum { kOpNameCap = 48 };
     char **names_buf  = (char **)malloc(sizeof(char *) * n);
+    char *names_block = (char *)malloc((size_t)kOpNameCap * n);
     const char **symbols_buf = (const char **)malloc(sizeof(char *) * n);
     uint64_t *gpu_ns_arr = (uint64_t *)malloc(sizeof(uint64_t) * n);
     uint32_t *counts  = (uint32_t *)malloc(sizeof(uint32_t) * n);
-    if (!names_buf || !symbols_buf || !gpu_ns_arr || !counts) {
-        free(names_buf); free(symbols_buf); free(gpu_ns_arr); free(counts);
+    if (!names_buf || !names_block || !symbols_buf || !gpu_ns_arr || !counts) {
+        free(names_buf); free(names_block); free(symbols_buf); free(gpu_ns_arr); free(counts);
         return;
     }
     uint32_t i = 0;
@@ -934,14 +938,14 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
         unsigned long w     = [key[1] unsignedLongValue];
         unsigned long h     = [key[2] unsignedLongValue];
         unsigned long depth = [key[3] unsignedLongValue];
-        char *name = (char *)malloc(48);
+        char *name = names_block + (size_t)kOpNameCap * i;
         if ((pso & 0xFF00000000000000ULL) == kSmeltrMLEncoderPsoMarker) {
             // MTL4 ML encoder dispatch — name format K_MLNet_<encoder_addr>.
             uint64_t addr = pso & 0x00FFFFFFFFFFFFFFULL;
-            snprintf(name, 48, "K_MLNet_%llx", (unsigned long long)addr);
+            snprintf(name, kOpNameCap, "K_MLNet_%llx", (unsigned long long)addr);
         } else {
             uint16_t pso_short = (uint16_t)(pso & 0xFFFF);
-            snprintf(name, 48, "K_%04x_%lux%lux%lu", pso_short, w, h, depth);
+            snprintf(name, kOpNameCap, "K_%04x_%lux%lux%lu", pso_short, w, h, depth);
         }
         names_buf[i]   = name;
         symbols_buf[i] = smeltr_pso_map_lookup((uintptr_t)pso);  // borrowed; may be NULL
@@ -953,7 +957,7 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
                         (const char *const *)names_buf,
                         (const char *const *)symbols_buf,
                         gpu_ns_arr, counts, n);
-    for (uint32_t k = 0; k < n; k++) free(names_buf[k]);
+    free(names_block);
     free(names_buf);
     free(symbols_buf);
     free(gpu_ns_arr);
@@ -1458,8 +1462,29 @@ static void smeltr_heap_dealloc_replacement(__unsafe_unretained id self, SEL _cm
     ((void (*)(__unsafe_unretained id, SEL))g_orig_heap_dealloc)(self, _cmd);
 }
 
+/// Test-only (SMELTR_HOOK_TEST_INSTALL_DELAY_US): sleep between the
+/// already-installed check and the install, making the install race (#264)
+/// deterministic in tests. 0 in production.
+static useconds_t g_test_install_delay_us = 0;
+
+/// Serializes install_dealloc_hook. The first allocations of a process can
+/// come from several threads at once; an unsynchronised check-then-install
+/// let two of them install, the second recording the replacement as the
+/// "original" IMP, so every dealloc then called itself forever (#264).
+static os_unfair_lock g_dealloc_install_lock = OS_UNFAIR_LOCK_INIT;
+
+static void install_dealloc_hook_locked(Class cls, IMP *orig_slot, IMP replacement);
+
 static void install_dealloc_hook(Class cls, IMP *orig_slot, IMP replacement) {
-    if (!cls || *orig_slot != NULL) return;
+    if (!cls) return;
+    os_unfair_lock_lock(&g_dealloc_install_lock);
+    install_dealloc_hook_locked(cls, orig_slot, replacement);
+    os_unfair_lock_unlock(&g_dealloc_install_lock);
+}
+
+static void install_dealloc_hook_locked(Class cls, IMP *orig_slot, IMP replacement) {
+    if (*orig_slot != NULL) return;
+    if (g_test_install_delay_us) usleep(g_test_install_delay_us);
     SEL sel = sel_registerName("dealloc");
     // Find dealloc method DIRECTLY on this class (not inherited). If it lives
     // on a superclass (e.g. NSObject), replacing it would clobber ALL objc
@@ -1661,6 +1686,11 @@ static void smeltr_swizzle_device_class(void) {
             smeltr_log("SMELTR_HOOK_SAMPLING_RETRY_MS=%s: ignored (out of range 1..3600000)",
                        retry_ms);
         }
+    }
+    const char *install_delay = getenv("SMELTR_HOOK_TEST_INSTALL_DELAY_US");
+    if (install_delay) {
+        long v = strtol(install_delay, NULL, 10);
+        if (v > 0 && v <= 1000000) g_test_install_delay_us = (useconds_t)v;
     }
     const char *fail_n = getenv("SMELTR_HOOK_TEST_STAGE_ALLOC_FAIL_N");
     if (fail_n) {
