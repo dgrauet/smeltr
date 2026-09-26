@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import platform
 import sys
 import threading
@@ -11,6 +12,8 @@ from collections.abc import Generator
 
 from smeltr._client import ClientError, _Client
 from smeltr._proto import SOURCE_PYTHON_SIDECAR
+
+_log = logging.getLogger("smeltr")
 
 _client: _Client | None = None
 # Re-entrant: the SIGTERM handler calls detach() on whatever thread the
@@ -65,17 +68,19 @@ def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0, poll_hz: floa
                 "argv": list(sys.argv),
             }
         )
-    except ClientError:
+    except Exception:
+        # Connected: whatever this one event hit, the hooks below must still
+        # go in, or `_client` is left set with nothing installed (#266).
         pass
     from smeltr._mlx import start_polling
-
-    start_polling(poll_hz)
+    from smeltr._modules import install as _install_modules
     from smeltr._shutdown import install_hooks
 
-    install_hooks()
-    from smeltr._modules import install as _install_modules
-
-    _install_modules()
+    for install in (lambda: start_polling(poll_hz), install_hooks, _install_modules):
+        try:
+            install()
+        except Exception as e:
+            _log.warning("smeltr: %s failed: %s", getattr(install, "__name__", install), e)
 
 
 def detach() -> None:

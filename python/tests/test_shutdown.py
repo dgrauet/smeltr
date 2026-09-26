@@ -115,3 +115,110 @@ def test_shutdown_handler_runs_while_its_thread_holds_sidecar_locks(fake_daemon)
                 lock.release()
         t.join(3.0)
     assert not deadlocked, "shutdown handler deadlocked on a lock its own thread holds"
+
+
+# ---- #266: attach() must not change the program's SIGTERM semantics ----
+
+
+def _run_child(body: str, timeout_s: float = 10.0):
+    import os
+    import subprocess
+
+    env = dict(os.environ, SMELTR_MODULES_DISABLE="1")
+    env.pop("SMELTR_AUTOLOAD", None)
+    return subprocess.run(
+        [sys.executable, "-c", body],
+        env=env,
+        capture_output=True,
+        timeout=timeout_s,
+    )
+
+
+def test_sigterm_chains_the_users_handler(fake_daemon):
+    """attach() replaced a graceful SIGTERM handler without calling it: the
+    handler never ran and the process died with 143."""
+    child = (
+        "import os, signal, smeltr\n"
+        "seen = []\n"
+        "signal.signal(signal.SIGTERM, lambda s, f: seen.append(s))\n"
+        "smeltr.attach(poll_hz=0)\n"
+        "os.kill(os.getpid(), signal.SIGTERM)\n"
+        "print('graceful' if seen == [signal.SIGTERM] else f'lost {seen}', flush=True)\n"
+        "smeltr.mark('still-recording')\n"
+        "smeltr.detach()\n"
+    )
+    r = _run_child(child)
+    assert r.returncode == 0, r.stderr.decode()
+    assert r.stdout.strip() == b"graceful"
+    labels = [m["payload"].get("label") for m in fake_daemon.emits()]
+    # Still attached after the user's handler kept the process alive.
+    assert "still-recording" in labels
+    # The sidecar recorded the signal before handing over.
+    assert any(m["payload"]["kind"] == "MlxSnapshot" for m in fake_daemon.emits())
+
+
+def test_sigterm_ignored_by_the_program_stays_ignored(fake_daemon):
+    child = (
+        "import os, signal, smeltr\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "smeltr.attach(poll_hz=0)\n"
+        "os.kill(os.getpid(), signal.SIGTERM)\n"
+        "print('alive', flush=True)\n"
+        "smeltr.detach()\n"
+    )
+    r = _run_child(child)
+    assert r.returncode == 0, r.stderr.decode()
+    assert r.stdout.strip() == b"alive"
+
+
+def test_default_sigterm_still_terminates_and_flushes(fake_daemon):
+    import signal
+
+    child = (
+        "import os, signal, smeltr\n"
+        "smeltr.attach(poll_hz=0)\n"
+        "smeltr.mark('before-term')\n"
+        "os.kill(os.getpid(), signal.SIGTERM)\n"
+        "import time; time.sleep(5)\n"
+        "print('survived', flush=True)\n"
+    )
+    r = _run_child(child)
+    assert r.returncode == -signal.SIGTERM
+    assert r.stdout == b""
+    labels = [m["payload"].get("label") for m in fake_daemon.emits()]
+    assert "before-term" in labels
+
+
+def test_remove_hooks_leaves_a_handler_installed_after_attach(fake_daemon):
+    import signal
+
+    smeltr.attach(poll_hz=0)
+
+    def later(signum, frame):
+        pass
+
+    previous = signal.signal(signal.SIGTERM, later)
+    try:
+        smeltr.detach()
+        assert signal.getsignal(signal.SIGTERM) is later
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
+def test_attach_survives_an_oserror_during_its_hello(fake_daemon, monkeypatch):
+    """Only ClientError was caught around the PythonSidecarHello emit: a
+    BrokenPipeError escaped attach() with `_client` set and no hooks."""
+    from smeltr import _api, _shutdown
+    from smeltr._client import _Client
+
+    def broken(self, *a, **k):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(_Client, "emit", broken)
+    smeltr.attach(poll_hz=0)
+    try:
+        assert _api._client is not None
+        assert sys.excepthook is _shutdown._excepthook
+    finally:
+        smeltr.detach()

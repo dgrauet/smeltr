@@ -9,10 +9,14 @@ import signal
 import sys
 import threading
 from collections.abc import Callable
+from typing import Any
 
 _atexit_registered = False
 _original_excepthook = None
-_original_sigterm = None
+# The SIGTERM disposition attach() found (SIG_DFL or the program's handler),
+# chained by _sigterm_handler and restored by remove_hooks().
+_prev_sigterm: Any = None
+_sigterm_installed = False
 _panic_thread: threading.Thread | None = None
 _panic_stop = threading.Event()
 _panic_queue: queue.Queue = queue.Queue()
@@ -48,37 +52,65 @@ def _excepthook(exc_type, exc_value, exc_tb) -> None:
 
 
 def _sigterm_handler(signum, frame) -> None:
+    prev = _prev_sigterm
+    if callable(prev):
+        # The program handles SIGTERM itself — it may shut down gracefully or
+        # carry on. Record the moment, then hand over; stay attached (its
+        # exit, if any, runs the atexit hook).
+        try:
+            from smeltr._api import mark
+            from smeltr._mlx import snapshot
+
+            mark("signal: SIGTERM")
+            snapshot()
+        except Exception:
+            pass
+        prev(signum, frame)
+        return
+    # Default disposition: flush, then terminate as the program would have.
     _atexit_handler()
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.raise_signal(signal.SIGTERM)
 
 
 def install_hooks() -> None:
-    global _atexit_registered, _original_excepthook, _original_sigterm
+    global _atexit_registered, _original_excepthook, _sigterm_installed, _prev_sigterm
     if not _atexit_registered:
         atexit.register(_atexit_handler)
         _atexit_registered = True
     if _original_excepthook is None:
         _original_excepthook = sys.excepthook
         sys.excepthook = _excepthook
-    if _original_sigterm is None:
+    if not _sigterm_installed:
+        current = signal.getsignal(signal.SIGTERM)
+        # SIG_IGN: the program ignores SIGTERM, and must keep doing so (#266).
+        # None: a handler installed outside Python, which we cannot chain.
+        if current is signal.SIG_IGN or current is None:
+            return
         try:
-            _original_sigterm = signal.signal(signal.SIGTERM, _sigterm_handler)
+            signal.signal(signal.SIGTERM, _sigterm_handler)
         except ValueError:
-            _original_sigterm = None
+            return  # not the main thread
+        _prev_sigterm = current
+        _sigterm_installed = True
 
 
 def remove_hooks() -> None:
-    global _original_excepthook, _original_sigterm
+    global _original_excepthook, _sigterm_installed, _prev_sigterm
     if _original_excepthook is not None:
-        sys.excepthook = _original_excepthook
+        if sys.excepthook is _excepthook:
+            sys.excepthook = _original_excepthook
         _original_excepthook = None
-    if _original_sigterm is not None:
-        try:
-            signal.signal(signal.SIGTERM, _original_sigterm)
-        except ValueError:
-            pass
-        _original_sigterm = None
+    if _sigterm_installed:
+        # Only undo our own handler: one the program installed since attach()
+        # stays.
+        if signal.getsignal(signal.SIGTERM) is _sigterm_handler:
+            try:
+                signal.signal(signal.SIGTERM, _prev_sigterm)
+            except (ValueError, TypeError):
+                pass
+        _sigterm_installed = False
+        _prev_sigterm = None
     stop_panic()
 
 
