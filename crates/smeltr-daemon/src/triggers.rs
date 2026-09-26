@@ -9,10 +9,20 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerReason {
-    CrashReport { path: String },
-    MachException { target_pid: u32 },
-    MetalError { cb_id: u64, error_code: i64 },
-    DaemonPanic { message: String },
+    CrashReport {
+        path: String,
+        crashed_pid: Option<u32>,
+    },
+    MachException {
+        target_pid: u32,
+    },
+    MetalError {
+        cb_id: u64,
+        error_code: i64,
+    },
+    DaemonPanic {
+        message: String,
+    },
 }
 
 impl TriggerReason {
@@ -29,9 +39,12 @@ impl TriggerReason {
 /// Inspects a single event and returns a TriggerReason if it should fire.
 pub fn classify(ev: &Event) -> Option<TriggerReason> {
     match &ev.payload {
-        Payload::CrashReportEmitted { path, .. } => {
-            Some(TriggerReason::CrashReport { path: path.clone() })
-        }
+        Payload::CrashReportEmitted {
+            path, crashed_pid, ..
+        } => Some(TriggerReason::CrashReport {
+            path: path.clone(),
+            crashed_pid: *crashed_pid,
+        }),
         Payload::MachException { target_pid, .. } => Some(TriggerReason::MachException {
             target_pid: *target_pid,
         }),
@@ -52,11 +65,48 @@ pub fn classify(ev: &Event) -> Option<TriggerReason> {
 /// One flush snapshots the whole flight recorder (60 s), so a second one a
 /// few seconds later mostly re-writes the same events. Without a limit, a
 /// GPU watchdog that errors N in-flight command buffers wrote N full
-/// post-mortem sessions (#242). A dropped trigger loses nothing: its event
-/// is still in the ambient session and in the next flush's window.
+/// post-mortem sessions (#242). A dropped trigger loses no event — it is
+/// still in the session it was routed to — only the extra dump.
 pub const TRIGGER_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Rate limit for post-mortem triggers, keyed on [`TriggerReason::label`].
+impl TriggerReason {
+    /// The trigger recorded in the post-mortem's metadata (#267).
+    fn trigger(&self) -> smeltr_core::session::PostMortemTrigger {
+        let (reason, crash_report, pid) = match self {
+            Self::CrashReport { path, crashed_pid } => {
+                ("crash-report", Some(path.clone()), *crashed_pid)
+            }
+            Self::MachException { target_pid } => ("mach-exception", None, Some(*target_pid)),
+            Self::MetalError { .. } => ("metal-error", None, None),
+            Self::DaemonPanic { .. } => ("daemon-panic", None, None),
+        };
+        smeltr_core::session::PostMortemTrigger {
+            reason: reason.into(),
+            crash_report,
+            pid,
+        }
+    }
+
+    /// What the post-mortem rate limit counts as "the same reason" (#267).
+    /// Metal errors form one class: one GPU fault fails every in-flight
+    /// command buffer with different codes. Crashes are per process: crash
+    /// reports are system-wide, and an unrelated app crashing must not
+    /// suppress the recorded process's post-mortem.
+    fn gate_key(&self) -> String {
+        match self {
+            Self::CrashReport {
+                crashed_pid: Some(pid),
+                ..
+            } => format!("crash-report-{pid}"),
+            Self::CrashReport { .. } => "crash-report".into(),
+            Self::MachException { target_pid } => format!("mach-exception-{target_pid}"),
+            Self::MetalError { .. } => "metal-error".into(),
+            Self::DaemonPanic { .. } => "daemon-panic".into(),
+        }
+    }
+}
+
+/// Rate limit for post-mortem triggers, keyed on [`TriggerReason::gate_key`].
 pub struct TriggerGate {
     min_interval: std::time::Duration,
     last: std::collections::HashMap<String, std::time::Instant>,
@@ -72,13 +122,13 @@ impl TriggerGate {
 
     /// Whether `reason` may flush at `now`; records the flush if so.
     pub fn admit(&mut self, reason: &TriggerReason, now: std::time::Instant) -> bool {
-        let label = reason.label();
-        if let Some(prev) = self.last.get(&label) {
+        let key = reason.gate_key();
+        if let Some(prev) = self.last.get(&key) {
             if now.saturating_duration_since(*prev) < self.min_interval {
                 return false;
             }
         }
-        self.last.insert(label, now);
+        self.last.insert(key, now);
         true
     }
 }
@@ -137,11 +187,16 @@ pub fn flush_post_mortem_events(
     let now = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_default();
-    let toml_str = format!(
-        "session_id = \"{}\"\nstarted_rfc3339 = \"{}\"\nended_rfc3339 = \"{}\"\nhost = \"{}\"\nargv = [\"post-mortem:{}\"]\n",
-        meta.session_id, meta.started_rfc3339, now, meta.host, reason.label(),
-    );
-    std::fs::write(dir.join("metadata.toml"), toml_str)?;
+    // Through the regular serializer (#267): a hand-written TOML here gave
+    // post-mortems an undashed session id and no record of their trigger.
+    let meta = SessionMetadata {
+        ended_rfc3339: Some(now),
+        argv: vec![format!("post-mortem:{}", reason.label())],
+        name: None,
+        post_mortem: Some(reason.trigger()),
+        ..meta
+    };
+    smeltr_core::session::write_metadata(&dir, &meta)?;
     Ok(FlushSummary {
         session_dir: dir,
         event_count: events.len(),
@@ -174,19 +229,42 @@ mod tests {
         assert!(gate.admit(&metal_error(5), t0 + std::time::Duration::from_secs(31)));
     }
 
+    /// #267: one GPU fault fails every in-flight command buffer, the
+    /// culprit and its "innocent victims" with different error codes. Keyed
+    /// on the code, each code wrote its own full 60 s dump of the same
+    /// window (20 codes -> 20 post-mortems in under a second).
     #[test]
-    fn gate_keys_on_the_reason_label() {
+    fn metal_errors_share_one_gate_whatever_the_code() {
         let mut gate = TriggerGate::new(std::time::Duration::from_secs(30));
         let t0 = std::time::Instant::now();
         assert!(gate.admit(&metal_error(5), t0));
-        assert!(
-            gate.admit(&metal_error(6), t0),
-            "another error code is another reason"
-        );
-        let crash = TriggerReason::CrashReport {
-            path: "/a.ips".into(),
+        for code in 1..20 {
+            assert!(!gate.admit(&metal_error(code), t0), "code {code}");
+        }
+    }
+
+    /// #267: crash reports are system-wide. Keyed on the bare label, any
+    /// app crashing within 30 s before the recorded process suppressed the
+    /// recorded process's post-mortem.
+    #[test]
+    fn crash_triggers_are_gated_per_crashed_process() {
+        let crash = |pid| TriggerReason::CrashReport {
+            path: format!("/{pid}.ips"),
+            crashed_pid: Some(pid),
         };
-        assert!(gate.admit(&crash, t0));
+        let mach = |pid| TriggerReason::MachException { target_pid: pid };
+        let mut gate = TriggerGate::new(std::time::Duration::from_secs(30));
+        let t0 = std::time::Instant::now();
+        assert!(gate.admit(&crash(100), t0));
+        assert!(gate.admit(&crash(200), t0), "another process crashed");
+        assert!(!gate.admit(&crash(100), t0), "same process again");
+        assert!(gate.admit(&mach(100), t0));
+        assert!(gate.admit(&mach(200), t0));
+        assert!(!gate.admit(&mach(200), t0));
+        assert!(
+            gate.admit(&metal_error(5), t0),
+            "other reasons are independent"
+        );
     }
 
     use super::*;
@@ -313,6 +391,32 @@ mod tests {
             .contains("metal-error-14"));
         let evs = smeltr_core::reader::read_events(&summary.session_dir).unwrap();
         assert_eq!(evs.len(), 5);
+    }
+
+    /// #267: a post-mortem did not record what triggered it, so
+    /// `get_crash_report` returned whichever crash in the 60 s snapshot was
+    /// newest — any app on the machine. Its metadata was also written by
+    /// hand, with an undashed session id.
+    #[test]
+    #[serial]
+    fn post_mortem_metadata_records_its_trigger() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reason = TriggerReason::CrashReport {
+            path: "/r/python-1.ips".into(),
+            crashed_pid: Some(4242),
+        };
+        let summary = flush_post_mortem_events(Vec::new(), &reason).unwrap();
+        let meta = smeltr_core::reader::read_metadata(&summary.session_dir).unwrap();
+        let pm = meta.post_mortem.expect("post-mortem trigger recorded");
+        assert_eq!(pm.reason, "crash-report");
+        assert_eq!(pm.crash_report.as_deref(), Some("/r/python-1.ips"));
+        assert_eq!(pm.pid, Some(4242));
+        let raw = std::fs::read_to_string(summary.session_dir.join("metadata.toml")).unwrap();
+        assert!(
+            raw.contains(&meta.session_id.0.hyphenated().to_string()),
+            "session id written as a dashed UUID, like every other session: {raw}"
+        );
     }
 
     #[test]
