@@ -29,7 +29,10 @@ pub fn open_for_read(path: &Path) -> Result<RingReader, RingError> {
     if hdr.version != RING_VERSION {
         return Err(RingError::BadVersion(hdr.version, RING_VERSION));
     }
-    if !hdr.capacity.is_power_of_two() {
+    // The capacity comes from the file: a corrupt or truncated header must
+    // not send the reader past the mapping.
+    let data_len = (mmap.len() - RING_HEADER_BYTES) as u64;
+    if !hdr.capacity.is_power_of_two() || hdr.capacity > data_len {
         return Err(RingError::BadCapacity(hdr.capacity));
     }
     Ok(RingReader {

@@ -4,11 +4,13 @@
 #include <fcntl.h>
 #include <mach/mach_time.h>
 #include <os/lock.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -25,22 +27,58 @@ struct smeltr_ring {
      * completion queues and alloc/free hooks concurrently; unsynchronized
      * writers tear frames and poison the stream (#113). */
     os_unfair_lock lock;
+    /* Each ring has exactly one writing process (#264). `smeltr record`
+     * puts the hook and the ring path in the child's environment, so every
+     * descendant (launchers, workers) loads the hook on the same ring, and
+     * the lock above is per process: two writers raced on `head` and
+     * overwrote each other's frames. The first process takes an exclusive
+     * flock on the ring; every other one creates its own `<ring>.<pid>`,
+     * which the daemon drains too. A forked child writes nowhere. */
+    int writable;
+    struct smeltr_ring *next_open;
 };
+
+/* Every open ring, for the fork handler. */
+static smeltr_ring_t *g_open_rings = NULL;
+static os_unfair_lock g_open_rings_lock = OS_UNFAIR_LOCK_INIT;
+static pthread_once_t g_atfork_once = PTHREAD_ONCE_INIT;
+
+/* A forked child shares the parent's ring mapping and a copy of a writer
+ * lock another thread may have held at fork time. It must never write:
+ * reset the lock and mark the ring read-only. (Metal is not usable after
+ * fork anyway.) */
+static void ring_atfork_child(void) {
+    g_open_rings_lock = OS_UNFAIR_LOCK_INIT;
+    for (smeltr_ring_t *r = g_open_rings; r; r = r->next_open) {
+        r->lock = OS_UNFAIR_LOCK_INIT;
+        r->writable = 0;
+    }
+}
+
+static void ring_register_atfork(void) {
+    pthread_atfork(NULL, NULL, ring_atfork_child);
+}
 
 static inline _Atomic uint64_t *as_atomic64(void *p) { return (_Atomic uint64_t *)p; }
 static inline size_t round_align(size_t n) {
     return (n + (SMELTR_FRAME_ALIGN - 1)) & ~(size_t)(SMELTR_FRAME_ALIGN - 1);
 }
 
-smeltr_ring_t *smeltr_ring_open(const char *path) {
-    int fd = open(path, O_RDWR);
-    if (fd < 0) return NULL;
+/* Map an open ring file and validate its header. Takes ownership of fd. */
+static smeltr_ring_t *ring_map(int fd) {
     struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); return NULL; }
+    if (fstat(fd, &st) != 0 || (size_t)st.st_size < sizeof(smeltr_ring_header_t)) {
+        close(fd); return NULL;
+    }
     void *map = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) { close(fd); return NULL; }
     smeltr_ring_header_t *hdr = (smeltr_ring_header_t *)map;
-    if (hdr->magic != SMELTR_RING_MAGIC || hdr->version != SMELTR_RING_VERSION) {
+    /* The capacity comes from the file: a corrupt or truncated header must
+     * not send the writer outside the mapping. */
+    uint64_t cap = hdr->capacity;
+    if (hdr->magic != SMELTR_RING_MAGIC || hdr->version != SMELTR_RING_VERSION
+        || cap == 0 || (cap & (cap - 1)) != 0
+        || cap > (uint64_t)st.st_size - sizeof(smeltr_ring_header_t)) {
         munmap(map, (size_t)st.st_size); close(fd); return NULL;
     }
     smeltr_ring_t *r = (smeltr_ring_t *)calloc(1, sizeof(*r));
@@ -48,16 +86,64 @@ smeltr_ring_t *smeltr_ring_open(const char *path) {
     r->fd = fd;
     r->map = (uint8_t *)map;
     r->map_len = (size_t)st.st_size;
-    r->capacity = hdr->capacity;
-    r->mask = r->capacity - 1;
+    r->capacity = cap;
+    r->mask = cap - 1;
     r->hdr = hdr;
     r->data = r->map + sizeof(smeltr_ring_header_t);
     r->lock = OS_UNFAIR_LOCK_INIT;
+    r->writable = 1;
+    return r;
+}
+
+/* Create `<main>.<pid>` with the given capacity. Built as `<…>.tmp` and
+ * renamed once its header is written, so the daemon never opens a
+ * half-initialised ring. */
+static smeltr_ring_t *ring_create_sibling(const char *main_path, uint64_t cap) {
+    char path[1024], tmp[1040];
+    int n = snprintf(path, sizeof(path), "%s.%d", main_path, (int)getpid());
+    if (n < 0 || (size_t)n >= sizeof(path)) return NULL;
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int fd = open(tmp, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return NULL;
+    smeltr_ring_header_t hdr = { SMELTR_RING_MAGIC, SMELTR_RING_VERSION, cap, 0, 0, 0 };
+    if (ftruncate(fd, (off_t)(sizeof(hdr) + cap)) != 0
+        || pwrite(fd, &hdr, sizeof(hdr), 0) != (ssize_t)sizeof(hdr)
+        || flock(fd, LOCK_EX | LOCK_NB) != 0
+        || rename(tmp, path) != 0) {
+        close(fd); unlink(tmp); return NULL;
+    }
+    return ring_map(fd);
+}
+
+smeltr_ring_t *smeltr_ring_open(const char *path) {
+    /* O_CLOEXEC: the fd must not leak into processes the app execs; they
+     * load the hook and open the ring themselves. */
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    smeltr_ring_t *r = ring_map(fd);
+    if (!r) return NULL;
+    if (flock(r->fd, LOCK_EX | LOCK_NB) != 0) {
+        /* Another hooked process writes the main ring: get our own. */
+        uint64_t cap = r->capacity;
+        smeltr_ring_close(r);
+        r = ring_create_sibling(path, cap);
+        if (!r) return NULL;
+    }
+    pthread_once(&g_atfork_once, ring_register_atfork);
+    os_unfair_lock_lock(&g_open_rings_lock);
+    r->next_open = g_open_rings;
+    g_open_rings = r;
+    os_unfair_lock_unlock(&g_open_rings_lock);
     return r;
 }
 
 void smeltr_ring_close(smeltr_ring_t *r) {
     if (!r) return;
+    os_unfair_lock_lock(&g_open_rings_lock);
+    for (smeltr_ring_t **p = &g_open_rings; *p; p = &(*p)->next_open) {
+        if (*p == r) { *p = r->next_open; break; }
+    }
+    os_unfair_lock_unlock(&g_open_rings_lock);
     if (r->map) munmap(r->map, r->map_len);
     if (r->fd >= 0) close(r->fd);
     free(r);
@@ -116,7 +202,7 @@ static void write_frame(smeltr_ring_t *r, uint32_t kind, uint64_t ts,
                         const uint8_t *payload, size_t payload_len) {
     if (!r) return;
     os_unfair_lock_lock(&r->lock);
-    write_frame_locked(r, kind, ts, payload, payload_len);
+    if (r->writable) write_frame_locked(r, kind, ts, payload, payload_len);
     os_unfair_lock_unlock(&r->lock);
 }
 

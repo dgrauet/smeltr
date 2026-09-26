@@ -235,7 +235,7 @@ pub async fn run(
         let _ = child.kill();
         let _ = child.wait();
         if let Some((_, ring_path)) = &hook_decision {
-            let _ = std::fs::remove_file(ring_path);
+            smeltr_metal_ring::remove_ring_family(ring_path);
         }
         anyhow::bail!("daemon refused AttachScopedProbes: {resp:?}");
     }
@@ -270,7 +270,7 @@ pub async fn run(
                     term_signal: None,
                 })
                 .await;
-            let _ = std::fs::remove_file(ring_path);
+            smeltr_metal_ring::remove_ring_family(ring_path);
             anyhow::bail!("daemon refused AttachMetalHook: {resp:?}");
         }
     }
@@ -303,7 +303,7 @@ pub async fn run(
         .await;
 
     if let Some((_, ring_path)) = hook_decision {
-        let _ = std::fs::remove_file(ring_path);
+        smeltr_metal_ring::remove_ring_family(&ring_path);
     }
 
     Ok(exit_code)

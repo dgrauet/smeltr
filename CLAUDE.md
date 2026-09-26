@@ -119,7 +119,12 @@ CBOR length-prefixed frames over a Unix socket. See
 - `SMELTR_SOCKET` — daemon socket path (default: `$XDG_RUNTIME_DIR` →
   `$TMPDIR` → `/tmp`, + `/smeltr.sock`; on macOS `XDG_RUNTIME_DIR` is unset
   so `$TMPDIR` wins).
-- `SMELTR_RING_PATH` — metal-hook mmap ring file (set by `smeltr record`).
+- `SMELTR_RING_PATH` — metal-hook mmap ring file (set by `smeltr record`). Every descendant
+  of the recorded command inherits it with the hook, but one process owns the ring: the
+  first to write a frame takes an exclusive `flock` for its lifetime, the others stay
+  silent (two writers used to overwrite each other's frames — #264). A launcher that never
+  touches Metal (`uv run`, a wrapper script) therefore never takes it from its child; a
+  forked child never owns it.
 - `SMELTR_DYLIB` — override path to `libmetal_hook.dylib` (dev override; smeltr ships an embedded copy by default).
 - `SMELTR_HOOK_DISABLE=1` — kill switch for the metal-hook dylib.
 - `SMELTR_HOOK_NO_OPS=1` — disable op-level GPU capture (per-kernel timing, `MetalCbOps`);
@@ -130,6 +135,9 @@ CBOR length-prefixed frames over a Unix socket. See
   `make -C metal-hook` (CI, cross-compile).
 - `SMELTR_HOOK_FORCE_OS_MAJOR=<n>` — simulate a macOS major version
   (test override; on macOS < 14 the hook auto-skips).
+- `SMELTR_HOOK_TEST_INSTALL_DELAY_US=<n>` — test override: sleep between the hook's
+  "dealloc swizzle already installed?" check and the install, making the install race
+  deterministic (#264; `smeltr-metal-harness/tests/dealloc_install_race.rs`).
 - `SMELTR_HOOK_SAMPLING_RETRY_MS=<n>` — backoff before retrying stage/dispatch
   counter sampling after it auto-disabled on sustained sample-buffer alloc
   failures (default 30000; the disable used to be permanent — #113).

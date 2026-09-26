@@ -1,7 +1,51 @@
 #[cfg(target_os = "macos")]
 fn main() {
     use metal::*;
+    // SMELTR_HARNESS_LAUNCHER=1: behave like a Python launcher under
+    // `smeltr record` (the sidecar autoload imports mlx, which allocates a
+    // Metal heap): allocate one buffer, then run this same harness as a
+    // child (which inherits the hook and the ring) and wait for it.
+    if std::env::var("SMELTR_HARNESS_LAUNCHER").as_deref() == Ok("1") {
+        let device = Device::system_default().expect("no Metal device");
+        let _held = device.new_buffer(4096, MTLResourceOptions::StorageModeShared);
+        let exe = std::env::current_exe().expect("current exe");
+        let status = std::process::Command::new(exe)
+            .env_remove("SMELTR_HARNESS_LAUNCHER")
+            .status()
+            .expect("spawn child harness");
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
     let device = Device::system_default().expect("no Metal device");
+
+    // SMELTR_HARNESS_RACE_THREADS=<n>: n threads make the process's first
+    // buffer allocations at the same instant, then exit. The hook installs
+    // its dealloc swizzle lazily on the first allocation, so this is the
+    // install race (#264).
+    if let Some(n) = std::env::var("SMELTR_HARNESS_RACE_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(n));
+        let workers: Vec<_> = (0..n)
+            .map(|_| {
+                let device = device.clone();
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    for _ in 0..4 {
+                        drop(device.new_buffer(4096, MTLResourceOptions::StorageModeShared));
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().expect("race worker panicked");
+        }
+        println!("race done");
+        return;
+    }
+
     let queue = device.new_command_queue();
 
     // Buffer alloc — should produce a BufferAlloc event.

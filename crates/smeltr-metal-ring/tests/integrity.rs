@@ -109,3 +109,22 @@ fn reader_resyncs_to_head_on_implausible_len() {
         "reader must have resynced to head"
     );
 }
+
+/// A header whose capacity exceeds the file (corrupt or truncated ring)
+/// must be refused: the reader would otherwise index past the mapping and
+/// fault inside the long-lived daemon (#264).
+#[test]
+fn capacity_larger_than_the_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ring.bin");
+    drop(smeltr_metal_ring::create_ring(&path, 1 << 12).unwrap());
+    let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    // capacity is the u64 at offset 8 of the ring header.
+    f.seek(SeekFrom::Start(8)).unwrap();
+    f.write_all(&(1u64 << 20).to_le_bytes()).unwrap();
+    drop(f);
+    assert!(matches!(
+        smeltr_metal_ring::open_for_read(&path),
+        Err(smeltr_metal_ring::RingError::BadCapacity(_))
+    ));
+}

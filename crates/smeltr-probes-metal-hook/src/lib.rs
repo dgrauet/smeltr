@@ -53,65 +53,108 @@ impl Probe for MetalHookProbe {
             waited += Duration::from_millis(100);
         }
 
-        let mut reader: RingReader =
-            open_for_read(&path).map_err(|e| ProbeError::Transient(format!("open ring: {e}")))?;
+        let mut rings = vec![RingDrain::open(path.clone())?];
 
         let mut interval = tokio::time::interval(Duration::from_millis(10)); // 100 Hz
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Corrupt frames are skipped by the reader (it always makes
-        // progress), so we keep draining; surface the corruption in-session
-        // and log it, throttled — an unthrottled warn here once spammed the
-        // daemon log at 100 Hz for hours and filled the disk (#113).
-        let mut decode_errors: u64 = 0;
-        let mut last_dropped: u64 = 0;
-
+        let mut tick: u64 = 0;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = interval.tick() => {}
             }
-            loop {
-                match reader.next() {
-                    Ok(Some(ev)) => {
-                        let payload = translate::frame_to_payload(ev.frame);
-                        // The hook's own stamp (mach_absolute_time in ns),
-                        // not the drain time (#244).
-                        sink.emit_at(Source::MetalHook, Some(pid), ev.ts_mono_ns, payload);
+            // Siblings written by further hooked processes (#264) can
+            // appear at any time; look for new ones every 250 ms.
+            if tick.is_multiple_of(25) {
+                for p in smeltr_metal_ring::ring_family(&path) {
+                    if rings.iter().any(|r| r.path == p) {
+                        continue;
                     }
-                    Ok(None) => break,
-                    Err(e) => {
-                        decode_errors += 1;
-                        if decode_errors == 1 || decode_errors.is_multiple_of(1000) {
-                            tracing::warn!(
-                                error = %e,
-                                count = decode_errors,
-                                "ring decode error; frame skipped"
-                            );
-                            sink.emit(
-                                Source::MetalHook,
-                                Some(pid),
-                                smeltr_core::event::Payload::MetalHookSkipped {
-                                    reason: format!("ring decode error (#{decode_errors}): {e}"),
-                                },
-                            );
-                        }
+                    match RingDrain::open(p) {
+                        Ok(r) => rings.push(r),
+                        // Retried at the next scan.
+                        Err(e) => tracing::debug!(error = %e, "sibling ring not readable yet"),
                     }
                 }
             }
-            // Frames dropped by the writer (ring full) never appear in the
-            // stream; surface the header counter delta in-session.
-            let dropped = reader.header_snapshot().dropped;
-            if dropped > last_dropped {
-                sink.emit(
-                    Source::MetalHook,
-                    Some(pid),
-                    smeltr_core::event::Payload::MetalHookDropped {
-                        count: dropped - last_dropped,
-                    },
-                );
-                last_dropped = dropped;
+            tick += 1;
+            for ring in &mut rings {
+                ring.drain(&sink, pid);
             }
+        }
+    }
+}
+
+/// One ring file being drained.
+struct RingDrain {
+    path: PathBuf,
+    reader: RingReader,
+    decode_errors: u64,
+    last_dropped: u64,
+}
+
+impl RingDrain {
+    fn open(path: PathBuf) -> Result<Self, ProbeError> {
+        let reader =
+            open_for_read(&path).map_err(|e| ProbeError::Transient(format!("open ring: {e}")))?;
+        Ok(Self {
+            path,
+            reader,
+            decode_errors: 0,
+            last_dropped: 0,
+        })
+    }
+
+    /// Emit every frame written since the last drain.
+    ///
+    /// Corrupt frames are skipped by the reader (it always makes progress),
+    /// so we keep draining; surface the corruption in-session and log it,
+    /// throttled — an unthrottled warn here once spammed the daemon log at
+    /// 100 Hz for hours and filled the disk (#113).
+    fn drain(&mut self, sink: &SharedSink, pid: u32) {
+        loop {
+            match self.reader.next() {
+                Ok(Some(ev)) => {
+                    let payload = translate::frame_to_payload(ev.frame);
+                    // The hook's own stamp (mach_absolute_time in ns), not
+                    // the drain time (#244).
+                    sink.emit_at(Source::MetalHook, Some(pid), ev.ts_mono_ns, payload);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    self.decode_errors += 1;
+                    let n = self.decode_errors;
+                    if n == 1 || n.is_multiple_of(1000) {
+                        tracing::warn!(
+                            error = %e,
+                            count = n,
+                            ring = %self.path.display(),
+                            "ring decode error; frame skipped"
+                        );
+                        sink.emit(
+                            Source::MetalHook,
+                            Some(pid),
+                            smeltr_core::event::Payload::MetalHookSkipped {
+                                reason: format!("ring decode error (#{n}): {e}"),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        // Frames dropped by the writer (ring full) never appear in the
+        // stream; surface the header counter delta in-session.
+        let dropped = self.reader.header_snapshot().dropped;
+        if dropped > self.last_dropped {
+            sink.emit(
+                Source::MetalHook,
+                Some(pid),
+                smeltr_core::event::Payload::MetalHookDropped {
+                    count: dropped - self.last_dropped,
+                },
+            );
+            self.last_dropped = dropped;
         }
     }
 }
@@ -272,6 +315,50 @@ mod tests {
             )),
             "writer drops must be surfaced, got {evs:?}"
         );
+    }
+
+    /// #264: every hooked process after the first writes its own
+    /// `<ring>.<pid>`, possibly long after the recording started. The probe
+    /// drains those too, under the recorded pid (the router sends events to
+    /// the session by that pid).
+    #[tokio::test]
+    async fn probe_drains_sibling_rings_that_appear_later() {
+        use smeltr_core::event::Payload;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("abc.ring");
+        {
+            let mut w = create_ring(&path, 1 << 16).unwrap();
+            w.write_buffer_free(1, 0xaaaa).unwrap();
+        }
+        let sibling = dir.path().join("abc.ring.4321");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let mut w = create_ring(&sibling, 1 << 16).unwrap();
+            w.write_buffer_free(2, 0xbbbb).unwrap();
+            w.write_buffer_free(3, 0xcccc).unwrap();
+        });
+        let sink: Arc<CapturingSink> = Arc::default();
+        let mut probe = MetalHookProbe::new(1234, path);
+        let cancel = CancellationToken::new();
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            c2.cancel();
+        });
+        let sink_dyn: SharedSink = sink.clone();
+        probe.run(sink_dyn, cancel).await.unwrap();
+
+        let evs = sink.events.lock().unwrap();
+        let freed: Vec<u64> = evs
+            .iter()
+            .filter_map(|(_, _, p)| match p {
+                Payload::MetalBufferFree { buffer_id } => Some(*buffer_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(freed, vec![0xaaaa, 0xbbbb, 0xcccc]);
+        assert!(evs.iter().all(|(_, pid, _)| *pid == Some(1234)));
     }
 
     #[tokio::test]
