@@ -6,6 +6,7 @@ that the mx.eval hook can snapshot into MlxEvalEntered.module_stack.
 from __future__ import annotations
 
 import functools
+import itertools
 import logging
 import os
 import threading
@@ -16,8 +17,9 @@ from smeltr._api import _emit as _api_emit
 _log = logging.getLogger("smeltr.modules")
 
 _tls = threading.local()
-_call_counter = 0
-_call_counter_lock = threading.Lock()
+# itertools.count: next() is atomic under the GIL, so ids need no lock — a
+# lock another thread holds at fork() stays held in the child forever (#266).
+_call_counter = itertools.count(1)
 _installed = False
 _install_lock = threading.Lock()
 
@@ -38,10 +40,7 @@ def _emit(payload: dict[str, Any]) -> None:
 
 
 def _next_call_id() -> int:
-    global _call_counter
-    with _call_counter_lock:
-        _call_counter += 1
-        return _call_counter
+    return next(_call_counter)
 
 
 def _stack() -> list[dict[str, Any]]:
@@ -291,6 +290,16 @@ def _reset_for_tests() -> None:
     """Reset all module-level state. For tests only."""
     global _call_counter
     uninstall()
-    with _call_counter_lock:
-        _call_counter = 0
+    _call_counter = itertools.count(1)
     _tls.stack = []
+
+
+def _after_fork_in_child() -> None:
+    # A lock held by another thread at fork() would stay held in the child.
+    global _install_lock, _wrapped_classes_lock
+    _install_lock = threading.Lock()
+    _wrapped_classes_lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)

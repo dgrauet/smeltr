@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 import threading
@@ -335,15 +336,12 @@ def stop_polling() -> None:
 # ---- mx.core.eval decoration ----
 
 _eval_decorated = False
-_eval_call_counter = 0
-_eval_call_counter_lock = threading.Lock()
+# Lock-free ids: see smeltr._modules._call_counter.
+_eval_call_counter = itertools.count(1)
 
 
 def _next_call_id() -> int:
-    global _eval_call_counter
-    with _eval_call_counter_lock:
-        _eval_call_counter += 1
-        return _eval_call_counter
+    return next(_eval_call_counter)
 
 
 def decorate_eval() -> None:
@@ -424,3 +422,15 @@ def _undecorate_eval_for_tests() -> None:
     current = getattr(mx_core, "eval", None)
     if current is not None and getattr(current, "_smeltr_wrapped", False):
         mx_core.eval = current._smeltr_original
+
+
+def _after_fork_in_child() -> None:
+    # A lock held by another thread at fork() would stay held in the child
+    # (#266). The poller thread does not survive fork() either.
+    global _tracked_lock, _poll_thread
+    _tracked_lock = threading.RLock()
+    _poll_thread = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)

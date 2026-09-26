@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import platform
 import sys
 import threading
@@ -19,6 +20,17 @@ _client: _Client | None = None
 # Re-entrant: the SIGTERM handler calls detach() on whatever thread the
 # signal interrupted, possibly one inside attach() holding this lock (#239).
 _client_lock = threading.RLock()
+
+
+def _after_fork_in_child() -> None:
+    # A lock held by another thread at fork() would stay held in the child
+    # (#266); the client resets its own state (smeltr._client).
+    global _client_lock
+    _client_lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 _scope_token: str | None = None
 
 
