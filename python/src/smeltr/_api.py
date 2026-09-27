@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import logging
 import os
 import platform
 import sys
@@ -12,9 +11,8 @@ import time
 from collections.abc import Generator
 
 from smeltr._client import ClientError, _Client
+from smeltr._log import warning
 from smeltr._proto import SOURCE_PYTHON_SIDECAR
-
-_log = logging.getLogger("smeltr")
 
 _client: _Client | None = None
 # Re-entrant: the SIGTERM handler calls detach() on whatever thread the
@@ -31,38 +29,60 @@ def _after_fork_in_child() -> None:
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_after_fork_in_child)
+
 _scope_token: str | None = None
 
 
 def _detect_mlx_version() -> str | None:
     """Returns the installed MLX version, or None if MLX is unavailable.
 
-    MLX 0.30+ removed `mlx.__version__`; fall back to importlib.metadata
-    which works for any pip-installed package.
+    Imports neither mlx (whose core loads the Metal backend) nor
+    importlib.metadata (~40 ms): this runs in every process autoload attaches
+    to (#266). MLX 0.30+ has no `__version__`, so the version comes from the
+    package's `.dist-info` on sys.path.
     """
-    try:
-        import mlx  # noqa: F401  # confirm package is importable first
-    except ImportError:
-        return None
-    try:
-        import importlib.metadata as _md
+    core = sys.modules.get("mlx.core")
+    version = getattr(core, "__version__", None)
+    if isinstance(version, str):
+        return version
+    for entry in sys.path:
+        try:
+            names = os.listdir(entry or ".")
+        except OSError:
+            continue
+        for name in names:
+            if not (name.startswith("mlx-") and name.endswith(".dist-info")):
+                continue
+            try:
+                with open(os.path.join(entry, name, "METADATA"), encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("Name:") and line.split(":", 1)[1].strip() != "mlx":
+                            break
+                        if line.startswith("Version:"):
+                            return line.split(":", 1)[1].strip()
+                        if not line.strip():
+                            break
+            except OSError:
+                continue
+    return None
 
-        return _md.version("mlx")
-    except Exception:  # PackageNotFoundError or other
-        pass
-    try:
-        import mlx as _mlx_module
 
-        return getattr(_mlx_module, "__version__", None)
-    except ImportError:
-        return None
+def attach(
+    client_name: str = "smeltr-py",
+    timeout_s: float = 2.0,
+    poll_hz: float = 1.0,
+    *,
+    _autoload: bool = False,
+) -> None:
+    """Connect to smeltrd and instrument MLX.
 
-
-def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0, poll_hz: float = 1.0) -> None:
-    """Connect to smeltrd. poll_hz is wired up in a later task; accept it now
-    so callers don't need to change later."""
+    Raises ClientError when the daemon cannot be reached; nothing after the
+    connection raises. MLX is instrumented (memory polling, per-module
+    scopes) when the program imports it — right away if it already has —
+    and never imported by the sidecar itself (#266). `_autoload` also wraps
+    `mx.eval` and the model loaders (mlx, safetensors) the same way.
+    """
     global _client, _scope_token
-    import os
 
     _scope_token = os.environ.get("SMELTR_SCOPE_TOKEN")
     with _client_lock:
@@ -84,19 +104,43 @@ def attach(client_name: str = "smeltr-py", timeout_s: float = 2.0, poll_hz: floa
         # Connected: whatever this one event hit, the hooks below must still
         # go in, or `_client` is left set with nothing installed (#266).
         pass
-    from smeltr._mlx import start_polling
-    from smeltr._modules import install as _install_modules
     from smeltr._shutdown import install_hooks
 
-    for install in (lambda: start_polling(poll_hz), install_hooks, _install_modules):
-        try:
-            install()
-        except Exception as e:
-            _log.warning("smeltr: %s failed: %s", getattr(install, "__name__", install), e)
+    _guarded(install_hooks)
+    _install_on_import(poll_hz, autoload=_autoload)
+
+
+def _guarded(install) -> None:
+    try:
+        install()
+    except Exception as e:
+        warning("smeltr", "smeltr: %s failed: %s", getattr(install, "__name__", install), e)
+
+
+def _install_on_import(poll_hz: float, *, autoload: bool) -> None:
+    from smeltr import _mlx, _modelload, _modules
+    from smeltr._importhook import when_imported
+
+    def on_mlx_core(_module) -> None:
+        if autoload:
+            _guarded(_mlx.decorate_eval)
+            _guarded(_modelload._wrap_mlx_core_load)
+        _guarded(lambda: _mlx.start_polling(poll_hz))
+
+    when_imported("mlx.core", on_mlx_core)
+    when_imported("mlx.nn", lambda _m: _modules.install())
+    if autoload:
+        when_imported("safetensors", lambda _m: _modelload._wrap_safetensors_safe_open())
+        when_imported(
+            "safetensors.torch", lambda _m: _modelload._wrap_safetensors_torch_load_file()
+        )
 
 
 def detach() -> None:
     """Close the daemon connection. Idempotent."""
+    from smeltr._importhook import cancel_all
+
+    cancel_all()
     from smeltr._modules import uninstall as _uninstall_modules
 
     _uninstall_modules()

@@ -7,14 +7,12 @@ from __future__ import annotations
 
 import functools
 import itertools
-import logging
 import os
 import threading
 from typing import Any
 
 from smeltr._api import _emit as _api_emit
-
-_log = logging.getLogger("smeltr.modules")
+from smeltr._log import warning
 
 _tls = threading.local()
 # itertools.count: next() is atomic under the GIL, so ids need no lock — a
@@ -207,7 +205,7 @@ def install() -> None:
         try:
             import mlx.nn as nn
         except ImportError:
-            _log.warning("mlx.nn not importable - module tracking disabled")
+            warning("smeltr.modules", "mlx.nn not importable - module tracking disabled")
             return
 
         # Wrap all currently known subclasses.

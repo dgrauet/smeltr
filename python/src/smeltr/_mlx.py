@@ -157,6 +157,16 @@ def snapshot() -> None:
         pass
 
 
+def _loaded_mlx_core() -> Any | None:
+    """mlx.core if the program imported it, else None.
+
+    Reads never import it: `import mlx.core` loads the Metal backend, and a
+    process that does not use MLX (a launcher under `smeltr record`) must
+    not become a Metal process because of the sidecar (#266).
+    """
+    return sys.modules.get("mlx.core")
+
+
 def _introspect_mlx_streams() -> set[str]:
     """Returns the names of MLX streams discoverable via mlx.core factories.
 
@@ -166,12 +176,11 @@ def _introspect_mlx_streams() -> set[str]:
     per-stream queue depth, so this is purely an enumeration of which
     streams exist.
 
-    Returns an empty set if mlx is not importable or none of the factories
-    exist.
+    Returns an empty set if the program has not imported mlx.core or none
+    of the factories exist.
     """
-    try:
-        import mlx.core as mx_core
-    except ImportError:
+    mx_core = _loaded_mlx_core()
+    if mx_core is None:
         return set()
     out: set[str] = set()
     for factory_name in ("default_stream", "cpu_stream", "gpu_stream"):
@@ -207,11 +216,11 @@ def _get_mlx_memory_api() -> Any | None:
     accessors (kept reachable via `_get_mx_metal` for back-compat with
     existing tests).
 
-    Returns None if mlx is not importable or has no memory accessors.
+    Returns None if the program has not imported mlx.core or it has no
+    memory accessors.
     """
-    try:
-        import mlx.core as mx_core
-    except ImportError:
+    mx_core = _loaded_mlx_core()
+    if mx_core is None:
         return None
     if hasattr(mx_core, "get_active_memory"):
         return mx_core
@@ -224,9 +233,8 @@ def _get_mx_metal() -> Any | None:
     Kept for backward compatibility with existing tests that monkeypatch
     this function. New code should prefer `_get_mlx_memory_api`.
     """
-    try:
-        import mlx.core as mx_core
-    except ImportError:
+    mx_core = _loaded_mlx_core()
+    if mx_core is None:
         return None
     legacy = getattr(mx_core, "metal", None)
     if legacy is not None and hasattr(legacy, "get_active_memory"):

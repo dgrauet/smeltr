@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import inspect
 import os
 from collections.abc import Callable, Generator
 from typing import Any, TypeVar, cast
@@ -140,6 +139,8 @@ def _scope_cm(name: str, fields: dict[str, Any] | None = None) -> Generator[None
 
 def _scope_decorator(name: str, fields: dict[str, Any] | None = None) -> Callable[[F], F]:
     def decorator(fn: F) -> F:
+        import inspect  # ~8 ms to import: only when decorating
+
         if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
             raise TypeError(
                 f"smeltr.scope() decorator does not support async functions "

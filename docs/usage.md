@@ -556,10 +556,12 @@ pip install -e /path/to/smeltr/python/           # or '.../python/[mlx]'
 
 **How auto-attach works:** installing the package drops a
 `smeltr-autoload.pth` into `site-packages`. At interpreter startup it
-imports `smeltr._autoload`, which attaches only when `SMELTR_AUTOLOAD=1`
-is present in the environment — and `smeltr record` sets exactly that
-variable in the child it spawns. Any other Python invocation (pytest,
-notebooks, unrelated tools) is untouched. No code change is needed in the
+imports `smeltr._autoload` only when `SMELTR_AUTOLOAD=1` is present in the
+environment — and `smeltr record` sets exactly that variable in the child
+it spawns. Any other Python invocation (pytest, notebooks, unrelated tools)
+is untouched and pays nothing. MLX is instrumented when the program
+imports it; the sidecar never imports it itself, so a launcher (`uv run`,
+a wrapper script) does not load the Metal backend. No code change is needed in the
 target program; calling `smeltr.attach()` manually is only for processes
 *not* launched via `smeltr record` (always-on mode).
 

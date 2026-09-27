@@ -165,7 +165,14 @@ CBOR length-prefixed frames over a Unix socket. See
   ML proxy machinery crashes if it is).
 - `SMELTR_AUTOLOAD=1` — set ONLY by `smeltr record` in the child env: the sidecar's `.pth`
   hook attaches automatically, no code change. Unset by default, so unrelated Python
-  processes (pytest, notebooks) never attach.
+  processes (pytest, notebooks) never attach — and the `.pth` then imports nothing. The
+  sidecar never imports `mlx` itself (`import mlx.core` allocates a Metal heap, which made
+  a launcher look like a Metal process — #266): mlx/safetensors instrumentation is
+  installed by `smeltr._importhook.when_imported` once the program imports them, and
+  every read of MLX state goes through `_mlx._loaded_mlx_core()` (`sys.modules`, never an
+  import). Emits are queued and sent by a background thread (never block the program);
+  overflow is dropped, counted and reported as a `smeltr: sidecar dropped events` Mark;
+  the Emit carries `at_uptime_raw_ns` so the daemon dates the event when it happened.
 - `SMELTR_MODULES_DISABLE=1` — the sidecar skips wrapping `mlx.nn.Module.__call__` (no
   per-module scopes); explicit `smeltr.scope(...)` still works.
 - `SMELTR_DIAGNOSTIC_REPORTS_DIR` — test override: replaces the DiagnosticReports directories
