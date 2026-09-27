@@ -311,7 +311,7 @@ smeltr export ltx2-baseline --format chrome-trace --output trace.json
 
 Equivalent paths:
 
-- **CLI:** `smeltr export <session-ref> [--format chrome-trace|json] [--output PATH]`
+- **CLI:** `smeltr export <session-ref> [--format chrome-trace|json] [--output PATH] [--force]` — never writes inside the sessions store; an existing file is replaced only with `--force` (#287)
   (default format chrome-trace, default output `<short_id>.json`, use `-` for stdout).
 - **MCP:** `export_session(session, format, output_path, overwrite)` writes the
   file and returns its path. `output_path` must be absolute, its directory

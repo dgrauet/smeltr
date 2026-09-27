@@ -12,8 +12,30 @@ pub fn run(
     last: bool,
     format: &str,
     output: Option<&str>,
+    force: bool,
 ) -> anyhow::Result<()> {
     let dir = resolve_arg(session, last)?;
+    // Checked before anything is decoded (#287).
+    let target: Option<PathBuf> = match output {
+        Some("-") => None,
+        Some(p) => Some(PathBuf::from(p)),
+        None => {
+            let short = read_metadata(&dir)
+                .context("read session metadata")?
+                .session_id
+                .short();
+            Some(PathBuf::from(format!("{short}.json")))
+        }
+    }
+    .map(|p| {
+        smeltr_core::session::checked_export_target(&p, force).map_err(|e| {
+            anyhow!(e.replace(
+                "allow replacing it explicitly",
+                "pass --force to replace it"
+            ))
+        })
+    })
+    .transpose()?;
     let meta = read_metadata(&dir).context("read session metadata")?;
     let events = read_events(&dir).context("read session events")?;
 
@@ -27,18 +49,19 @@ pub fn run(
         }
     };
 
-    let target: Option<PathBuf> = match output {
-        Some("-") => None,
-        Some(p) => Some(PathBuf::from(p)),
-        None => {
-            let short = meta.session_id.short();
-            Some(PathBuf::from(format!("{short}.json")))
-        }
-    };
-
     match target {
         Some(path) => {
-            std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+            // `create_new` unless --force: nothing can appear at the path
+            // between the check above and this write.
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .create_new(!force)
+                .truncate(true)
+                .open(&path)
+                .with_context(|| format!("open {}", path.display()))?;
+            f.write_all(bytes.as_bytes())
+                .with_context(|| format!("write {}", path.display()))?;
             eprintln!("smeltr: wrote {} ({} bytes)", path.display(), bytes.len());
         }
         None => {
@@ -55,6 +78,61 @@ mod tests {
     use smeltr_core::session::{SessionId, SessionMetadata};
     use smeltr_core::writer::SessionWriter;
     use uuid::Uuid;
+
+    fn export_to(id: &SessionId, out: &std::path::Path, force: bool) -> anyhow::Result<()> {
+        super::run(
+            Some(&id.short()),
+            false,
+            "chrome-trace",
+            Some(out.to_str().unwrap()),
+            force,
+        )
+    }
+
+    /// #287: the CLI had the unguarded path the MCP tool lost in #271 — the
+    /// one that destroyed a real session: exporting onto a session's own
+    /// event file replaced it with chrome-trace JSON.
+    #[test]
+    #[serial_test::serial]
+    fn export_never_writes_into_the_sessions_store() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let id = make_session_with_one_mark();
+        let dir = smeltr_core::reader::find_session_dir(id).unwrap().unwrap();
+        let events = smeltr_core::session::events_path_for_read(&dir);
+        let before = std::fs::read(&events).unwrap();
+
+        assert!(export_to(&id, &events, true).is_err(), "even with --force");
+        assert!(export_to(&id, &dir.join("trace.json"), false).is_err());
+        let link = home.path().join("link.json");
+        std::os::unix::fs::symlink(&events, &link).unwrap();
+        assert!(export_to(&id, &link, true).is_err(), "through a symlink");
+
+        assert_eq!(
+            std::fs::read(&events).unwrap(),
+            before,
+            "session file changed"
+        );
+    }
+
+    /// #287: an existing file was replaced silently.
+    #[test]
+    #[serial_test::serial]
+    fn export_replaces_an_existing_file_only_with_force() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        std::env::remove_var("SMELTR_SESSION_NAME");
+        let id = make_session_with_one_mark();
+        let out = home.path().join("mine.json");
+        std::fs::write(&out, b"keep me").unwrap();
+        assert!(export_to(&id, &out, false).is_err());
+        assert_eq!(std::fs::read(&out).unwrap(), b"keep me");
+        export_to(&id, &out, true).unwrap();
+        assert!(std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("traceEvents"));
+    }
 
     fn make_session_with_one_mark() -> SessionId {
         let id = SessionId::new();
@@ -93,6 +171,7 @@ mod tests {
             false,
             "chrome-trace",
             Some(out.to_str().unwrap()),
+            false,
         )
         .unwrap();
 
@@ -117,6 +196,7 @@ mod tests {
             false,
             "json",
             Some(out.to_str().unwrap()),
+            false,
         )
         .unwrap();
 
@@ -140,6 +220,7 @@ mod tests {
             false,
             "bogus",
             Some(out.to_str().unwrap()),
+            false,
         )
         .unwrap_err();
         assert!(err.to_string().contains("unknown --format"));
@@ -178,6 +259,7 @@ mod tests {
             false,
             "chrome-trace",
             Some(out.to_str().unwrap()),
+            false,
         )
         .unwrap();
         assert!(out.exists());

@@ -5,7 +5,6 @@ use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::export::{to_chrome_trace, to_json_raw};
 use smeltr_core::reader::read_metadata;
-use smeltr_core::session::sessions_root;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -47,41 +46,13 @@ fn checked_output_path(raw: &str, overwrite: bool) -> Result<PathBuf, ToolError>
             "output_path must be an absolute path, got {raw:?}"
         )));
     }
-    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
-        return Err(ToolError::BadArgs(format!(
-            "output_path must name a file, got {raw:?}"
-        )));
-    };
-    let parent = parent.canonicalize().map_err(|_| {
-        ToolError::BadArgs(format!(
-            "output directory {} does not exist; create it first",
-            parent.display()
+    // Shared with the CLI (#287); the MCP wording for "allow replacing".
+    smeltr_core::session::checked_export_target(path, overwrite).map_err(|e| {
+        ToolError::BadArgs(e.replace(
+            "allow replacing it explicitly",
+            "pass overwrite: true to replace it",
         ))
-    })?;
-    // Resolve a symlink at the target: writing follows it.
-    let target = match std::fs::symlink_metadata(path) {
-        Ok(_) => path.canonicalize().map_err(|_| {
-            ToolError::BadArgs(format!(
-                "output_path {raw:?} is a symlink whose target cannot be resolved"
-            ))
-        })?,
-        Err(_) => parent.join(file_name),
-    };
-    let store = sessions_root();
-    let store = store.canonicalize().unwrap_or(store);
-    if target.starts_with(&store) {
-        return Err(ToolError::BadArgs(format!(
-            "output_path {raw:?} is inside the smeltr sessions store {}; \
-             write the export somewhere else",
-            store.display()
-        )));
-    }
-    if target.exists() && !overwrite {
-        return Err(ToolError::BadArgs(format!(
-            "output_path {raw:?} already exists; pass overwrite: true to replace it"
-        )));
-    }
-    Ok(target)
+    })
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
