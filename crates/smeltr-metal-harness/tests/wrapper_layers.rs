@@ -89,10 +89,15 @@ fn wrapper_layers_record_each_command_buffer_once() {
         "MTL_SHADER_VALIDATION",
     ] {
         let got = counts(dir.path(), Some(layer));
-        assert_eq!(
-            got,
-            bare,
-            "(committed, completed, cb_ops) under {layer} vs no layer; commit paths:\n{}",
+        // CB_OPS come only from the app's encoders: exact. Buffer counts may
+        // move by one — the paravirtualized CI GPU submits an internal
+        // buffer on the app's queue in some runs and not others — while a
+        // double count doubles them (24 vs 12).
+        let close = |a: usize, b: usize| a.abs_diff(b) <= 1;
+        assert!(
+            got.2 == bare.2 && close(got.0, bare.0) && close(got.1, bare.1),
+            "(committed, completed, cb_ops) under {layer}: {got:?} vs no layer {bare:?}; \
+             commit paths:\n{}",
             commit_trace(dir.path(), layer)
         );
     }
