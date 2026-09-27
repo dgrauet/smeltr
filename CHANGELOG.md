@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.15](https://github.com/dgrauet/smeltr/compare/v0.28.14...v0.28.15) (2026-09-27)
+
+
+### Bug Fixes
+
+* **cli:** guard smeltr export against the sessions store and silent overwrites ([#290](https://github.com/dgrauet/smeltr/issues/290)) ([aa29782](https://github.com/dgrauet/smeltr/commit/aa29782ce73fd282860136d1f8f2efefca0b10f4)), closes [#287](https://github.com/dgrauet/smeltr/issues/287)
+
 ## [0.28.14](https://github.com/dgrauet/smeltr/compare/v0.28.13...v0.28.14) (2026-09-27)
 
 
