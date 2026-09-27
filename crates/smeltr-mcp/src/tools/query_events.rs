@@ -51,12 +51,12 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let pass_filter = indexed_total.is_some().then_some(&filter);
     let mut events = Vec::new();
     let (mut total, mut matched) = (0usize, 0usize);
-    smeltr_core::reader::for_each_event(&dir, pass_filter, |e| {
+    crate::session_cache::visit(&dir, pass_filter, |e| {
         total += 1;
-        if filter.matches(&e) {
+        if filter.matches(e) {
             matched += 1;
             if events.len() < limit {
-                events.push(e);
+                events.push(e.clone());
             }
         }
         std::ops::ControlFlow::Continue(())

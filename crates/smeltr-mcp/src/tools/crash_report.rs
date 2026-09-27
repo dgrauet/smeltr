@@ -103,13 +103,13 @@ fn report_path(dir: &std::path::Path) -> Option<String> {
         ..Default::default()
     };
     let mut emitted = None;
-    let _ = smeltr_core::reader::for_each_event(dir, Some(&filter), |e| {
+    let _ = crate::session_cache::visit(dir, Some(&filter), |e| {
         if let Payload::CrashReportEmitted {
             path, crashed_pid, ..
-        } = e.payload
+        } = &e.payload
         {
-            if want_pid.is_none() || crashed_pid == want_pid {
-                emitted = Some(path);
+            if want_pid.is_none() || *crashed_pid == want_pid {
+                emitted = Some(path.clone());
             }
         }
         std::ops::ControlFlow::Continue(())

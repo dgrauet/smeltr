@@ -103,6 +103,40 @@ pub fn events(dir: &Path) -> std::io::Result<Arc<Vec<Event>>> {
     Ok(events)
 }
 
+/// The session if it is the one cached and still current; never decodes.
+pub fn peek(dir: &Path) -> Option<Checked> {
+    let k = key(dir)?;
+    let mut slot = CACHE.lock().ok()?;
+    let e = slot.as_mut().filter(|e| e.key == k)?;
+    e.last_used = Instant::now();
+    Some((e.events.clone(), e.damage.clone()))
+}
+
+/// [`smeltr_core::reader::for_each_event`], walking the cached session
+/// instead when there is one: a tool that only needs a few events streams
+/// them from disk rather than decoding a session into the cache, but
+/// should not decode it again right after another tool did. Returns the
+/// damage: of what was read when streaming, of the whole session when
+/// cached.
+pub fn visit<F>(
+    dir: &Path,
+    filter: Option<&smeltr_core::EventFilter>,
+    mut f: F,
+) -> std::io::Result<Option<Damage>>
+where
+    F: FnMut(&Event) -> std::ops::ControlFlow<()>,
+{
+    let Some((cached, damage)) = peek(dir) else {
+        return smeltr_core::reader::for_each_event(dir, filter, |e| f(&e));
+    };
+    for e in cached.iter() {
+        if filter.is_none_or(|flt| flt.matches(e)) && f(e).is_break() {
+            break;
+        }
+    }
+    Ok(damage)
+}
+
 #[cfg(test)]
 fn is_cached(dir: &Path) -> bool {
     CACHE
@@ -252,6 +286,61 @@ mod tests {
         smeltr_core::session::write_metadata(&dir, &meta).unwrap();
         let (_, later) = checked(&dir).unwrap();
         assert!(later.is_some_and(|d| d.to_string().contains('7')));
+        // Walking the cached session reports it too.
+        let walked = visit(&dir, None, |_| std::ops::ControlFlow::Continue(())).unwrap();
+        assert!(walked.is_some_and(|d| d.to_string().contains('7')));
+    }
+
+    /// `peek` never decodes: it hands out the cached session only while it
+    /// is still the one on disk.
+    #[test]
+    #[serial_test::serial]
+    fn peek_returns_only_a_current_cached_session() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let dir = session(3);
+        evict_idle(Duration::ZERO);
+        assert!(peek(&dir).is_none());
+        let a = events(&dir).unwrap();
+        assert!(Arc::ptr_eq(&a, &peek(&dir).unwrap().0));
+        std::fs::copy(
+            session(5).join("events.cbor.zst"),
+            dir.join("events.cbor.zst"),
+        )
+        .unwrap();
+        assert!(peek(&dir).is_none(), "stale");
+    }
+
+    /// `visit` streams from disk or walks the cached session: same events,
+    /// same filter, same early stop.
+    #[test]
+    #[serial_test::serial]
+    fn visit_is_the_same_cached_or_not() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let dir = session(10);
+        let filter = smeltr_core::EventFilter {
+            from_ts: Some(2),
+            ..Default::default()
+        };
+        let run = || {
+            let mut seen = vec![];
+            visit(&dir, Some(&filter), |e| {
+                seen.push(e.seq);
+                if seen.len() == 4 {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .unwrap();
+            seen
+        };
+        evict_idle(Duration::ZERO);
+        let streamed = run();
+        events(&dir).unwrap();
+        assert_eq!(run(), streamed);
+        assert_eq!(streamed, vec![2, 3, 4, 5]);
     }
 
     /// An idle entry is dropped: a large session must not stay pinned in a

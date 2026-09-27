@@ -82,9 +82,9 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     // the focal event (stopping there), then the window around it, whose
     // time bounds let a chunked session skip every other chunk.
     let mut focal = None;
-    smeltr_core::reader::for_each_event(&dir, None, |e| {
+    crate::session_cache::visit(&dir, None, |e| {
         if e.seq == params.focal_seq {
-            focal = Some(e);
+            focal = Some(e.clone());
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -100,9 +100,9 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         ..Default::default()
     };
     let mut in_window: Vec<Event> = Vec::new();
-    smeltr_core::reader::for_each_event(&dir, Some(&filter), |e| {
+    crate::session_cache::visit(&dir, Some(&filter), |e| {
         if e.seq != focal.seq && e.source != focal.source {
-            in_window.push(e);
+            in_window.push(e.clone());
         }
         ControlFlow::Continue(())
     })?;

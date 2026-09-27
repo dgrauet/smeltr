@@ -33,7 +33,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     // One streaming pass that keeps only the requested page (#271).
     let mut events = Vec::new();
     let (mut total, mut matched) = (0usize, 0usize);
-    smeltr_core::reader::for_each_event(&dir, None, |e| {
+    crate::session_cache::visit(&dir, None, |e| {
         total += 1;
         let wanted = is_metal(&e.payload)
             && params
@@ -41,7 +41,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
                 .is_none_or(|want| payload_queue_id(&e.payload) == Some(want));
         if wanted {
             if matched >= offset && events.len() < limit {
-                events.push(e);
+                events.push(e.clone());
             }
             matched += 1;
         }
