@@ -345,7 +345,15 @@ fn a_killed_record_client_still_records_the_child_and_removes_its_rings() {
     std::thread::sleep(Duration::from_millis(500));
     record.kill().unwrap();
     record.wait().unwrap();
-    std::thread::sleep(Duration::from_millis(3500));
+    // The daemon removes the rings once the child has exited; a slow CI
+    // machine takes longer than a fixed delay to get there.
+    let rings_dir = home.join("rings");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::fs::read_dir(&rings_dir).is_ok_and(|d| d.count() > 0)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
     daemon.stop();
     std::thread::sleep(Duration::from_millis(100));
 
