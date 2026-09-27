@@ -155,7 +155,8 @@ fn hostname_or_unknown() -> String {
 /// Without HOME (a stripped environment) it falls back to the temp dir
 /// rather than panicking.
 pub fn smeltr_home() -> PathBuf {
-    if let Some(p) = std::env::var_os("SMELTR_HOME") {
+    // Empty counts as unset, as for the socket path (#245, #272).
+    if let Some(p) = std::env::var_os("SMELTR_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
     }
     std::env::var_os("HOME")
@@ -465,5 +466,21 @@ argv = []
             std::env::set_var("SMELTR_HOME", v);
         }
         assert!(fallback.ends_with(".smeltr"), "{fallback:?}");
+    }
+
+    /// #272: an empty SMELTR_HOME was taken as the path "", so sessions
+    /// landed in `./sessions` of whatever directory the process ran in,
+    /// while `socket_path` already treated empty values as unset (#245).
+    #[test]
+    #[serial_test::serial]
+    fn an_empty_smeltr_home_is_unset() {
+        let saved = std::env::var_os("SMELTR_HOME");
+        std::env::set_var("SMELTR_HOME", "");
+        let got = smeltr_home();
+        match saved {
+            Some(v) => std::env::set_var("SMELTR_HOME", v),
+            None => std::env::remove_var("SMELTR_HOME"),
+        }
+        assert!(got.ends_with(".smeltr"), "got {got:?}");
     }
 }

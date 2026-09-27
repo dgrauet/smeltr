@@ -39,6 +39,13 @@ pub fn install_panic_hook(router: Weak<SessionRouter>, fr: Weak<FlightRecorder>)
         // hook only writes to stderr, so it runs after the flush too.
         handle_panic(&message, &backtrace, &router, &fr, &mut std::io::stderr());
         default_hook(info); // default message + location to stderr
+                            // Under the test override, leave with abort()'s status but without
+                            // raising SIGABRT: a real abort makes ReportCrash write a smeltrd
+                            // .ips into ~/Library/Logs/DiagnosticReports on every test run
+                            // (#272; #227 removed the same pollution from the probe tests).
+        if std::env::var_os("SMELTR_TEST_PANIC_MS").is_some() {
+            unsafe { libc::_exit(134) };
+        }
         std::process::abort();
     }));
 }
