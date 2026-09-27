@@ -13,6 +13,11 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        // A failed log write (full disk under launchd's smeltrd.log) was
+        // reported with eprintln!, which panics when stderr fails too: the
+        // panic hook then aborted on every log line and launchd relaunched
+        // the daemon in a loop. Losing a log line is the right failure.
+        .log_internal_errors(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
