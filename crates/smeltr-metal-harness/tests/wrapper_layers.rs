@@ -11,7 +11,7 @@
 
 #![cfg(target_os = "macos")]
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,11 +22,11 @@ fn dylib_path() -> PathBuf {
 }
 
 /// (committed, completed, cb_ops) for one harness run. Buffers are counted
-/// on the busiest queue — the app's: on a paravirtualized GPU (the macOS 14
-/// CI runner) the debug layer submits command buffers of its own on another
-/// queue, genuine and distinct. CB_OPS only come from the app's encoders, so
-/// they are counted whole — that is where the wrapper double count showed
-/// (11 -> 22 locally).
+/// on the app's queues — those whose buffers carry ops: on a paravirtualized
+/// GPU (the macOS 14 CI runner) the debug layer submits buffers of its own
+/// on another queue, genuine and distinct, sometimes more than the app. CB_OPS
+/// only come from the app's encoders, so they are counted whole — that is
+/// where the wrapper double count showed (11 -> 22 locally).
 fn counts(dir: &Path, layer: Option<&str>) -> (usize, usize, usize) {
     let ring = dir.join(format!("ring-{}.bin", layer.unwrap_or("none")));
     drop(create_ring(&ring, 1 << 22).unwrap());
@@ -44,23 +44,34 @@ fn counts(dir: &Path, layer: Option<&str>) -> (usize, usize, usize) {
         String::from_utf8_lossy(&out.stderr)
     );
     let mut reader = open_for_read(&ring).unwrap();
-    let mut committed: HashMap<u64, usize> = HashMap::new();
-    let mut completed: HashMap<u64, usize> = HashMap::new();
+    let mut committed: Vec<(u64, u64)> = Vec::new(); // (cb_id, queue_id)
+    let mut completed: Vec<u64> = Vec::new(); // queue_id
+    let mut ops_cbs: HashSet<u64> = HashSet::new();
     let mut ops = 0;
     while let Ok(Some(ev)) = reader.next() {
         match ev.frame {
-            DecodedFrame::CbCommitted { queue_id, .. } => {
-                *committed.entry(queue_id).or_default() += 1
+            DecodedFrame::CbCommitted {
+                cb_id, queue_id, ..
+            } => committed.push((cb_id, queue_id)),
+            DecodedFrame::CbCompleted { queue_id, .. } => completed.push(queue_id),
+            DecodedFrame::CbOps { cb_id, .. } => {
+                ops += 1;
+                ops_cbs.insert(cb_id);
             }
-            DecodedFrame::CbCompleted { queue_id, .. } => {
-                *completed.entry(queue_id).or_default() += 1
-            }
-            DecodedFrame::CbOps { .. } => ops += 1,
             _ => {}
         }
     }
-    let busiest = |m: &HashMap<u64, usize>| m.values().copied().max().unwrap_or(0);
-    (busiest(&committed), busiest(&completed), ops)
+    let app_queues: HashSet<u64> = committed
+        .iter()
+        .filter(|(cb, _)| ops_cbs.contains(cb))
+        .map(|(_, q)| *q)
+        .collect();
+    let on_app = |q: &u64| app_queues.contains(q);
+    (
+        committed.iter().filter(|(_, q)| on_app(q)).count(),
+        completed.iter().filter(|q| on_app(q)).count(),
+        ops,
+    )
 }
 
 #[test]
