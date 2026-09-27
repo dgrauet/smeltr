@@ -2308,7 +2308,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smeltr-analyzer"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "serde",
  "serde_json",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-cli"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2359,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-core"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -2377,7 +2377,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-daemon"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -2408,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-mcp"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "axum",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-metal-harness"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "metal",
  "smeltr-metal-ring",
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-metal-ring"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "memmap2",
  "tempfile",
@@ -2446,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-core"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "smeltr-core",
@@ -2458,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-crash-reports"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "notify",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-ioreport"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "smeltr-core",
@@ -2486,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-mach-exceptions"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "libc",
@@ -2500,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-metal-hook"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "smeltr-core",
@@ -2514,7 +2514,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-oslog"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "serde",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-proc"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "libc",
@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-thermal"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "smeltr-core",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-probes-vm"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "async-trait",
  "libc",
@@ -2567,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-replay"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "serial_test",
  "smeltr-core",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "smeltr-tui"
-version = "0.28.12"
+version = "0.28.13"
 dependencies = [
  "ciborium",
  "crossterm",
