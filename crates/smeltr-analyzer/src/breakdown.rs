@@ -10,6 +10,8 @@ pub const UNSCOPED: &str = "<unscoped>";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct OpAttribution {
+    /// The op's identity: its kernel symbol when the hook resolved one, else
+    /// the hook's `K_<pso>_<grid>` name (see [`op_key`]).
     pub name: String,
     pub gpu_ns: u64,
     pub count: u64,
@@ -60,9 +62,7 @@ pub enum BreakdownError {
     EmptySession,
 }
 
-/// Aggregation bucket for ops keyed by op name: (gpu_ns, count, symbol).
-/// `symbol` is set on first non-None occurrence; same kernel name is
-/// assumed to come from the same PSO and thus same symbol.
+/// Aggregation bucket for ops keyed by [`op_key`]: (gpu_ns, count, symbol).
 type OpAgg = (u64, u64, Option<String>);
 
 #[derive(Default)]
@@ -107,6 +107,15 @@ pub struct CompletedCbs {
 /// ops to every completion sharing the pointer, multiplying op time ~29x on
 /// a real run (#127). The hook emits `CbOps` immediately after the matching
 /// `CbCompleted`, which is what makes the chronological pairing exact.
+/// An op's identity: its kernel symbol when the hook resolved one, else the
+/// hook's `K_…` name (#265). The name is not an identity: it came from 16
+/// bits of a 256-byte-aligned pipeline-state pointer, so different kernels
+/// shared it (a float32 copy and an add on a real run) and aggregating by it
+/// merged them under whichever symbol came first.
+pub fn op_key(op: &OpSample) -> String {
+    op.symbol.clone().unwrap_or_else(|| op.name.clone())
+}
+
 pub fn completed_command_buffers(events: &[Event]) -> CompletedCbs {
     pair_command_buffers(events, None)
 }
@@ -263,9 +272,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 per_eval_cb_count[i] += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
-                        let e = per_eval_ops[i]
-                            .entry(op.name.clone())
-                            .or_insert((0, 0, None));
+                        let e = per_eval_ops[i].entry(op_key(op)).or_insert((0, 0, None));
                         e.0 += op.gpu_ns;
                         e.1 += op.count as u64;
                         if e.2.is_none() {
@@ -300,7 +307,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 slot.1 += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
-                        let e = slot.2.entry(op.name.clone()).or_insert((0, 0, None));
+                        let e = slot.2.entry(op_key(op)).or_insert((0, 0, None));
                         e.0 += op.gpu_ns;
                         e.1 += op.count as u64;
                         if e.2.is_none() {
@@ -314,7 +321,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 unmatched_cb_count += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
-                        let e = unscoped_ops.entry(op.name.clone()).or_insert((0, 0, None));
+                        let e = unscoped_ops.entry(op_key(op)).or_insert((0, 0, None));
                         e.0 += op.gpu_ns;
                         e.1 += op.count as u64;
                         if e.2.is_none() {
@@ -1461,6 +1468,99 @@ mod tests {
         assert_eq!(r.diagnostics.as_ref().unwrap().unscoped_gpu_ns, 500);
         assert_eq!(unscoped.cb_count, 1);
         assert_eq!(unscoped.eval_count, 1);
+    }
+
+    /// #265: the hook named ops from 16 bits of a 256-byte-aligned PSO
+    /// pointer, so different kernels shared a name (`K_ed00_0x0x0` was both a
+    /// float32 copy and an add on a real Matrix-Game run). Aggregating by
+    /// that name merged them under the first symbol seen and mislabelled
+    /// their kind; the symbol, when present, is the kernel's identity.
+    #[test]
+    fn kernels_sharing_an_op_name_stay_apart() {
+        let sym = |name: &str, symbol: &str, gpu_ns| OpSample {
+            name: name.into(),
+            symbol: Some(symbol.into()),
+            gpu_ns,
+            count: 1,
+        };
+        let evs = vec![
+            ev(
+                1,
+                100,
+                Payload::MlxEvalEntered {
+                    call_id: 1,
+                    array_count: 1,
+                    stream: "gpu".into(),
+                    module_stack: vec![],
+                    stack_frames: vec![],
+                },
+                Source::PythonSidecar,
+            ),
+            ev(
+                2,
+                105,
+                Payload::MetalCbCommitted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    queue_depth: 1,
+                    label: None,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                3,
+                310,
+                Payload::MetalCbCompleted {
+                    cb_id: 9,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: 205,
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                4,
+                311,
+                Payload::MetalCbOps {
+                    cb_id: 9,
+                    ops: vec![
+                        sym("K_ed00_0x0x0", "gg1_copyfloat32float32", 120),
+                        sym("K_ed00_0x0x0", "g2_Addfloat32", 80),
+                    ],
+                },
+                Source::MetalHook,
+            ),
+            ev(
+                5,
+                400,
+                Payload::MlxEvalReturned {
+                    call_id: 1,
+                    duration_ns: 300,
+                    was_async: false,
+                },
+                Source::PythonSidecar,
+            ),
+        ];
+        let r = compute(evs).unwrap();
+        let mut ops: Vec<(Option<String>, Option<String>, u64)> = find_child(&r, UNSCOPED)
+            .ops
+            .iter()
+            .map(|o| (o.symbol.clone(), o.kind.clone(), o.gpu_ns))
+            .collect();
+        ops.sort();
+        assert_eq!(
+            ops,
+            vec![
+                (Some("g2_Addfloat32".into()), Some("Elementwise".into()), 80),
+                (
+                    Some("gg1_copyfloat32float32".into()),
+                    Some("Copy".into()),
+                    120
+                ),
+            ]
+        );
     }
 
     #[test]

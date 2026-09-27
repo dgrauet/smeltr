@@ -5,16 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.28.13](https://github.com/dgrauet/smeltr/compare/v0.28.12...v0.28.13) (2026-09-27)
-
-
-### Bug Fixes
-
-* **daemon:** keep serving through accept errors, guard the socket, bound frames and post-mortems ([#276](https://github.com/dgrauet/smeltr/issues/276)) ([d51871a](https://github.com/dgrauet/smeltr/commit/d51871a51251c73e7807a95762700ba7807fe3f2)), closes [#267](https://github.com/dgrauet/smeltr/issues/267)
-* **hook:** count wrapped command buffers once and share one commit tracker ([#275](https://github.com/dgrauet/smeltr/issues/275)) ([3e41afc](https://github.com/dgrauet/smeltr/commit/3e41afc8e57c847c631aabce4c7ba9f1eeca9b18))
-* **record:** survive Ctrl-C, start the command after the session exists, reap rings ([#278](https://github.com/dgrauet/smeltr/issues/278)) ([3a74ca4](https://github.com/dgrauet/smeltr/commit/3a74ca4264ff24b5a0f6f91ba4c4327ce4c9b2de))
-* **sidecar:** never block, break or change the user's program ([#279](https://github.com/dgrauet/smeltr/issues/279)) ([ab05ec2](https://github.com/dgrauet/smeltr/commit/ab05ec2262435acf8380e5d75c657fc6f7804ea7))
-
 ## [0.28.12](https://github.com/dgrauet/smeltr/compare/v0.28.11...v0.28.12) (2026-09-26)
 
 

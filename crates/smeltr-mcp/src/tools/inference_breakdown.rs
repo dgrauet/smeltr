@@ -561,7 +561,8 @@ mod tests {
             .find(|c| c.qualname == "denoise.pass:cond")
             .expect("scope present");
         let op = scope.ops.first().expect("op present");
-        assert_eq!(op.name, "K_abcd_64x64x1");
+        // Identity is the symbol once resolved (#265).
+        assert_eq!(op.name, "gemm_t_n_bf16_64_64_32");
         assert_eq!(op.symbol.as_deref(), Some("gemm_t_n_bf16_64_64_32"));
         assert_eq!(op.kind.as_deref(), Some("Matmul"));
     }
