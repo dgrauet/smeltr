@@ -596,26 +596,51 @@ pub fn render_table(
     show_ops: bool,
 ) -> String {
     let total = root.gpu_ns_subtree.max(1);
-    let mut rows: Vec<(u16, &ModuleBreakdown)> = Vec::new();
+    // (depth, node, parent row index) in tree order (children are already
+    // sorted by subtree time).
+    let mut tree: Vec<(u16, &ModuleBreakdown, Option<usize>)> = Vec::new();
     fn walk<'a>(
         n: &'a ModuleBreakdown,
         depth: u16,
         max_depth: u16,
-        out: &mut Vec<(u16, &'a ModuleBreakdown)>,
+        parent: Option<usize>,
+        out: &mut Vec<(u16, &'a ModuleBreakdown, Option<usize>)>,
     ) {
         if depth > max_depth {
             return;
         }
-        out.push((depth, n));
+        out.push((depth, n, parent));
+        let me = out.len() - 1;
         for c in &n.children {
-            walk(c, depth + 1, max_depth, out);
+            walk(c, depth + 1, max_depth, Some(me), out);
         }
     }
     for c in &root.children {
-        walk(c, 0, max_depth, &mut rows);
+        walk(c, 0, max_depth, None, &mut tree);
     }
-    rows.sort_by_key(|r| std::cmp::Reverse(r.1.gpu_ns_subtree));
-    rows.truncate(top);
+    // The `top` heaviest rows, plus their ancestors so every row prints
+    // under its real parent, in tree order. Sorting all rows globally and
+    // indenting by depth put a heavy parent's children after the next
+    // parent, where they read as its children (#270).
+    let mut by_weight: Vec<usize> = (0..tree.len()).collect();
+    by_weight.sort_by_key(|&i| std::cmp::Reverse(tree[i].1.gpu_ns_subtree));
+    let mut keep = vec![false; tree.len()];
+    for &i in by_weight.iter().take(top) {
+        let mut at = Some(i);
+        while let Some(j) = at {
+            if keep[j] {
+                break;
+            }
+            keep[j] = true;
+            at = tree[j].2;
+        }
+    }
+    let rows: Vec<(u16, &ModuleBreakdown)> = tree
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|((d, n, _), _)| (*d, *n))
+        .collect();
 
     let mut out = String::new();
     out.push_str(&format!(
@@ -2597,6 +2622,50 @@ mod tests {
         assert!(s.contains("Matmul"));
         assert!(s.contains("1.500")); // 1500 ns formatted as us → "1.500"
         assert!(s.contains("Softmax"));
+    }
+
+    fn node(name: &str, self_ns: u64, children: Vec<ModuleBreakdown>) -> ModuleBreakdown {
+        let subtree = self_ns + children.iter().map(|c| c.gpu_ns_subtree).sum::<u64>();
+        ModuleBreakdown {
+            qualname: name.into(),
+            class_name: name.into(),
+            calls: 1,
+            gpu_ns_self: self_ns,
+            gpu_ns_subtree: subtree,
+            eval_count: 0,
+            cb_count: 0,
+            children,
+            ops: vec![],
+            diagnostics: None,
+            fields: Default::default(),
+        }
+    }
+
+    /// #270: rows were sorted globally by subtree time but indented by
+    /// depth, so a strong parent's children printed after the next parent
+    /// and read as its children (`HunYuanDiTPlain` under `stage2-texture`).
+    #[test]
+    fn render_table_keeps_children_under_their_parent() {
+        let root = node(
+            "<root>",
+            0,
+            vec![
+                node(
+                    "stage1",
+                    0,
+                    vec![node("dit_a", 30, vec![]), node("dit_b", 20, vec![])],
+                ),
+                node("stage2", 40, vec![]),
+            ],
+        );
+        let out = render_table(&root, 4, 6, 0, false);
+        let names: Vec<&str> = out
+            .lines()
+            .skip(2)
+            .map(|l| l.split_whitespace().next().unwrap_or(""))
+            .filter(|n| !n.is_empty() && *n != "diagnostics:")
+            .collect();
+        assert_eq!(names, vec!["stage1", "dit_a", "dit_b", "stage2"]);
     }
 
     #[test]

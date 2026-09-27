@@ -93,6 +93,11 @@ pub struct SessionMetadata {
     /// exactly at a frame or chunk boundary, which looks like a clean end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_count: Option<u64>,
+    /// Version of the smeltr that recorded the session (#270): measurements
+    /// changed across versions (Metal GPU times ~35 % low before 0.28.9), so
+    /// comparisons need to know. Absent on sessions recorded before 0.28.14.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smeltr_version: Option<String>,
 }
 
 /// The event a post-mortem session was flushed for.
@@ -166,6 +171,7 @@ impl SessionMetadata {
             term_signal: None,
             gputrace_path: None,
             post_mortem: None,
+            smeltr_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             dropped_events: None,
             event_count: None,
         }

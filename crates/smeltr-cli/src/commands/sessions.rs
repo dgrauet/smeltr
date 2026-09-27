@@ -1,8 +1,6 @@
-use crate::client::Client;
 use clap::Subcommand;
 use smeltr_core::fmt::binary_bytes;
-use smeltr_core::reader::{list_sessions, read_events, read_metadata};
-use smeltr_daemon::protocol::{ClientToDaemon, DaemonToClient};
+use smeltr_core::reader::{read_events, read_metadata};
 
 #[derive(Subcommand, Debug)]
 pub enum SessionsCmd {
@@ -29,22 +27,7 @@ pub async fn run(cmd: SessionsCmd) -> anyhow::Result<()> {
 }
 
 async fn ls() -> anyhow::Result<()> {
-    // Prefer asking the daemon (so its active session shows up even before
-    // the session is finalized to disk). Fall back to direct disk read.
-    let from_daemon = match Client::connect().await {
-        Ok(mut c) => match c.request(ClientToDaemon::ListSessions).await {
-            Ok(DaemonToClient::SessionList { dirs }) => Some(dirs),
-            _ => None,
-        },
-        Err(_) => None,
-    };
-    let dirs: Vec<String> = match from_daemon {
-        Some(d) => d,
-        None => list_sessions()?
-            .into_iter()
-            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .collect(),
-    };
+    let dirs = ls_order()?;
     if dirs.is_empty() {
         println!("(no sessions)");
         return Ok(());
@@ -87,6 +70,19 @@ type LoadedSession = (
     smeltr_core::session::SessionMetadata,
     Vec<smeltr_core::event::Event>,
 );
+
+/// Session directory names, oldest to newest by start time (#270): sorted by
+/// directory name, every `post-mortem-*` listed after every dated session.
+/// Read from disk — the daemon's list came from the same directory, and an
+/// active session has its directory from the moment it opens.
+fn ls_order() -> anyhow::Result<Vec<String>> {
+    let mut dirs = smeltr_core::session_resolve::sessions_newest_first()?;
+    dirs.reverse();
+    Ok(dirs
+        .into_iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect())
+}
 
 /// Read a session from disk, resolved like every other session argument.
 fn load_session(id: &str) -> anyhow::Result<LoadedSession> {
@@ -326,6 +322,36 @@ fn print_session(
 
 #[cfg(test)]
 mod tests {
+    /// #270: a post-mortem written before a recording used to list after it.
+    #[test]
+    #[serial]
+    fn ls_lists_by_start_time() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let pm = home
+            .path()
+            .join("sessions/post-mortem-crash-report-2026-09-01-000000-aaaa1111");
+        std::fs::create_dir_all(&pm).unwrap();
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.started_rfc3339 = "2026-09-01T00:00:00Z".into();
+        smeltr_core::session::write_metadata(&pm, &meta).unwrap();
+        let mut later = SessionMetadata::now_starting(SessionId::new());
+        later.started_rfc3339 = "2026-09-02T00:00:00Z".into();
+        let later_dir = SessionWriter::create(later).unwrap().dir().to_path_buf();
+        let got = super::ls_order().unwrap();
+        std::env::remove_var("SMELTR_HOME");
+        assert_eq!(
+            got,
+            vec![
+                "post-mortem-crash-report-2026-09-01-000000-aaaa1111".to_string(),
+                later_dir
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ]
+        );
+    }
 
     /// #267: `sessions show` went through the daemon's GetSession (one
     /// unbounded frame: 116 MB for a large ambient session), and resolved

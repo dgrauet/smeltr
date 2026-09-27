@@ -238,10 +238,11 @@ mod tests {
         });
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
         let resp = resp.unwrap();
-        assert_eq!(
-            resp.crash_report_path.as_deref(),
-            Some(ips.to_str().unwrap())
-        );
+        // The session keeps its own copy (#270: macOS purges
+        // DiagnosticReports), which is what the tool now returns.
+        let path = resp.crash_report_path.as_deref().unwrap();
+        assert!(path.ends_with("crash-report.ips"), "{path}");
+        assert!(!path.starts_with(reports.path().to_str().unwrap()));
         assert_eq!(resp.text.as_deref(), Some(MULTILINE));
     }
 }

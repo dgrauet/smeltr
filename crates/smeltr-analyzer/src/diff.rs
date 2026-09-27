@@ -72,6 +72,44 @@ pub fn sampling_disable_episodes(events: &[Event]) -> usize {
 /// Empty sessions on either side yield an empty `SessionDiff` (no panic).
 /// Sort order for all delta lists: by `|delta_ns|` descending. The
 /// only-in-* lists are sorted by `gpu_ns` descending.
+/// Metal GPU times were stamped at ring drain before 0.28.9 and read about
+/// 35 % low (#244). Sessions without a recorded version predate 0.28.14;
+/// among those, one started before 0.28.9 shipped is taken as older.
+const TIMING_FIX_VERSION: (u64, u64, u64) = (0, 28, 9);
+const TIMING_FIX_RELEASED: &str = "2026-09-24T00:00:00Z";
+
+fn predates_timing_fix(m: &smeltr_core::session::SessionMetadata) -> bool {
+    match &m.smeltr_version {
+        Some(v) => {
+            let mut parts = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+            let got = (
+                parts.next().unwrap_or(0),
+                parts.next().unwrap_or(0),
+                parts.next().unwrap_or(0),
+            );
+            got < TIMING_FIX_VERSION
+        }
+        // RFC 3339 UTC stamps written by smeltr compare as text.
+        None => m.started_rfc3339.as_str() < TIMING_FIX_RELEASED,
+    }
+}
+
+/// A warning to show with a comparison whose sides were measured
+/// differently, or `None` (#270).
+pub fn timing_caveat(
+    a: &smeltr_core::session::SessionMetadata,
+    b: &smeltr_core::session::SessionMetadata,
+) -> Option<String> {
+    let (old_a, old_b) = (predates_timing_fix(a), predates_timing_fix(b));
+    (old_a != old_b).then(|| {
+        let side = if old_a { "A" } else { "B" };
+        format!(
+            "session {side} was recorded before smeltr 0.28.9, whose Metal GPU times read \
+             ~35 % low: re-record it with the current version before reading GPU deltas"
+        )
+    })
+}
+
 pub fn diff_sessions(a_events: &[Event], b_events: &[Event]) -> SessionDiff {
     let a_scopes = scope_map(a_events);
     let b_scopes = scope_map(b_events);
@@ -269,6 +307,29 @@ fn op_kind_key(op: &OpAttribution) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// #270: sessions recorded before 0.28.9 under-report Metal GPU times by
+    /// about 35 % (#244); comparing one against a newer run shows a
+    /// regression that is only the measurement.
+    #[test]
+    fn comparing_across_the_0_28_9_timing_fix_is_flagged() {
+        use smeltr_core::session::{SessionId, SessionMetadata};
+        let meta = |started: &str, version: Option<&str>| {
+            let mut m = SessionMetadata::now_starting(SessionId::new());
+            m.started_rfc3339 = started.into();
+            m.smeltr_version = version.map(str::to_string);
+            m
+        };
+        let old = meta("2026-07-16T10:00:00Z", None);
+        let old_tagged = meta("2026-09-22T10:00:00Z", Some("0.28.8"));
+        let new = meta("2026-09-27T10:00:00Z", Some("0.28.14"));
+        assert!(timing_caveat(&old, &new).is_some());
+        assert!(timing_caveat(&new, &old_tagged).is_some());
+        assert!(timing_caveat(&new, &new).is_none());
+        let recent_untagged = meta("2026-09-25T10:00:00Z", None);
+        assert!(timing_caveat(&recent_untagged, &new).is_none());
+    }
+
     use super::*;
     use smeltr_core::event::{OpSample, Payload, Source};
     use uuid::Uuid;

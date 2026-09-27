@@ -47,13 +47,22 @@ pub(crate) fn render_timeline(t: &MemTimeline) -> String {
         } else {
             "-".to_string()
         };
+        // "-" where the bucket has no sample of that series (#270): 0 would
+        // read as memory falling to zero.
+        let cell = |sampled: bool, bytes: u64, width: usize| {
+            if sampled {
+                format!("{:>w$.2} GB", gb(bytes), w = width)
+            } else {
+                format!("{:>w$}", "-", w = width + 3)
+            }
+        };
         out.push_str(&format!(
-            "t+{:<5}..t+{:<6} {:>8.2} GB {:>8.2} GB {:>10.2} GB {:>8}\n",
+            "t+{:<5}..t+{:<6} {} {} {} {:>8}\n",
             format!("{}s", b.t_start_s),
             format!("{}s", b.t_end_s),
-            gb(b.active_bytes),
-            gb(b.cache_bytes),
-            gb(b.device_alloc_bytes),
+            cell(b.mlx_sampled, b.active_bytes, 8),
+            cell(b.mlx_sampled, b.cache_bytes, 8),
+            cell(b.device_sampled, b.device_alloc_bytes, 10),
             pct
         ));
     }
@@ -300,6 +309,8 @@ mod timeline_render_tests {
                 cache_bytes: 500_000_000,
                 device_alloc_bytes: 13_100_000_000,
                 recommended_max_bytes: 26_800_000_000,
+                mlx_sampled: true,
+                device_sampled: true,
             }],
             windows: vec![TimelineWindow {
                 t_start_s: 236,
@@ -315,6 +326,33 @@ mod timeline_render_tests {
         assert!(s.contains("49%"), "{s}");
         assert!(s.contains("1 over-budget window(s)"), "{s}");
         assert!(s.contains("t+236s..t+241s peak 30.70 GB (115%)"), "{s}");
+    }
+
+    /// #270: a bucket with no device sample printed "0.00 GB" next to
+    /// neighbours at 95 %, which reads as memory falling to zero.
+    #[test]
+    fn a_bucket_without_samples_prints_a_dash_not_zero() {
+        let t = MemTimeline {
+            bucket_seconds: 10,
+            buckets: vec![MemBucket {
+                t_start_s: 0,
+                t_end_s: 10,
+                active_bytes: 8_710_000_000,
+                cache_bytes: 1_000_000_000,
+                device_alloc_bytes: 0,
+                recommended_max_bytes: 0,
+                mlx_sampled: true,
+                device_sampled: false,
+            }],
+            windows: vec![],
+        };
+        let s = render_timeline(&t);
+        let row = s.lines().find(|l| l.starts_with("t+0s")).unwrap();
+        assert!(row.contains("8.71 GB"), "{row}");
+        assert!(
+            !row.contains(" 0.00 GB"),
+            "no-sample columns must not read 0: {row}"
+        );
     }
 
     #[test]

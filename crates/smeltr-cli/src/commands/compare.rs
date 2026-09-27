@@ -23,6 +23,12 @@ pub fn run(session_a: &str, session_b: Option<&str>, last: bool, top: usize) -> 
         sampling_disable_episodes(&a_events),
         sampling_disable_episodes(&b_events),
     );
+    let meta = |d: &std::path::Path| smeltr_core::reader::read_metadata(d).ok();
+    if let (Some(ma), Some(mb)) = (meta(&dir_a), meta(&dir_b)) {
+        if let Some(caveat) = smeltr_analyzer::diff::timing_caveat(&ma, &mb) {
+            println!("⚠ {caveat}\n");
+        }
+    }
     print!(
         "{}",
         render(&diff, &memory_deltas, &origin_deltas, top, degraded)
@@ -201,6 +207,11 @@ fn fmt_secs(ns: u64) -> String {
 }
 
 fn fmt_delta(ns: i64, pct: Option<f64>) -> String {
+    // Below the 1 ms display precision the row shows 0.000s on both sides;
+    // a percentage of that reads as a real change (#270).
+    if ns.unsigned_abs() < 500_000 {
+        return "~0".into();
+    }
     let sign = if ns < 0 {
         "-"
     } else if ns > 0 {
@@ -235,6 +246,16 @@ fn truncate_counts_chars_not_bytes() {
 mod tests {
     use super::*;
     use smeltr_analyzer::diff::SessionDiff;
+
+    /// #270: sub-millisecond rows printed `+0.000s (+90.2%)` — a percentage
+    /// of a difference the row itself shows as zero.
+    #[test]
+    fn a_delta_below_display_precision_has_no_percentage() {
+        let s = fmt_delta(400_000, Some(90.2));
+        assert!(!s.contains('%'), "{s}");
+        assert_eq!(fmt_delta(-400_000, Some(-50.0)), "~0");
+        assert_eq!(fmt_delta(2_500_000, Some(10.0)), "+0.003s (+10.0%)");
+    }
 
     fn empty_diff() -> SessionDiff {
         SessionDiff {
