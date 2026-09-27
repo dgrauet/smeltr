@@ -1,5 +1,6 @@
 //! MCP server for smeltr sessions.
 
+pub mod budget;
 pub mod server;
 pub mod tools;
 pub mod types;

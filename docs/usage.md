@@ -609,6 +609,17 @@ From any Claude session, you can then ask things like:
 Every tool accepts a session ref as short id (8 hex), full UUID, or
 `SessionMetadata.name` (see [Naming sessions](#naming-sessions)).
 
+Results stay under an MCP client's tool-output limit (Claude Code's default
+is 25 000 tokens). Count arguments have small defaults and hard caps
+(`query_events`/`get_metal_cb_history` `limit` 100, at most 1000;
+`find_correlations` `max_events` 50/500; `list_sessions` `limit` 50/200;
+`get_crash_report` `max_chars` 20 000/50 000); 0 or a value above the cap
+is an invalid-params error. On top of that, a result is sent as one JSON text
+block of at most 60 000 characters: a larger one is cut — the largest list
+first, from its end — and carries a `_truncated` object listing each cut
+(`path` as a JSON pointer, `kept` of `of`) with a `hint` on how to narrow or
+page the call.
+
 | Tool | Use when | Returns |
 |---|---|---|
 | `list_sessions` | Starting point: enumerate available sessions | short_id, full_id, name, started/ended, exit_code, event_count, root_cause_title |
