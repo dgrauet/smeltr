@@ -27,6 +27,13 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("another smeltrd (pid {pid}) is already running");
     }
     let _ = std::fs::remove_file(&pid_path); // stale (dead pid) or absent
+                                             // A daemon with another SMELTR_HOME has its own pid file but may serve
+                                             // the same socket (#267). Checked before anything is opened, so a
+                                             // refused start leaves no session behind.
+    let sock = server::socket_path();
+    if server::socket_served(&sock) {
+        anyhow::bail!("another smeltrd is serving {}", sock.display());
+    }
 
     // Atomic O_EXCL claim: closes the race window between the liveness
     // check above and taking ownership — the loser bails, never clobbers.

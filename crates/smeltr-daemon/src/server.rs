@@ -26,6 +26,11 @@ pub fn socket_path() -> std::path::PathBuf {
         .join("smeltr.sock")
 }
 
+/// Whether a live process accepts connections on `path`.
+pub fn socket_served(path: &std::path::Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
 pub struct Server {
     listener: UnixListener,
     router: Arc<SessionRouter>,
@@ -42,6 +47,16 @@ impl Server {
         shutdown: tokio::sync::watch::Sender<bool>,
     ) -> std::io::Result<Self> {
         let path = socket_path();
+        // Only a stale socket may be replaced (#267): unlinking one another
+        // daemon still serves (a second daemon with a different SMELTR_HOME
+        // has its own pid file) stole it, and stranded the first daemon
+        // once the second stopped and removed the socket.
+        if socket_served(&path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!("another smeltrd is serving {}", path.display()),
+            ));
+        }
         let _ = std::fs::remove_file(&path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -58,10 +73,27 @@ impl Server {
 
     pub async fn run(self) -> std::io::Result<()> {
         let mut rx = self.shutdown.subscribe();
+        let mut accept_errors: u64 = 0;
         loop {
             tokio::select! {
                 accept = self.listener.accept() => {
-                    let (stream, _) = accept?;
+                    // Never leave the loop on an accept error (#267): with
+                    // `accept?`, one EMFILE ended it for good while the
+                    // process stayed alive — launchd never restarted it, and
+                    // every later connection was refused. Errors here are
+                    // transient (fd limit, aborted connection): log, back
+                    // off briefly so EMFILE does not spin, and keep serving.
+                    let (stream, _) = match accept {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            accept_errors += 1;
+                            if accept_errors == 1 || accept_errors.is_multiple_of(1000) {
+                                tracing::warn!(error = %e, count = accept_errors, "accept failed; still serving");
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            continue;
+                        }
+                    };
                     let router = self.router.clone();
                     let bus = self.bus.clone();
                     let probe_runtime = self.probe_runtime.clone();
@@ -245,20 +277,31 @@ async fn handle_msg(
                 message: e.to_string(),
             },
         },
-        ClientToDaemon::GetSession { id } => match find_session_dir(id) {
-            Ok(Some(dir)) => match (read_events(&dir), read_metadata(&dir)) {
-                (Ok(events), Ok(metadata)) => DaemonToClient::SessionEvents { events, metadata },
-                (Err(e), _) | (_, Err(e)) => DaemonToClient::Error {
+        // Decoding a whole session is blocking work: keep it off the
+        // runtime's workers (#267). `write_msg` turns a response too large
+        // for the socket into an error.
+        ClientToDaemon::GetSession { id } => {
+            tokio::task::spawn_blocking(move || match find_session_dir(id) {
+                Ok(Some(dir)) => match (read_events(&dir), read_metadata(&dir)) {
+                    (Ok(events), Ok(metadata)) => {
+                        DaemonToClient::SessionEvents { events, metadata }
+                    }
+                    (Err(e), _) | (_, Err(e)) => DaemonToClient::Error {
+                        message: e.to_string(),
+                    },
+                },
+                Ok(None) => DaemonToClient::Error {
+                    message: format!("session {id} not found"),
+                },
+                Err(e) => DaemonToClient::Error {
                     message: e.to_string(),
                 },
-            },
-            Ok(None) => DaemonToClient::Error {
-                message: format!("session {id} not found"),
-            },
-            Err(e) => DaemonToClient::Error {
-                message: e.to_string(),
-            },
-        },
+            })
+            .await
+            .unwrap_or_else(|e| DaemonToClient::Error {
+                message: format!("session read failed: {e}"),
+            })
+        }
         ClientToDaemon::Shutdown => {
             let _ = shutdown_tx.send(true);
             DaemonToClient::Ack
@@ -324,8 +367,22 @@ async fn handle_msg(
     }
 }
 
+/// How long a frame's body may take to arrive once its length is read.
+/// Idle connections between frames are normal (sidecars, subscribers);
+/// a frame started and never finished is not.
+const FRAME_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub async fn read_msg<T: serde::de::DeserializeOwned>(
     stream: &mut UnixStream,
+) -> std::io::Result<Option<T>> {
+    read_msg_within(stream, FRAME_BODY_TIMEOUT).await
+}
+
+/// [`read_msg`] with an explicit body timeout (#267: a client announcing a
+/// frame and never sending it held its descriptor forever).
+pub async fn read_msg_within<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+    body_timeout: std::time::Duration,
 ) -> std::io::Result<Option<T>> {
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf).await {
@@ -334,27 +391,76 @@ pub async fn read_msg<T: serde::de::DeserializeOwned>(
         Err(e) => return Err(e),
     }
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len > 16 * 1024 * 1024 {
+    if len > MAX_FRAME_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "frame too large",
         ));
     }
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
+    // Grown as bytes arrive rather than sized up front from the announced
+    // length, so a stalled frame does not pin 16 MiB.
+    let mut buf = Vec::new();
+    let mut body = (&mut *stream).take(len as u64);
+    match tokio::time::timeout(body_timeout, body.read_to_end(&mut buf)).await {
+        Ok(r) => {
+            r?;
+        }
+        Err(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "frame body not received in time",
+            ))
+        }
+    }
+    if buf.len() != len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "connection closed mid-frame",
+        ));
+    }
     let v = ciborium::from_reader(&buf[..])
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     Ok(Some(v))
 }
 
-async fn write_msg<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
-    let mut buf = Vec::with_capacity(256);
-    ciborium::into_writer(value, &mut buf)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+/// Largest frame either side reads (see [`read_msg_within`]).
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+async fn write_msg(stream: &mut UnixStream, value: &DaemonToClient) -> std::io::Result<()> {
+    let encode = |v: &DaemonToClient| -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::with_capacity(256);
+        ciborium::into_writer(v, &mut buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        Ok(buf)
+    };
+    let mut buf = encode(value)?;
+    // A response no client can read (and whose length would not even fit
+    // the u32 prefix past 4 GiB) becomes an error it can act on (#267).
+    if buf.len() > MAX_FRAME_BYTES {
+        buf = encode(&DaemonToClient::Error {
+            message: format!(
+                "response too large for the socket ({} bytes); read the session from disk",
+                buf.len()
+            ),
+        })?;
+    }
+    write_bytes(stream, &buf).await
+}
+
+async fn write_bytes(stream: &mut UnixStream, buf: &[u8]) -> std::io::Result<()> {
     let len = (buf.len() as u32).to_le_bytes();
     stream.write_all(&len).await?;
-    stream.write_all(&buf).await?;
+    stream.write_all(buf).await?;
     stream.flush().await
+}
+
+/// Unbounded frame writer for tests that play the client side.
+#[cfg(test)]
+async fn write_raw<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    write_bytes(stream, &buf).await
 }
 
 #[cfg(test)]
@@ -365,6 +471,68 @@ mod tests {
     use crate::sessions::ActiveSession;
     use serial_test::serial;
     use smeltr_core::event::{Payload, Source};
+
+    /// #267: `GetSession` answered with the whole session in one frame — 116
+    /// MB for a 100k-event ambient session, beyond the 16 MiB every reader
+    /// accepts, and its length was cast to u32 unchecked. An oversized
+    /// response must become an error the client can act on.
+    #[tokio::test]
+    async fn an_oversized_response_is_replaced_by_an_error() {
+        let (mut daemon_end, mut client_end) = UnixStream::pair().unwrap();
+        let meta = smeltr_core::session::SessionMetadata::now_starting(
+            smeltr_core::session::SessionId::new(),
+        );
+        let big = "x".repeat(1 << 20);
+        let events = (0..20)
+            .map(|i| smeltr_core::event::Event {
+                seq: i,
+                ts_mono_ns: i,
+                ts_wall_ns: i,
+                source: Source::Mark,
+                pid: None,
+                session_id: meta.session_id.0,
+                payload: Payload::Mark {
+                    label: big.clone(),
+                    fields: Default::default(),
+                },
+            })
+            .collect();
+        let writer = tokio::spawn(async move {
+            write_msg(
+                &mut daemon_end,
+                &DaemonToClient::SessionEvents {
+                    events,
+                    metadata: meta,
+                },
+            )
+            .await
+        });
+        let got: DaemonToClient = read_msg(&mut client_end).await.unwrap().unwrap();
+        writer.await.unwrap().unwrap();
+        assert!(
+            matches!(&got, DaemonToClient::Error { message } if message.contains("too large")),
+            "got {:?}",
+            std::mem::discriminant(&got)
+        );
+    }
+
+    /// #267: a client that announces a frame and never sends its body held
+    /// its descriptor (and a buffer sized for the announced length) forever;
+    /// enough of them exhaust the daemon's descriptors.
+    #[tokio::test]
+    async fn a_frame_body_that_never_arrives_times_out() {
+        let (mut daemon_end, mut client_end) = UnixStream::pair().unwrap();
+        client_end.write_all(&100u32.to_le_bytes()).await.unwrap();
+        let r = read_msg_within::<ClientToDaemon>(
+            &mut daemon_end,
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(
+            r.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::TimedOut)
+        );
+    }
 
     async fn connect() -> UnixStream {
         UnixStream::connect(socket_path()).await.unwrap()
@@ -483,6 +651,50 @@ mod tests {
         assert!(matches!(resp, DaemonToClient::Error { .. }), "{resp:?}");
     }
 
+    /// #267: a second daemon (e.g. `smeltr daemon start` with only
+    /// SMELTR_HOME overridden) unlinked the live daemon's socket and bound its
+    /// own; when it stopped, it removed the socket and the first daemon was
+    /// alive but unreachable.
+    #[tokio::test]
+    #[serial]
+    async fn bind_refuses_a_socket_another_daemon_serves() {
+        let _home = temp_env();
+        let live = std::os::unix::net::UnixListener::bind(socket_path()).unwrap();
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let router = Arc::new(SessionRouter::new(ambient, None, None));
+        let sink = Arc::new(DaemonSink {
+            router: router.clone(),
+        });
+        let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let err = Server::bind(router, Bus::new(), probe_runtime, tx)
+            .err()
+            .expect("bind must refuse a served socket");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(
+            std::os::unix::net::UnixStream::connect(socket_path()).is_ok(),
+            "the live daemon's socket must be left in place"
+        );
+        drop(live);
+    }
+
+    /// A socket file left by a dead daemon is still replaced.
+    #[tokio::test]
+    #[serial]
+    async fn bind_replaces_a_stale_socket() {
+        let _home = temp_env();
+        drop(std::os::unix::net::UnixListener::bind(socket_path()).unwrap());
+        assert!(socket_path().exists(), "stale socket file");
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let router = Arc::new(SessionRouter::new(ambient, None, None));
+        let sink = Arc::new(DaemonSink {
+            router: router.clone(),
+        });
+        let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        assert!(Server::bind(router, Bus::new(), probe_runtime, tx).is_ok());
+    }
+
     #[tokio::test]
     #[serial]
     async fn hello_round_trip() {
@@ -500,7 +712,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let mut s = connect().await;
-        write_msg(
+        write_raw(
             &mut s,
             &ClientToDaemon::Hello {
                 client: "test".into(),
@@ -512,7 +724,7 @@ mod tests {
         let resp: DaemonToClient = read_msg(&mut s).await.unwrap().unwrap();
         assert!(matches!(resp, DaemonToClient::Welcome { .. }));
 
-        write_msg(
+        write_raw(
             &mut s,
             &ClientToDaemon::Emit {
                 source: Source::Mark,
