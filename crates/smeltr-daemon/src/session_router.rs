@@ -193,13 +193,21 @@ impl SessionRouter {
         self.ambient.id()
     }
 
+    /// Flush every session, even when one fails (one full disk must not stop
+    /// the others from being made durable). Returns the first error.
     pub fn flush_all(&self) -> std::io::Result<()> {
+        let mut first_err = None;
         let guard = self.by_pid.lock().unwrap();
         for s in guard.values() {
-            s.flush()?;
+            if let Err(e) = s.flush() {
+                first_err.get_or_insert(e);
+            }
         }
         drop(guard);
-        self.ambient.flush()
+        if let Err(e) = self.ambient.flush() {
+            first_err.get_or_insert(e);
+        }
+        first_err.map_or(Ok(()), Err)
     }
 
     /// Panic-safe flush of every session: never blocks, never errors.

@@ -25,6 +25,74 @@ struct Inner {
     clock: MonoClock,
     wall_epoch_ns: u64,
     seq: u64,
+    /// Whether the writer's last write failed — set on the first failure,
+    /// cleared once it writes again, so each episode is logged once (#268).
+    storage_failing: bool,
+    /// Dropped-event count at the last report.
+    dropped_reported: u64,
+    /// Whether this episode's drops were already logged.
+    drop_reported: bool,
+    /// Log lines emitted about storage (tests assert there is no flood).
+    storage_reports: u64,
+}
+
+impl Inner {
+    fn new(writer: SessionWriter, session_id: SessionId, wall_epoch_ns: u64) -> Self {
+        Self {
+            writer,
+            session_id,
+            clock: MonoClock::new(),
+            wall_epoch_ns,
+            seq: 0,
+            storage_failing: false,
+            dropped_reported: 0,
+            drop_reported: false,
+            storage_reports: 0,
+        }
+    }
+
+    /// Log storage state changes: the first failure of an episode, the first
+    /// drop, and the recovery. Not every failed Emit or periodic flush —
+    /// on a full disk that was thousands of identical lines.
+    fn report_storage(&mut self) {
+        let session = self.session_id.short();
+        match (self.writer.storage_error(), self.storage_failing) {
+            (Some(error), false) => {
+                tracing::error!(
+                    %session,
+                    %error,
+                    "session storage is failing; events wait in memory until writes succeed"
+                );
+                self.storage_failing = true;
+                self.storage_reports += 1;
+            }
+            (None, true) => {
+                tracing::warn!(
+                    %session,
+                    dropped_events = self.writer.dropped_events(),
+                    "session storage recovered"
+                );
+                self.storage_failing = false;
+                self.storage_reports += 1;
+            }
+            _ => {}
+        }
+        // First drop since the last report of a drop or recovery.
+        let dropped = self.writer.dropped_events();
+        if dropped > self.dropped_reported && self.storage_failing {
+            if !self.drop_reported {
+                tracing::error!(
+                    %session,
+                    "storage backlog full: dropping events until the disk accepts writes"
+                );
+                self.storage_reports += 1;
+                self.drop_reported = true;
+            }
+        } else if !self.storage_failing {
+            self.drop_reported = false;
+        }
+        self.dropped_reported = dropped;
+    }
 }
 
 /// What describes a scoped session at open time. Grouped rather than passed as
@@ -57,17 +125,10 @@ impl ActiveSession {
         let id = SessionId::new();
         let meta = SessionMetadata::now_starting(id);
         let writer = SessionWriter::create(meta)?;
-        let clock = MonoClock::new();
         let wall_epoch_ns = now_unix_ns();
         let s = Self {
             id,
-            inner: Mutex::new(Some(Inner {
-                writer,
-                session_id: id,
-                clock,
-                wall_epoch_ns,
-                seq: 0,
-            })),
+            inner: Mutex::new(Some(Inner::new(writer, id, wall_epoch_ns))),
             flight_recorder,
             bus,
             scope_token: None,
@@ -108,17 +169,10 @@ impl ActiveSession {
             meta.name = Some(n);
         }
         let writer = SessionWriter::create_with_format(meta, chunked)?;
-        let clock = MonoClock::new();
         let wall_epoch_ns = now_unix_ns();
         let s = Self {
             id,
-            inner: Mutex::new(Some(Inner {
-                writer,
-                session_id: id,
-                clock,
-                wall_epoch_ns,
-                seq: 0,
-            })),
+            inner: Mutex::new(Some(Inner::new(writer, id, wall_epoch_ns))),
             flight_recorder,
             bus,
             scope_token,
@@ -189,10 +243,12 @@ impl ActiveSession {
             seq: inner.seq,
             payload,
         };
-        inner
+        let written = inner
             .writer
             .write_event(&ev)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()));
+        inner.report_storage();
+        written?;
         drop(guard);
         if let Some(fr) = &self.flight_recorder {
             fr.push(ev.clone());
@@ -203,11 +259,28 @@ impl ActiveSession {
         Ok(ev)
     }
 
+    /// Whether the session's last write to disk failed (events are waiting
+    /// in memory). False once finalized.
+    pub fn storage_failing(&self) -> bool {
+        let guard = self.inner.lock().unwrap();
+        guard.as_ref().is_some_and(|i| i.storage_failing)
+    }
+
+    /// How many storage log lines this session emitted.
+    pub fn storage_reports(&self) -> u64 {
+        let guard = self.inner.lock().unwrap();
+        guard.as_ref().map_or(0, |i| i.storage_reports)
+    }
+
     /// Flushes the writer if the session is still active. Idempotent.
     pub fn flush(&self) -> std::io::Result<()> {
         let mut guard = self.inner.lock().unwrap();
         match guard.as_mut() {
-            Some(inner) => inner.writer.flush(),
+            Some(inner) => {
+                let r = inner.writer.flush();
+                inner.report_storage();
+                r
+            }
             None => Ok(()),
         }
     }
@@ -220,7 +293,11 @@ impl ActiveSession {
             return Ok(false);
         };
         match guard.as_mut() {
-            Some(inner) => inner.writer.flush().map(|_| true),
+            Some(inner) => {
+                let r = inner.writer.flush().map(|_| true);
+                inner.report_storage();
+                r
+            }
             None => Ok(true),
         }
     }
@@ -568,5 +645,100 @@ mod tests {
         );
         drop(guard);
         assert!(s.try_flush().unwrap());
+    }
+
+    /// A mounted 4 MB HFS+ image, detached on drop (#268). `None` (with a
+    /// message) when hdiutil is unavailable.
+    struct TinyVolume {
+        _tmp: tempfile::TempDir,
+        mount: std::path::PathBuf,
+    }
+
+    impl TinyVolume {
+        fn new() -> Option<Self> {
+            use std::process::Command;
+            let tmp = tempfile::tempdir().ok()?;
+            let dmg = tmp.path().join("v.dmg");
+            let mount = tmp.path().join("mnt");
+            std::fs::create_dir_all(&mount).ok()?;
+            let ok = Command::new("hdiutil")
+                .args(["create", "-quiet", "-size", "4m", "-fs", "HFS+"])
+                .args(["-volname", "smeltrtest"])
+                .arg(&dmg)
+                .status()
+                .is_ok_and(|s| s.success())
+                && Command::new("hdiutil")
+                    .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+                    .arg(&mount)
+                    .arg(&dmg)
+                    .status()
+                    .is_ok_and(|s| s.success());
+            if !ok {
+                eprintln!("SKIP: hdiutil could not create/attach a test volume");
+                return None;
+            }
+            Some(Self { _tmp: tmp, mount })
+        }
+
+        fn fill(&self) -> std::path::PathBuf {
+            use std::io::Write;
+            let p = self.mount.join("filler");
+            let mut f = std::fs::File::create(&p).unwrap();
+            for size in [64 * 1024, 512, 1] {
+                let buf = vec![0xA5u8; size];
+                while f.write_all(&buf).is_ok() {}
+            }
+            p
+        }
+    }
+
+    impl Drop for TinyVolume {
+        fn drop(&mut self) {
+            use std::process::Command;
+            let detached = Command::new("hdiutil")
+                .args(["detach", "-quiet"])
+                .arg(&self.mount)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !detached {
+                let _ = Command::new("hdiutil")
+                    .args(["detach", "-quiet", "-force"])
+                    .arg(&self.mount)
+                    .status();
+            }
+        }
+    }
+
+    /// #268: a full disk is reported once per episode, not once per Emit or
+    /// per periodic flush, and its end is reported too.
+    #[test]
+    #[serial]
+    fn storage_failure_is_reported_once_per_episode() {
+        let Some(vol) = TinyVolume::new() else { return };
+        std::env::set_var("SMELTR_HOME", &vol.mount);
+        let s = ActiveSession::open_new().unwrap();
+        s.flush().unwrap();
+        let filler = vol.fill();
+        for i in 0..3000u32 {
+            let _ = s.append(
+                Source::Mark,
+                None,
+                Payload::Mark {
+                    label: format!("{i:08}-{}", "x".repeat(200)),
+                    fields: Default::default(),
+                },
+            );
+            if i % 100 == 99 {
+                let _ = s.flush();
+            }
+        }
+        assert!(s.storage_failing(), "the full disk must be noticed");
+        assert_eq!(s.storage_reports(), 1, "one report for the whole episode");
+
+        std::fs::remove_file(filler).unwrap();
+        s.flush().unwrap();
+        assert!(!s.storage_failing(), "recovery must be noticed");
+        assert_eq!(s.storage_reports(), 2, "failure + recovery");
+        s.finalize(Some(0), None, "test").unwrap();
     }
 }

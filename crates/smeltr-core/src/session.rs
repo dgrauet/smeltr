@@ -83,6 +83,11 @@ pub struct SessionMetadata {
     /// What triggered a post-mortem session (#267); `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_mortem: Option<PostMortemTrigger>,
+    /// Events the writer accepted but had to drop because the disk refused
+    /// writes for longer than its in-memory backlog could absorb (#268).
+    /// Readers report it as damage: the event file alone cannot show a gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_events: Option<u64>,
 }
 
 /// The event a post-mortem session was flushed for.
@@ -156,6 +161,7 @@ impl SessionMetadata {
             term_signal: None,
             gputrace_path: None,
             post_mortem: None,
+            dropped_events: None,
         }
     }
 }

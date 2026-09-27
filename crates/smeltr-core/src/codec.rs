@@ -23,15 +23,28 @@ pub enum CodecError {
 pub const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 
 pub fn write_frame<W: Write, T: Serialize>(w: &mut W, value: &T) -> Result<usize, CodecError> {
-    let mut buf = Vec::with_capacity(256);
+    let frame = encode_frame(value)?;
+    w.write_all(&frame)?;
+    Ok(frame.len())
+}
+
+/// One complete frame (`u32_le(length) || cbor_bytes`) in memory.
+///
+/// Encoding before writing lets a caller hand the sink the whole frame at
+/// once: two separate writes could leave a length prefix without its body
+/// when the second one fails.
+pub fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
+    let mut buf = vec![0u8; 4];
     ciborium::into_writer(value, &mut buf)?;
-    if buf.len() as u64 > MAX_FRAME_BYTES as u64 {
-        return Err(CodecError::FrameTooLarge(buf.len() as u32, MAX_FRAME_BYTES));
+    let body = buf.len() - 4;
+    if body as u64 > MAX_FRAME_BYTES as u64 {
+        return Err(CodecError::FrameTooLarge(
+            u32::try_from(body).unwrap_or(u32::MAX),
+            MAX_FRAME_BYTES,
+        ));
     }
-    let len = (buf.len() as u32).to_le_bytes();
-    w.write_all(&len)?;
-    w.write_all(&buf)?;
-    Ok(4 + buf.len())
+    buf[..4].copy_from_slice(&(body as u32).to_le_bytes());
+    Ok(buf)
 }
 
 /// Reads a single frame. Returns `Ok(None)` on clean EOF before any byte was
