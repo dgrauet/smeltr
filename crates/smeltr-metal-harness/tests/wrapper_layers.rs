@@ -11,6 +11,7 @@
 
 #![cfg(target_os = "macos")]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -20,7 +21,12 @@ fn dylib_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../metal-hook/build/libmetal_hook.dylib")
 }
 
-/// (committed, completed, cb_ops) frames for one harness run.
+/// (committed, completed, cb_ops) for one harness run. Buffers are counted
+/// on the busiest queue — the app's: on a paravirtualized GPU (the macOS 14
+/// CI runner) the debug layer submits command buffers of its own on another
+/// queue, genuine and distinct. CB_OPS only come from the app's encoders, so
+/// they are counted whole — that is where the wrapper double count showed
+/// (11 -> 22 locally).
 fn counts(dir: &Path, layer: Option<&str>) -> (usize, usize, usize) {
     let ring = dir.join(format!("ring-{}.bin", layer.unwrap_or("none")));
     drop(create_ring(&ring, 1 << 22).unwrap());
@@ -38,16 +44,23 @@ fn counts(dir: &Path, layer: Option<&str>) -> (usize, usize, usize) {
         String::from_utf8_lossy(&out.stderr)
     );
     let mut reader = open_for_read(&ring).unwrap();
-    let (mut committed, mut completed, mut ops) = (0, 0, 0);
+    let mut committed: HashMap<u64, usize> = HashMap::new();
+    let mut completed: HashMap<u64, usize> = HashMap::new();
+    let mut ops = 0;
     while let Ok(Some(ev)) = reader.next() {
         match ev.frame {
-            DecodedFrame::CbCommitted { .. } => committed += 1,
-            DecodedFrame::CbCompleted { .. } => completed += 1,
+            DecodedFrame::CbCommitted { queue_id, .. } => {
+                *committed.entry(queue_id).or_default() += 1
+            }
+            DecodedFrame::CbCompleted { queue_id, .. } => {
+                *completed.entry(queue_id).or_default() += 1
+            }
             DecodedFrame::CbOps { .. } => ops += 1,
             _ => {}
         }
     }
-    (committed, completed, ops)
+    let busiest = |m: &HashMap<u64, usize>| m.values().copied().max().unwrap_or(0);
+    (busiest(&committed), busiest(&completed), ops)
 }
 
 #[test]
