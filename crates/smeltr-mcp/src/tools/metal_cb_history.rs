@@ -28,31 +28,31 @@ pub struct Response {
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
     let limit = bounded_count("limit", params.limit, DEFAULT_LIMIT, MAX_LIMIT)?;
-    let dir = resolve_session(&params.session)?;
-    let events = smeltr_core::reader::read_events(&dir)?;
-    let total = events.len();
-    let filtered: Vec<Event> = events
-        .into_iter()
-        .filter(|e| is_metal(&e.payload))
-        .filter(|e| match params.queue_id {
-            None => true,
-            Some(want) => payload_queue_id(&e.payload)
-                .map(|q| q == want)
-                .unwrap_or(false),
-        })
-        .collect();
-    let matched = filtered.len();
-
     let offset = params.offset.unwrap_or(0);
-    let mut sliced: Vec<Event> = filtered.into_iter().skip(offset).collect();
-    let truncated = sliced.len() > limit;
-    sliced.truncate(limit);
+    let dir = resolve_session(&params.session)?;
+    // One streaming pass that keeps only the requested page (#271).
+    let mut events = Vec::new();
+    let (mut total, mut matched) = (0usize, 0usize);
+    smeltr_core::reader::for_each_event(&dir, None, |e| {
+        total += 1;
+        let wanted = is_metal(&e.payload)
+            && params
+                .queue_id
+                .is_none_or(|want| payload_queue_id(&e.payload) == Some(want));
+        if wanted {
+            if matched >= offset && events.len() < limit {
+                events.push(e);
+            }
+            matched += 1;
+        }
+        std::ops::ControlFlow::Continue(())
+    })?;
 
     Ok(Response {
-        events: sliced,
+        events,
         matched,
         total,
-        truncated,
+        truncated: matched > offset.saturating_add(limit),
         offset,
     })
 }
@@ -270,5 +270,20 @@ mod tests {
         assert_eq!(resp.events.len(), 5);
         assert_eq!(resp.events[0].seq, 4); // 3 skipped
         assert_eq!(resp.offset, 3);
+        assert!(resp.truncated, "seq 9 and 10 remain");
+        assert_eq!(resp.matched, 10);
+
+        let last = run(Params {
+            session: id.short(),
+            limit: Some(5),
+            offset: Some(5),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            last.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![6, 7, 8, 9, 10]
+        );
+        assert!(!last.truncated, "the last page");
     }
 }

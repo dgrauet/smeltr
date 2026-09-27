@@ -8,7 +8,9 @@
 use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, Payload};
+use smeltr_core::filter::payload_kind;
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 
 const DEFAULT_WINDOW_NS: u64 = 200_000_000;
 const DEFAULT_MAX_EVENTS: usize = 50;
@@ -60,19 +62,12 @@ const ROUTINE_KINDS: &[&str] = &[
     "IoReportSample",
 ];
 
-fn payload_kind(p: &Payload) -> String {
-    serde_json::to_value(p)
-        .ok()
-        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_string))
-        .unwrap_or_else(|| "Unknown".to_string())
-}
-
 fn is_notable(e: &Event) -> bool {
     // A failed CB is notable even though CbCompleted is routine.
     if let Payload::MetalCbCompleted { error_code, .. } = &e.payload {
         return error_code.is_some_and(|c| c != 0);
     }
-    !ROUTINE_KINDS.contains(&payload_kind(&e.payload).as_str())
+    !ROUTINE_KINDS.contains(&payload_kind(e))
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -83,29 +78,40 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         MAX_MAX_EVENTS,
     )?;
     let dir = resolve_session(&params.session)?;
-    let events = smeltr_core::reader::read_events(&dir)?;
-    let focal = events
-        .iter()
-        .find(|e| e.seq == params.focal_seq)
-        .cloned()
-        .ok_or_else(|| {
-            ToolError::NotFound(format!("focal seq {} not in session", params.focal_seq))
-        })?;
+    // Two streaming passes rather than the whole session in memory (#271):
+    // the focal event (stopping there), then the window around it, whose
+    // time bounds let a chunked session skip every other chunk.
+    let mut focal = None;
+    smeltr_core::reader::for_each_event(&dir, None, |e| {
+        if e.seq == params.focal_seq {
+            focal = Some(e);
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })?;
+    let focal = focal.ok_or_else(|| {
+        ToolError::NotFound(format!("focal seq {} not in session", params.focal_seq))
+    })?;
     let window = params.window_ns.unwrap_or(DEFAULT_WINDOW_NS);
-    let from = focal.ts_mono_ns.saturating_sub(window);
-    let to = focal.ts_mono_ns.saturating_add(window);
-    let mut in_window: Vec<Event> = events
-        .into_iter()
-        .filter(|e| e.seq != focal.seq)
-        .filter(|e| e.source != focal.source)
-        .filter(|e| e.ts_mono_ns >= from && e.ts_mono_ns <= to)
-        .collect();
+    let filter = smeltr_core::EventFilter {
+        from_ts: Some(focal.ts_mono_ns.saturating_sub(window)),
+        to_ts: Some(focal.ts_mono_ns.saturating_add(window)),
+        ..Default::default()
+    };
+    let mut in_window: Vec<Event> = Vec::new();
+    smeltr_core::reader::for_each_event(&dir, Some(&filter), |e| {
+        if e.seq != focal.seq && e.source != focal.source {
+            in_window.push(e);
+        }
+        ControlFlow::Continue(())
+    })?;
     // Notable first, then by distance to the focal timestamp.
     in_window.sort_by_key(|e| (!is_notable(e), e.ts_mono_ns.abs_diff(focal.ts_mono_ns)));
     let mut elided: BTreeMap<String, u64> = BTreeMap::new();
     if in_window.len() > max_events {
         for e in &in_window[max_events..] {
-            *elided.entry(payload_kind(&e.payload)).or_default() += 1;
+            *elided.entry(payload_kind(e).to_string()).or_default() += 1;
         }
         in_window.truncate(max_events);
     }

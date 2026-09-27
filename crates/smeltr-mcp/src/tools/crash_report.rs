@@ -91,23 +91,32 @@ fn report_path(dir: &std::path::Path) -> Option<String> {
             return Some(path.clone());
         }
     }
-    let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
-    if let Some(t) = trigger {
-        // Only a crash of the process the post-mortem is about.
-        let pid = t.pid?;
-        return events.iter().rev().find_map(|e| match &e.payload {
-            Payload::CrashReportEmitted {
-                path,
-                crashed_pid: Some(p),
-                ..
-            } if *p == pid => Some(path.clone()),
-            _ => None,
-        });
-    }
-    let emitted = events.iter().rev().find_map(|e| match &e.payload {
-        Payload::CrashReportEmitted { path, .. } => Some(path.clone()),
-        _ => None,
+    // Only a crash of the process a post-mortem is about.
+    let want_pid = match &trigger {
+        Some(t) => Some(t.pid?),
+        None => None,
+    };
+    // The newest matching report, streamed: the whole session used to be
+    // held in memory to find this one event (#271).
+    let filter = smeltr_core::EventFilter {
+        payload_kind: Some("CrashReportEmitted".into()),
+        ..Default::default()
+    };
+    let mut emitted = None;
+    let _ = smeltr_core::reader::for_each_event(dir, Some(&filter), |e| {
+        if let Payload::CrashReportEmitted {
+            path, crashed_pid, ..
+        } = e.payload
+        {
+            if want_pid.is_none() || crashed_pid == want_pid {
+                emitted = Some(path);
+            }
+        }
+        std::ops::ControlFlow::Continue(())
     });
+    if trigger.is_some() {
+        return emitted;
+    }
     emitted.or_else(|| smeltr_analyzer::crash_join::session_crash(dir).map(|j| j.path))
 }
 
