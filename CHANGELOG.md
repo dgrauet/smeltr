@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.14](https://github.com/dgrauet/smeltr/compare/v0.28.13...v0.28.14) (2026-09-27)
+
+
+### Bug Fixes
+
+* **core:** keep sessions readable across ENOSPC and crashes, report damaged data ([#284](https://github.com/dgrauet/smeltr/issues/284)) ([41b788c](https://github.com/dgrauet/smeltr/commit/41b788cb225477db60fc718d63d1d6ba34c34539))
+* correct the analysis surfaces: export, breakdown, crash causes, caches ([#285](https://github.com/dgrauet/smeltr/issues/285)) ([5bb7bd5](https://github.com/dgrauet/smeltr/commit/5bb7bd5ee6257e9c581c66a806a0962eca606440)), closes [#270](https://github.com/dgrauet/smeltr/issues/270)
+* identify ops by kernel symbol, name them by the whole PSO address, keep symbols under capture ([#281](https://github.com/dgrauet/smeltr/issues/281)) ([68ef86b](https://github.com/dgrauet/smeltr/commit/68ef86b36061ce3b0a338dcb2bbcb66266838708)), closes [#265](https://github.com/dgrauet/smeltr/issues/265)
+* **mcp:** bound every tool result, stream and cache session reads, guard export_session ([#286](https://github.com/dgrauet/smeltr/issues/286)) ([1cd0431](https://github.com/dgrauet/smeltr/commit/1cd04312977e05de1b0e41846e787ca1a6bf8648))
+* never let a failed log write kill the daemon ([#282](https://github.com/dgrauet/smeltr/issues/282)) ([025f806](https://github.com/dgrauet/smeltr/commit/025f80696f874a228d113badbdb023e8c21ac555))
+* **record:** restore the record lifecycle fixes that [#281](https://github.com/dgrauet/smeltr/issues/281) reverted ([#288](https://github.com/dgrauet/smeltr/issues/288)) ([dc19540](https://github.com/dgrauet/smeltr/commit/dc195402f551cfb0f7ed5a1b2a54b75d3aface49)), closes [#269](https://github.com/dgrauet/smeltr/issues/269)
+
 ## [0.28.13](https://github.com/dgrauet/smeltr/compare/v0.28.12...v0.28.13) (2026-09-27)
 
 
