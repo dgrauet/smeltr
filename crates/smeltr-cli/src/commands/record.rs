@@ -81,6 +81,19 @@ fn apply_session_name_env(builder: &mut std::process::Command, name: Option<&str
     }
 }
 
+/// Refuse a `--name` the daemon would drop or truncate (#267): empty, with
+/// control characters or '/', or longer than 200 bytes.
+fn check_name_flag(flag: Option<&str>) -> anyhow::Result<()> {
+    let Some(raw) = flag else { return Ok(()) };
+    match smeltr_core::session::validate_session_name(raw) {
+        Some(n) if n == raw.trim() => Ok(()),
+        Some(_) => anyhow::bail!("--name is longer than 200 bytes"),
+        None => anyhow::bail!(
+            "invalid --name {raw:?}: it must be non-empty, without control characters or '/'"
+        ),
+    }
+}
+
 /// Resolve the effective session name: --name flag takes precedence
 /// over SMELTR_SESSION_NAME env. Returns None when neither is set.
 fn resolve_session_name(flag: Option<&str>) -> Option<String> {
@@ -106,6 +119,7 @@ pub async fn run(
     gputrace: Option<u32>,
     gputrace_scope: Option<&str>,
 ) -> anyhow::Result<i32> {
+    check_name_flag(name)?;
     let mut client = Client::connect().await?;
 
     // Programmatic Metal capture (strict opt-in). The file is created by the
@@ -401,6 +415,17 @@ mod tests {
     fn resolve_session_name_returns_none_when_neither_set() {
         std::env::remove_var("SMELTR_SESSION_NAME");
         assert_eq!(resolve_session_name(None), None);
+    }
+
+    /// #267: an invalid `--name` used to be stored as given (the daemon now
+    /// drops it); the user should hear about it before the run starts.
+    #[test]
+    fn invalid_name_flag_is_refused_up_front() {
+        for bad in ["a/b", "ctl\u{1b}[31m", "   ", "nul\0"] {
+            assert!(check_name_flag(Some(bad)).is_err(), "{bad:?}");
+        }
+        assert!(check_name_flag(Some("ok-run")).is_ok());
+        assert!(check_name_flag(None).is_ok());
     }
 
     #[test]
