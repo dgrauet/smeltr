@@ -117,7 +117,8 @@ impl Server {
 #[derive(Default)]
 struct ConnAttachments {
     scoped: Vec<u32>,
-    hooks: Vec<u32>,
+    /// Pid and ring path of each attached metal hook.
+    hooks: Vec<(u32, std::path::PathBuf)>,
 }
 
 async fn handle_connection(
@@ -140,12 +141,34 @@ async fn handle_connection(
     {
         tracing::warn!(error = %e, "connection ended with error");
     }
-    for pid in attached.hooks {
+    // A SIGKILLed `record` leaves its child running (#269): detaching now
+    // stopped draining its ring and sent the rest of the run to the ambient
+    // session. Keep recording until the process is gone; its exit status is
+    // unknown.
+    let mut pids: Vec<u32> = attached.scoped.clone();
+    pids.extend(attached.hooks.iter().map(|(p, _)| *p));
+    for pid in pids {
+        if pid_alive(pid) {
+            tracing::warn!(
+                pid,
+                "client disconnected before detaching; recording until the process exits"
+            );
+            while pid_alive(pid) {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+    }
+    for (pid, ring) in attached.hooks {
         tracing::warn!(
             pid,
             "client disconnected without DetachMetalHook; auto-detaching"
         );
+        // Let the probe drain the last frames, as `record` does.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         probe_runtime.detach_metal_hook(pid).await;
+        // The client that created the rings is gone; nothing else removes
+        // them (#269: orphan rings accumulated in ~/.smeltr/rings).
+        smeltr_metal_ring::remove_ring_family(&ring);
     }
     for pid in attached.scoped {
         tracing::warn!(
@@ -155,6 +178,16 @@ async fn handle_connection(
         probe_runtime.detach_scoped(pid).await;
         let _ = router.detach_scoped(pid, None, None);
     }
+}
+
+/// Whether `pid` still exists (EPERM: it does, owned by someone else).
+fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks existence and permissions.
+    let r = unsafe { libc::kill(pid, 0) };
+    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 async fn handle_connection_inner(
@@ -178,8 +211,10 @@ async fn handle_connection_inner(
         match &msg {
             ClientToDaemon::AttachScopedProbes { pid, .. } => attached.scoped.push(*pid),
             ClientToDaemon::DetachScopedProbes { pid, .. } => attached.scoped.retain(|p| p != pid),
-            ClientToDaemon::AttachMetalHook { pid, .. } => attached.hooks.push(*pid),
-            ClientToDaemon::DetachMetalHook { pid } => attached.hooks.retain(|p| p != pid),
+            ClientToDaemon::AttachMetalHook { pid, ring_path } => {
+                attached.hooks.push((*pid, ring_path.into()))
+            }
+            ClientToDaemon::DetachMetalHook { pid } => attached.hooks.retain(|(p, _)| p != pid),
             _ => {}
         }
         let resp = handle_msg(msg, router, bus, probe_runtime, shutdown_tx).await;
