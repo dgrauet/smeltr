@@ -185,9 +185,11 @@ rationale behind PSO-signature naming and stage-boundary timing.
 
 #### MCP equivalents
 
-- `get_inference_breakdown` — returns the full `ModuleBreakdown` tree
-  including ops. Accepts `max_depth`, `top_n`, `min_gpu_ns`,
-  `include_ops`, `top_ops_per_leaf`.
+- `get_inference_breakdown` — returns the `ModuleBreakdown` tree
+  including ops. Accepts `max_depth` (default 6), `top_n` (nodes kept over
+  the whole tree, heaviest first, like `smeltr breakdown --top`; default
+  20), `min_gpu_ns`, `include_ops`, `top_ops_per_leaf` (default 5);
+  `elided_nodes` counts what the bounds cut.
 - `get_op_summary` — flat list of kernel signatures with GPU time and
   percentage, aggregated across all module leaves.
 
@@ -311,8 +313,10 @@ Equivalent paths:
 
 - **CLI:** `smeltr export <session-ref> [--format chrome-trace|json] [--output PATH]`
   (default format chrome-trace, default output `<short_id>.json`, use `-` for stdout).
-- **MCP:** `export_session(session, format, output_path)` writes the
-  file and returns its path.
+- **MCP:** `export_session(session, format, output_path, overwrite)` writes the
+  file and returns its path. `output_path` must be absolute, its directory
+  must exist, and it may not lie inside `$SMELTR_HOME/sessions`; an existing
+  file is an error unless `overwrite: true`.
 - **Python:** `smeltr.export(filepath, format="chrome-trace", session=None)`.
   With no `session`, exports this process's recording when it runs under
   `smeltr record` (the daemon matches its `SMELTR_SCOPE_TOKEN`), else the
@@ -605,6 +609,17 @@ From any Claude session, you can then ask things like:
 
 Every tool accepts a session ref as short id (8 hex), full UUID, or
 `SessionMetadata.name` (see [Naming sessions](#naming-sessions)).
+
+Results stay under an MCP client's tool-output limit (Claude Code's default
+is 25 000 tokens). Count arguments have small defaults and hard caps
+(`query_events`/`get_metal_cb_history` `limit` 100, at most 1000;
+`find_correlations` `max_events` 50/500; `list_sessions` `limit` 50/200;
+`get_crash_report` `max_chars` 20 000/50 000); 0 or a value above the cap
+is an invalid-params error. On top of that, a result is sent as one JSON text
+block of at most 60 000 characters: a larger one is cut — the largest list
+first, from its end — and carries a `_truncated` object listing each cut
+(`path` as a JSON pointer, `kept` of `of`) with a `hint` on how to narrow or
+page the call.
 
 | Tool | Use when | Returns |
 |---|---|---|

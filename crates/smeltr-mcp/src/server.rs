@@ -172,7 +172,7 @@ pub fn read_session_resource(uri: &str) -> Result<serde_json::Value, ToolError> 
     match view {
         None => {
             let metadata = smeltr_core::reader::read_metadata(&dir).ok();
-            let events = smeltr_core::reader::read_events(&dir)?;
+            let events = crate::session_cache::events(&dir)?;
             Ok(json!({ "metadata": metadata, "events": events }))
         }
         Some("metadata") => {
@@ -240,6 +240,56 @@ fn tool_error_to_mcp(e: ToolError) -> McpError {
     }
 }
 
+/// How to get what a cut result left out, per tool (see [`crate::budget`]).
+fn truncation_hint(tool: &str) -> &'static str {
+    match tool {
+        "query_events" => {
+            "lower `limit`, filter with `source` / `payload_kind`, or page with \
+             `from_ts_mono_ns` = the last returned event's ts_mono_ns + 1"
+        }
+        "get_metal_cb_history" => "lower `limit` and page with `offset`, or filter by `queue_id`",
+        "find_correlations" => "lower `max_events` or `window_ns`",
+        "list_sessions" => "lower `limit` and page with `offset` = `next_offset`",
+        "get_crash_report" => "lower `max_chars` and page with `offset` = `next_offset`",
+        "get_inference_breakdown" => {
+            "lower `max_depth` / `top_n` / `top_ops_per_leaf`, raise `min_gpu_ns`, \
+             or narrow with `field_filter`"
+        }
+        "get_op_summary" => "lower `top_n`",
+        "get_memory_breakdown" => {
+            "omit `include_timeline`, or raise `bucket_seconds` for fewer timeline buckets"
+        }
+        "get_dispatch_origins" => {
+            "the longest origin lists come last; use `get_op_summary` for the aggregate view"
+        }
+        "compare_sessions" => {
+            "compare the parts separately: `get_inference_breakdown`, `get_op_summary`, \
+             `get_memory_breakdown` on each session"
+        }
+        "get_model_loads" => {
+            "the earliest loads are kept; `query_events` with \
+             payload_kind=\"ModelLoad\" pages the rest"
+        }
+        "subscribe_live" => "poll more often: each poll covers the events since `cursor`",
+        _ => "narrow the call",
+    }
+}
+
+/// The result of a successful call: its JSON as a single text block, cut to
+/// [`crate::budget::RESPONSE_BUDGET_CHARS`] when larger. It used to go out a
+/// second time as `structuredContent` with no `outputSchema`, doubling
+/// every response (#271); every client reads the text.
+fn tool_result(tool: &str, value: serde_json::Value) -> Result<CallToolResult, McpError> {
+    let value = crate::budget::fit(
+        value,
+        crate::budget::RESPONSE_BUDGET_CHARS,
+        truncation_hint(tool),
+    );
+    let text =
+        serde_json::to_string(&value).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
 fn tool_list() -> Vec<Tool> {
     vec![
         tool::<crate::tools::list_sessions::Params>(
@@ -288,7 +338,7 @@ fn tool_list() -> Vec<Tool> {
         ),
         tool::<crate::tools::export_session::Params>(
             "export_session",
-            "Export a recorded session to chrome-trace JSON (openable in chrome://tracing / Perfetto / Speedscope) or raw JSON. Writes to disk and returns the file path.",
+            "Export a recorded session to chrome-trace JSON (openable in chrome://tracing / Perfetto / Speedscope) or raw JSON. Writes to disk and returns the file path. `output_path` must be absolute, in an existing directory outside the smeltr sessions store; an existing file is replaced only with `overwrite: true`.",
         ),
         tool::<crate::tools::model_loads::Params>(
             "get_model_loads",
@@ -336,7 +386,11 @@ impl ServerHandler for SmeltrMcpServer {
              — {ref} = dir name, 8-hex short id, UUID, or session name.\n\
              \n\
              The server emits notifications/resources/list_changed when the set of sessions \
-             changes — connected clients need not poll list_sessions.",
+             changes — connected clients need not poll list_sessions.\n\
+             \n\
+             Tool results are JSON text of at most 60000 characters. A larger result is cut \
+             (largest list first, from its end) and carries `_truncated`: each cut's JSON \
+             pointer `path`, `kept` of `of`, and a `hint` on how to narrow or page the call.",
         )
     }
 
@@ -358,13 +412,7 @@ impl ServerHandler for SmeltrMcpServer {
             .map(serde_json::Value::Object)
             .unwrap_or(serde_json::Value::Object(JsonObject::new()));
         match dispatch_call(&request.name, args) {
-            Ok(value) => {
-                let text = serde_json::to_string(&value)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
-                result.structured_content = Some(value);
-                Ok(result)
-            }
+            Ok(value) => tool_result(&request.name, value),
             Err(e) => Err(tool_error_to_mcp(e)),
         }
     }
@@ -456,6 +504,57 @@ mod tests {
     use super::*;
     use smeltr_core::session::{SessionId, SessionMetadata};
     use smeltr_core::writer::SessionWriter;
+
+    fn text_of(r: &CallToolResult) -> &str {
+        assert_eq!(r.content.len(), 1);
+        &r.content[0].as_text().expect("text content").text
+    }
+
+    /// #271: every result went out twice, as text and as structuredContent
+    /// (with no outputSchema to validate it). Text alone is what every
+    /// client reads.
+    #[test]
+    fn a_result_is_sent_once_as_json_text() {
+        let v = json!({"sessions": [], "next_offset": 3});
+        let r = tool_result("list_sessions", v.clone()).unwrap();
+        assert!(r.structured_content.is_none());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text_of(&r)).unwrap(),
+            v
+        );
+        assert_ne!(r.is_error, Some(true));
+    }
+
+    /// #271: nothing goes out above the budget; a cut result says how to
+    /// narrow the call it came from.
+    #[test]
+    fn an_oversized_result_is_cut_to_the_budget_with_a_tool_hint() {
+        let events: Vec<_> = (0..5_000)
+            .map(|i| json!({"seq": i, "payload": {"kind": "Mark", "label": "x".repeat(40)}}))
+            .collect();
+        let r = tool_result("query_events", json!({"events": events, "matched": 5_000})).unwrap();
+        let text = text_of(&r);
+        assert!(
+            text.len() <= crate::budget::RESPONSE_BUDGET_CHARS,
+            "{}",
+            text.len()
+        );
+        let v: serde_json::Value = serde_json::from_str(text).unwrap();
+        let hint = v["_truncated"]["hint"].as_str().unwrap();
+        assert!(hint.contains("payload_kind"), "{hint}");
+        assert_eq!(v["matched"], 5_000);
+    }
+
+    #[test]
+    fn every_tool_has_its_own_truncation_hint() {
+        for t in tool_list() {
+            let hint = truncation_hint(&t.name);
+            assert!(!hint.is_empty());
+            if t.name != "export_session" && t.name != "get_session_summary" {
+                assert_ne!(hint, truncation_hint("unknown"), "{}", t.name);
+            }
+        }
+    }
 
     #[test]
     #[serial_test::serial]

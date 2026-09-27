@@ -33,6 +33,24 @@ pub fn resolve_session(arg: &str) -> Result<std::path::PathBuf, ToolError> {
     })
 }
 
+/// Resolves a count argument (`limit`, `top_n`, …): `default` when absent,
+/// an error naming the accepted range when it is 0 or above `max`. An
+/// unbounded count let one call return tens of megabytes, and a silently
+/// coerced 0 hid the caller's mistake (#271). Checked before any session
+/// is read, so a bad call costs nothing.
+pub fn bounded_count<T>(name: &str, value: Option<T>, default: T, max: T) -> Result<T, ToolError>
+where
+    T: Copy + PartialOrd + Default + std::fmt::Display,
+{
+    let v = value.unwrap_or(default);
+    if v == T::default() || v > max {
+        return Err(ToolError::BadArgs(format!(
+            "{name} must be between 1 and {max}, got {v}"
+        )));
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

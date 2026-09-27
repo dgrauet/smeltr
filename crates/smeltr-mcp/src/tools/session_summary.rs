@@ -28,7 +28,7 @@ pub struct Response {
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
     let dir = resolve_session(&params.session)?;
-    let (events, damage) = smeltr_core::reader::read_events_checked(&dir)?;
+    let (events, damage) = crate::session_cache::checked(&dir)?;
     let report = smeltr_analyzer::analyze_session_checked(&dir, &events, damage.as_ref());
     let gputrace_path = smeltr_core::reader::read_metadata(&dir)
         .ok()

@@ -1,23 +1,29 @@
 //! `get_inference_breakdown` MCP tool.
 
-use crate::types::{resolve_session, ToolError};
+use crate::session_cache::events as read_events;
+use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::{
     apply_op_group_by, compute_breakdown, prune_by_field_filter, BreakdownNotices, ModuleBreakdown,
     OpGroupBy,
 };
 use smeltr_core::event::FieldValue;
-use smeltr_core::reader::read_events;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
     pub session: String,
+    /// Tree depth kept below the root (default 6, like `smeltr breakdown`;
+    /// 1..=64).
     pub max_depth: Option<u16>,
+    /// Nodes kept in the whole tree, largest GPU time first, like the rows
+    /// of `smeltr breakdown --top` (default 20; 1..=200). A kept node's
+    /// ancestors are always kept.
     pub top_n: Option<u32>,
     pub min_gpu_ns: Option<u64>,
     #[serde(default = "default_include_ops")]
     pub include_ops: bool,
+    /// Ops kept per node (default 5; 0..=50).
     #[serde(default = "default_top_ops")]
     pub top_ops_per_leaf: u32,
     /// Exact-match field filter. Keys are field names; values are JSON
@@ -72,6 +78,15 @@ pub struct Response {
     /// has always printed this; the tool used to omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Tree nodes (each with its whole subtree) cut by `max_depth`, `top_n`
+    /// or `min_gpu_ns`. Raise the bounds, or narrow with `field_filter`,
+    /// to see them. Absent when nothing was cut.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub elided_nodes: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -85,6 +100,17 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             )))
         }
     };
+    // Same defaults as `smeltr breakdown --depth 6 --top 20` (#271: they
+    // used to be unbounded, and a real session's tree was 1.19 M chars).
+    let max_depth = bounded_count("max_depth", params.max_depth, 6, 64)?;
+    let top_n = bounded_count("top_n", params.top_n, 20, 200)? as usize;
+    if params.top_ops_per_leaf > 50 {
+        return Err(ToolError::BadArgs(format!(
+            "top_ops_per_leaf must be at most 50, got {}",
+            params.top_ops_per_leaf
+        )));
+    }
+    let top_ops_per_leaf = params.top_ops_per_leaf as usize;
 
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
@@ -94,8 +120,8 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         .as_ref()
         .map(|g| g.advice().to_string());
     let degraded = notices.degraded_advice();
-    let mut root =
-        compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
+    let mut root = compute_breakdown(events.iter().cloned())
+        .map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
     if let Some(raw_filter) = params.field_filter.as_ref() {
         if !raw_filter.is_empty() {
@@ -115,30 +141,11 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         }
     }
 
-    let max_depth = params.max_depth.unwrap_or(u16::MAX);
-    let top_n = params.top_n.unwrap_or(u32::MAX) as usize;
     let min_gpu_ns = params.min_gpu_ns.unwrap_or(0);
-
-    fn prune(n: &mut ModuleBreakdown, depth: u16, max_depth: u16, top_n: usize, min_gpu_ns: u64) {
-        if depth >= max_depth {
-            n.children.clear();
-            return;
-        }
-        n.children.retain(|c| c.gpu_ns_subtree >= min_gpu_ns);
-        n.children
-            .sort_by_key(|c| std::cmp::Reverse(c.gpu_ns_subtree));
-        if n.children.len() > top_n {
-            n.children.truncate(top_n);
-        }
-        for c in &mut n.children {
-            prune(c, depth + 1, max_depth, top_n, min_gpu_ns);
-        }
-    }
-    prune(&mut root, 0, max_depth, top_n, min_gpu_ns);
+    let elided_nodes = prune(&mut root, max_depth, top_n, min_gpu_ns);
 
     apply_op_group_by(&mut root, group_by);
 
-    let top_ops_per_leaf = params.top_ops_per_leaf as usize;
     let include_ops = params.include_ops;
     fn shape_ops(n: &mut ModuleBreakdown, include: bool, top: usize) {
         if !include {
@@ -156,7 +163,68 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         root,
         attribution_gap,
         degraded,
+        elided_nodes,
     })
+}
+
+/// Every node of `n`'s subtree, `n` included.
+fn subtree_size(n: &ModuleBreakdown) -> u64 {
+    1 + n.children.iter().map(subtree_size).sum::<u64>()
+}
+
+/// Candidate nodes as (GPU time desc, depth, preorder id).
+type Ranked = Vec<(std::cmp::Reverse<u64>, u16, usize)>;
+
+/// Keeps the `top_n` nodes of the whole tree with the largest
+/// `gpu_ns_subtree` (at most `max_depth` below the root, at or above
+/// `min_gpu_ns`), like the rows of `smeltr breakdown --top`; children end up
+/// sorted by GPU time. Returns how many nodes it cut.
+///
+/// Ranked by (GPU time desc, depth asc), a node always comes after its
+/// ancestors — their subtree holds its time — so what is kept stays a tree.
+/// `top_n` used to apply per node: its default of 20 still let a real
+/// session's tree reach 392k characters at depth 6 (#271).
+fn prune(root: &mut ModuleBreakdown, max_depth: u16, top_n: usize, min_gpu_ns: u64) -> u64 {
+    fn sort(n: &mut ModuleBreakdown) {
+        n.children
+            .sort_by_key(|c| std::cmp::Reverse(c.gpu_ns_subtree));
+        n.children.iter_mut().for_each(sort);
+    }
+    fn rank(
+        n: &ModuleBreakdown,
+        depth: u16,
+        limits: (u16, u64),
+        next: &mut usize,
+        out: &mut Ranked,
+    ) {
+        for c in &n.children {
+            let id = *next;
+            *next += 1;
+            if depth < limits.0 && c.gpu_ns_subtree >= limits.1 {
+                out.push((std::cmp::Reverse(c.gpu_ns_subtree), depth + 1, id));
+            }
+            rank(c, depth + 1, limits, next, out);
+        }
+    }
+    fn retain(n: &mut ModuleBreakdown, next: &mut usize, keep: &HashSet<usize>) {
+        for mut c in std::mem::take(&mut n.children) {
+            if keep.contains(next) {
+                *next += 1;
+                retain(&mut c, next, keep);
+                n.children.push(c);
+            } else {
+                *next += subtree_size(&c) as usize;
+            }
+        }
+    }
+    sort(root);
+    let mut ranked = Ranked::new();
+    rank(root, 0, (max_depth, min_gpu_ns), &mut 0, &mut ranked);
+    ranked.sort_unstable();
+    let keep: HashSet<usize> = ranked.iter().take(top_n).map(|r| r.2).collect();
+    let total = subtree_size(root) - 1;
+    retain(root, &mut 0, &keep);
+    total - keep.len() as u64
 }
 
 #[cfg(test)]
@@ -171,6 +239,202 @@ mod tests {
     /// Params::field_filter (which stores JSON scalars to avoid a schemars dep).
     fn fv_to_json(v: &FieldValue) -> serde_json::Value {
         serde_json::to_value(v).unwrap()
+    }
+
+    /// A session whose module tree is a chain `c0 > c1 > … > c{depth-1}`
+    /// next to `width` sibling leaves `w0…` at the top level.
+    fn wide_and_deep_session(depth: u64, width: u64) -> SessionId {
+        let id = SessionId::new();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(id)).unwrap();
+        let mut seq = 0u64;
+        let mut emit = |payload: Payload| {
+            seq += 1;
+            w.write_event(&Event {
+                ts_mono_ns: seq,
+                ts_wall_ns: seq,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq,
+                payload,
+            })
+            .unwrap();
+        };
+        let enter =
+            |call: u64, name: String, parent: Option<u64>, depth: u16| Payload::ModuleEntered {
+                module_call_id: call,
+                module_def_id: call,
+                qualname: name.clone(),
+                class_name: name,
+                parent_call_id: parent,
+                depth,
+                fields: Default::default(),
+            };
+        for d in 0..depth {
+            let parent = d.checked_sub(1).map(|p| p + 1);
+            emit(enter(d + 1, format!("c{d}"), parent, d as u16));
+        }
+        for d in (0..depth).rev() {
+            emit(Payload::ModuleReturned {
+                module_call_id: d + 1,
+            });
+        }
+        for i in 0..width {
+            emit(enter(1000 + i, format!("w{i}"), None, 0));
+            emit(Payload::ModuleReturned {
+                module_call_id: 1000 + i,
+            });
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+        id
+    }
+
+    fn node(name: &str, gpu: u64, children: Vec<ModuleBreakdown>) -> ModuleBreakdown {
+        ModuleBreakdown {
+            qualname: name.into(),
+            class_name: name.into(),
+            calls: 1,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: gpu,
+            eval_count: 0,
+            cb_count: 0,
+            children,
+            ops: vec![],
+            diagnostics: None,
+            fields: Default::default(),
+        }
+    }
+
+    fn names(n: &ModuleBreakdown) -> Vec<String> {
+        let mut out = vec![];
+        for c in &n.children {
+            out.push(c.qualname.clone());
+            out.extend(names(c));
+        }
+        out
+    }
+
+    /// #271: `top_n` counts nodes over the whole tree, the largest GPU
+    /// time first, like the rows of `smeltr breakdown --top`: per node, the
+    /// default (20) still let a real session's tree reach 392k characters
+    /// at depth 6. A kept node's ancestors are always kept.
+    #[test]
+    fn top_n_keeps_the_heaviest_nodes_of_the_whole_tree() {
+        let mut root = node(
+            "<root>",
+            200,
+            vec![
+                node("b", 50, vec![node("b1", 49, vec![])]),
+                node(
+                    "a",
+                    150,
+                    vec![
+                        node("a2", 40, vec![]),
+                        node("a1", 100, vec![node("a11", 90, vec![])]),
+                    ],
+                ),
+                node("c", 10, vec![]),
+            ],
+        );
+        let elided = prune(&mut root, 6, 4, 0);
+        assert_eq!(names(&root), ["a", "a1", "a11", "b"]);
+        assert_eq!(elided, 3, "a2, b1 and c");
+
+        // Depth and min_gpu_ns cut before the ranking.
+        let mut shallow = root.clone();
+        assert_eq!(prune(&mut shallow, 1, 200, 0), 2);
+        assert_eq!(names(&shallow), ["a", "b"]);
+        let mut heavy = root.clone();
+        prune(&mut heavy, 6, 200, 95);
+        assert_eq!(names(&heavy), ["a", "a1"]);
+    }
+
+    fn tree_depth(n: &ModuleBreakdown) -> usize {
+        n.children
+            .iter()
+            .map(|c| 1 + tree_depth(c))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// #271: `max_depth` and `top_n` defaulted to unbounded, and the tree of
+    /// a real session came back as 1.19 M characters. The defaults now
+    /// match `smeltr breakdown` (`--depth 6 --top 20`), and what they cut
+    /// is counted rather than dropped silently.
+    #[test]
+    #[serial_test::serial]
+    fn defaults_bound_the_tree_like_the_cli() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        // Separate sessions: every node has 0 GPU time here, so which of
+        // equal siblings `top_n` keeps is unspecified.
+        let deep = wide_and_deep_session(9, 0);
+        let resp = run(Params {
+            session: deep.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(tree_depth(&resp.root), 6);
+        assert_eq!(resp.elided_nodes, 3, "the chain loses c6..c8");
+
+        let wide = wide_and_deep_session(0, 30);
+        let resp = run(Params {
+            session: wide.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(resp.root.children.len(), 20);
+        assert_eq!(resp.elided_nodes, 10);
+
+        let id = wide_and_deep_session(9, 30);
+        let all = run(Params {
+            session: id.short(),
+            max_depth: Some(64),
+            top_n: Some(200),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(all.root.children.len(), 31);
+        assert_eq!(tree_depth(&all.root), 9);
+        assert_eq!(all.elided_nodes, 0);
+        let json = serde_json::to_value(&all).unwrap();
+        assert!(json.get("elided_nodes").is_none(), "omitted when 0");
+    }
+
+    /// #271: caller-supplied bounds are capped; `top_n: 0` is refused.
+    #[test]
+    #[serial_test::serial]
+    fn out_of_range_bounds_are_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let cases = [
+            Params {
+                top_n: Some(0),
+                ..Default::default()
+            },
+            Params {
+                top_n: Some(201),
+                ..Default::default()
+            },
+            Params {
+                max_depth: Some(65),
+                ..Default::default()
+            },
+            Params {
+                top_ops_per_leaf: 51,
+                ..Default::default()
+            },
+        ];
+        for mut p in cases {
+            p.session = "deadbeef".into();
+            let desc = format!("{:?}/{:?}/{}", p.top_n, p.max_depth, p.top_ops_per_leaf);
+            let r = run(p);
+            assert!(
+                matches!(&r, Err(ToolError::BadArgs(_))),
+                "{desc}: {:?}",
+                r.map(|r| r.elided_nodes)
+            );
+        }
     }
 
     #[test]

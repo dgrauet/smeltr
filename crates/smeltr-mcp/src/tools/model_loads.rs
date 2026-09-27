@@ -1,9 +1,9 @@
 //! `get_model_loads` MCP tool: list model loads with duplicate detection.
 
+use crate::session_cache::events as read_events;
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, Payload};
-use smeltr_core::reader::read_events;
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

@@ -1,14 +1,14 @@
 //! `get_op_summary` MCP tool: flat cross-module aggregation of GPU ops.
 
-use crate::types::{resolve_session, ToolError};
+use crate::session_cache::events as read_events;
+use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::compute_breakdown;
-use smeltr_core::reader::read_events;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
     pub session: String,
-    /// Max rows returned (default 20, like `smeltr breakdown --ops-flat`).
+    /// Max rows returned (default 20, like `smeltr breakdown --ops-flat`; 1..=200).
     pub top_n: Option<u32>,
     /// Aggregate by `"name"` (default) or `"kind"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,16 +49,16 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             )))
         }
     };
+    // Same default as `smeltr breakdown --ops-flat --top` (#243).
+    let top = bounded_count("top_n", params.top_n, 20, 200)? as usize;
 
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
     let degraded =
         smeltr_analyzer::degraded_advice(smeltr_analyzer::diff::sampling_disable_episodes(&events));
-    let root =
-        compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
+    let root = compute_breakdown(events.iter().cloned())
+        .map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
-    // Same default as `smeltr breakdown --ops-flat --top` (#243).
-    let top = params.top_n.unwrap_or(20) as usize;
     let rows = smeltr_analyzer::aggregate_ops_flat(&root, group_by);
     let total: u64 = rows.iter().map(|r| r.gpu_ns).sum::<u64>().max(1);
     let mut ops: Vec<OpSummary> = rows
@@ -361,6 +361,25 @@ mod tests {
         let matmul = resp.ops.iter().find(|o| o.name == "Matmul").unwrap();
         // Kind mode: no representative symbol.
         assert!(matmul.symbol.is_none());
+    }
+
+    /// #271: every count argument is bounded; 0 is refused, not served.
+    #[test]
+    #[serial_test::serial]
+    fn out_of_range_top_n_is_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        for top_n in [0, 201, u32::MAX] {
+            let r = run(Params {
+                session: "deadbeef".into(),
+                group_by: None,
+                top_n: Some(top_n),
+            });
+            assert!(
+                matches!(&r, Err(ToolError::BadArgs(m)) if m.contains("200")),
+                "top_n {top_n}: {r:?}"
+            );
+        }
     }
 
     #[test]

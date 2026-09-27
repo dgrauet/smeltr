@@ -1,9 +1,9 @@
 //! `get_memory_breakdown` MCP tool: per-scope device + heap memory.
 
+use crate::session_cache::events as read_events;
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::memory::{HeapMemory, ScopeMemory};
-use smeltr_core::reader::read_events;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
@@ -46,6 +46,12 @@ pub struct Response {
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
+    // Was silently coerced (#271).
+    if params.bucket_seconds == 0 {
+        return Err(ToolError::BadArgs(
+            "bucket_seconds must be at least 1".into(),
+        ));
+    }
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
     let timeline = params
@@ -158,6 +164,24 @@ mod tests {
             .expect("heap present");
         assert_eq!(heap.peak_heap_count, 1);
         assert_eq!(heap.peak_heap_bytes, 500_000);
+    }
+
+    /// #271: `bucket_seconds: 0` was silently coerced.
+    #[test]
+    #[serial_test::serial]
+    fn zero_bucket_seconds_is_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let r = run(Params {
+            include_timeline: true,
+            bucket_seconds: 0,
+            session: "deadbeef".into(),
+        });
+        assert!(
+            matches!(&r, Err(ToolError::BadArgs(m)) if m.contains("bucket_seconds")),
+            "{:?}",
+            r.map(|r| r.timeline.is_some())
+        );
     }
 
     #[test]

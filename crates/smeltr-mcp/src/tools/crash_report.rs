@@ -4,34 +4,71 @@ use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::Payload;
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
     pub session: String,
+    /// First character of `text` to return (default 0): pass the previous
+    /// response's `next_offset` for the next page.
+    pub offset: Option<usize>,
+    /// Characters of `text` per page (default 20000, 1..=50000).
+    pub max_chars: Option<usize>,
 }
+
+/// A whole `.ips` is often 30-75k characters (#271); the header, exception
+/// and crashed thread come first.
+const DEFAULT_MAX_CHARS: usize = 20_000;
+const MAX_MAX_CHARS: usize = 50_000;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub crash_report_path: Option<String>,
+    /// The page of the report starting at `offset`.
     pub text: Option<String>,
     pub size_bytes: Option<u64>,
+    /// Length of the whole report, in characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_chars: Option<usize>,
+    /// More of the report follows this page.
+    #[serde(default)]
+    pub truncated: bool,
+    /// `offset` of the next page, when `truncated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
+    let max_chars = crate::types::bounded_count(
+        "max_chars",
+        params.max_chars,
+        DEFAULT_MAX_CHARS,
+        MAX_MAX_CHARS,
+    )?;
+    let offset = params.offset.unwrap_or(0);
     let dir = resolve_session(&params.session)?;
     let Some(path) = report_path(&dir) else {
         return Ok(Response {
             crash_report_path: None,
             text: None,
             size_bytes: None,
+            total_chars: None,
+            truncated: false,
+            next_offset: None,
         });
     };
     // The report may have been deleted since; say where it was anyway.
-    let text = std::fs::read_to_string(&path).ok();
+    let full = std::fs::read_to_string(&path).ok();
     let size_bytes = std::fs::metadata(&path).ok().map(|m| m.len());
+    let total_chars = full.as_ref().map(|t| t.chars().count());
+    let text = full.map(|t| t.chars().skip(offset).take(max_chars).collect::<String>());
+    let end = offset.saturating_add(max_chars);
+    let truncated = total_chars.is_some_and(|n| n > end);
     Ok(Response {
         crash_report_path: Some(path),
         text,
         size_bytes,
+        total_chars,
+        truncated,
+        next_offset: truncated.then_some(end),
     })
 }
 
@@ -54,23 +91,32 @@ fn report_path(dir: &std::path::Path) -> Option<String> {
             return Some(path.clone());
         }
     }
-    let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
-    if let Some(t) = trigger {
-        // Only a crash of the process the post-mortem is about.
-        let pid = t.pid?;
-        return events.iter().rev().find_map(|e| match &e.payload {
-            Payload::CrashReportEmitted {
-                path,
-                crashed_pid: Some(p),
-                ..
-            } if *p == pid => Some(path.clone()),
-            _ => None,
-        });
-    }
-    let emitted = events.iter().rev().find_map(|e| match &e.payload {
-        Payload::CrashReportEmitted { path, .. } => Some(path.clone()),
-        _ => None,
+    // Only a crash of the process a post-mortem is about.
+    let want_pid = match &trigger {
+        Some(t) => Some(t.pid?),
+        None => None,
+    };
+    // The newest matching report, streamed: the whole session used to be
+    // held in memory to find this one event (#271).
+    let filter = smeltr_core::EventFilter {
+        payload_kind: Some("CrashReportEmitted".into()),
+        ..Default::default()
+    };
+    let mut emitted = None;
+    let _ = crate::session_cache::visit(dir, Some(&filter), |e| {
+        if let Payload::CrashReportEmitted {
+            path, crashed_pid, ..
+        } = &e.payload
+        {
+            if want_pid.is_none() || *crashed_pid == want_pid {
+                emitted = Some(path.clone());
+            }
+        }
+        std::ops::ControlFlow::Continue(())
     });
+    if trigger.is_some() {
+        return emitted;
+    }
     emitted.or_else(|| smeltr_analyzer::crash_join::session_crash(dir).map(|j| j.path))
 }
 
@@ -114,9 +160,63 @@ mod tests {
         drop(SessionWriter::create(SessionMetadata::now_starting(id)).unwrap());
         let resp = run(Params {
             session: id.short(),
+            ..Default::default()
         });
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
         assert!(resp.unwrap().text.is_none());
+    }
+
+    /// #271: a whole `.ips` came back in one response (74k characters on a
+    /// real one). The text is paged by character; pages join back into the
+    /// report exactly, multi-byte characters included.
+    #[test]
+    #[serial_test::serial]
+    fn long_reports_are_paged() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        let ips = reports.path().join("big.ips");
+        let report: String = (0..30_000)
+            .map(|i| if i % 7 == 0 { 'é' } else { 'x' })
+            .collect();
+        std::fs::write(&ips, &report).unwrap();
+        let id = SessionId::new();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(id)).unwrap();
+        w.write_event(&crash_event(&ips, 1)).unwrap();
+        w.finalize(None, "post-mortem".into()).unwrap();
+
+        let first = run(Params {
+            session: id.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        let text = first.text.unwrap();
+        assert_eq!(text.chars().count(), 20_000, "default page");
+        assert!(first.truncated);
+        assert_eq!(first.next_offset, Some(20_000));
+        assert_eq!(first.total_chars, Some(30_000));
+
+        let rest = run(Params {
+            session: id.short(),
+            offset: first.next_offset,
+            max_chars: Some(10_000), // exactly what is left
+        })
+        .unwrap();
+        assert!(!rest.truncated);
+        assert_eq!(rest.next_offset, None);
+        assert_eq!(text + rest.text.as_deref().unwrap(), report);
+
+        for bad in [0, 50_001] {
+            let r = run(Params {
+                session: id.short(),
+                offset: None,
+                max_chars: Some(bad),
+            });
+            assert!(
+                matches!(&r, Err(ToolError::BadArgs(m)) if m.contains("max_chars")),
+                "{bad}"
+            );
+        }
     }
 
     /// A post-mortem holds the report that triggered it — the newest
@@ -140,6 +240,7 @@ mod tests {
 
         let resp = run(Params {
             session: id.short(),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(resp.text.as_deref(), Some("trigger report"));
@@ -177,6 +278,7 @@ mod tests {
 
         let resp = run(Params {
             session: id.short(),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(resp.text.as_deref(), Some("trigger report"));
@@ -207,6 +309,7 @@ mod tests {
 
         let resp = run(Params {
             session: id.short(),
+            ..Default::default()
         });
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
         assert!(resp.unwrap().crash_report_path.is_none());
@@ -235,6 +338,7 @@ mod tests {
 
         let resp = run(Params {
             session: id.short(),
+            ..Default::default()
         });
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
         let resp = resp.unwrap();
