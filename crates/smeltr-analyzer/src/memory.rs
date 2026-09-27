@@ -70,6 +70,16 @@ pub fn memory_report(events: &[Event]) -> MemoryReport {
 /// list for up to `ASYNC_GRACE_NS` (500 ms) so that async Metal CB
 /// committed/completed samples still credit the scope that launched the
 /// work.
+/// Events by time, then by arrival. The file is not in time order (#270):
+/// hook frames carry the hook's clock but arrive after a ring drain, and
+/// sidecar events are stamped client-side and sent later, so walking the
+/// file credited a sample taken before a scope began to that scope.
+fn in_time_order(events: &[Event]) -> Vec<&Event> {
+    let mut v: Vec<&Event> = events.iter().collect();
+    v.sort_by_key(|e| (e.ts_mono_ns, e.seq));
+    v
+}
+
 pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
     #[derive(Default)]
     struct Accum {
@@ -115,7 +125,7 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
             .or_insert(sm);
     };
 
-    for ev in events {
+    for ev in in_time_order(events) {
         // Sweep expired draining scopes BEFORE handling this event.
         let mut i = 0;
         while i < draining.len() {
@@ -192,7 +202,12 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
     }
 
     let mut out: Vec<ScopeMemory> = by_qualname.into_values().collect();
-    out.sort_by_key(|s| std::cmp::Reverse(s.peak_bytes));
+    // Name breaks ties: HashMap order changed between identical calls (#270).
+    out.sort_by(|a, b| {
+        b.peak_bytes
+            .cmp(&a.peak_bytes)
+            .then_with(|| a.qualname.cmp(&b.qualname))
+    });
     out
 }
 
@@ -365,7 +380,7 @@ pub fn compute_heap_breakdown(events: &[Event]) -> Vec<HeapMemory> {
                 .or_insert(hm);
         };
 
-    for ev in events {
+    for ev in in_time_order(events) {
         // Sweep expired draining scopes BEFORE handling this event.
         let mut i = 0;
         while i < draining.len() {
@@ -426,7 +441,11 @@ pub fn compute_heap_breakdown(events: &[Event]) -> Vec<HeapMemory> {
     }
 
     let mut out: Vec<HeapMemory> = by_qualname.into_values().collect();
-    out.sort_by_key(|h| std::cmp::Reverse(h.peak_heap_bytes));
+    out.sort_by(|a, b| {
+        b.peak_heap_bytes
+            .cmp(&a.peak_heap_bytes)
+            .then_with(|| a.qualname.cmp(&b.qualname))
+    });
     out
 }
 
@@ -576,6 +595,47 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].peak_heap_count, 2);
         assert_eq!(out[0].peak_heap_bytes, 3000);
+    }
+
+    /// #270: events are no longer in time order in the file — hook frames
+    /// carry the hook's clock and reach the daemon after its ring drain,
+    /// sidecar events are stamped client-side and sent later. A sample taken
+    /// before a scope began, written after its entry, was credited to it.
+    #[test]
+    fn a_sample_taken_before_a_scope_is_not_credited_to_it() {
+        let evs = vec![
+            enter(1, 100, "late_scope"),
+            sample(2, 90, 64 * 1024 * 1024), // taken before the scope began
+            sample(3, 110, 1024),
+            ret(4, 120, 1),
+        ];
+        let out = compute_memory_breakdown(&evs);
+        let s = out.iter().find(|s| s.qualname == "late_scope").unwrap();
+        assert_eq!(s.peak_bytes, 1024);
+    }
+
+    /// #270: scopes tied on their peak came out in HashMap order, which
+    /// changed between identical calls (three calls, three first rows).
+    #[test]
+    fn tied_scopes_come_out_in_a_stable_order() {
+        let names = ["delta", "alpha", "echo", "charlie", "bravo"];
+        let mut evs = Vec::new();
+        let mut seq = 0;
+        for (i, n) in names.iter().enumerate() {
+            let id = i as u64 + 1;
+            evs.push(enter(seq, seq, n));
+            evs.push(heap_alloc(seq + 1, seq + 1, 100 + id, 1000));
+            evs.push(heap_free(seq + 2, seq + 2, 100 + id));
+            evs.push(ret(seq + 3, seq + 3, id));
+            seq += 4_000_000_000; // past the async grace
+        }
+        for _ in 0..10 {
+            let got: Vec<String> = compute_heap_breakdown(&evs)
+                .into_iter()
+                .map(|h| h.qualname)
+                .collect();
+            assert_eq!(got, vec!["alpha", "bravo", "charlie", "delta", "echo"]);
+        }
     }
 
     #[test]
@@ -1001,6 +1061,13 @@ pub struct MemBucket {
     pub device_alloc_bytes: u64,
     #[serde(default)]
     pub recommended_max_bytes: u64,
+    /// The bucket holds at least one MLX memory poll. Without it the MLX
+    /// columns mean "no sample", not 0 (#270).
+    #[serde(default)]
+    pub mlx_sampled: bool,
+    /// The bucket holds at least one device-memory sample.
+    #[serde(default)]
+    pub device_sampled: bool,
 }
 
 /// Time-resolved memory profile: fixed-width buckets + the over-budget
@@ -1040,6 +1107,8 @@ pub fn compute_memory_timeline(events: &[Event], bucket_seconds: u64) -> MemTime
                 cache_bytes: 0,
                 device_alloc_bytes: 0,
                 recommended_max_bytes: 0,
+                mlx_sampled: false,
+                device_sampled: false,
             });
         }
         idx
@@ -1055,6 +1124,7 @@ pub fn compute_memory_timeline(events: &[Event], bucket_seconds: u64) -> MemTime
                 let i = bucket_at(ev.ts_mono_ns, &mut buckets);
                 buckets[i].active_bytes = buckets[i].active_bytes.max(*active_bytes);
                 buckets[i].cache_bytes = buckets[i].cache_bytes.max(*cache_bytes);
+                buckets[i].mlx_sampled = true;
             }
             Payload::MetalDeviceMemSample {
                 allocated_bytes,
@@ -1065,6 +1135,7 @@ pub fn compute_memory_timeline(events: &[Event], bucket_seconds: u64) -> MemTime
                 buckets[i].device_alloc_bytes = buckets[i].device_alloc_bytes.max(*allocated_bytes);
                 buckets[i].recommended_max_bytes =
                     buckets[i].recommended_max_bytes.max(*recommended_max_bytes);
+                buckets[i].device_sampled = true;
             }
             _ => {}
         }

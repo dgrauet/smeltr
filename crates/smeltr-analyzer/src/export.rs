@@ -49,6 +49,46 @@ pub fn to_json_raw(events: &[Event], meta: &SessionMetadata) -> String {
 /// - SessionStarted/Ended  → ph="i" instant on pid=1
 ///
 /// All timestamps in microseconds (ts_mono_ns/1000).
+/// (t_commit_us, queue_id, label, t_scheduled_us) of a buffer in flight.
+type OpenCb = (f64, u64, Option<String>, Option<f64>);
+/// (start_us, end_us, queue_id) of a buffer's GPU execution.
+type GpuWindow = (f64, f64, u64);
+
+/// A buffer's kernels, one after the other inside its GPU window (they
+/// used to be all stamped at commit and nest like a call stack — #270),
+/// scaled down when their measured times exceed the window.
+fn push_kernels(
+    out: &mut Vec<Value>,
+    (start, end, queue_id): GpuWindow,
+    ops: &[smeltr_core::event::OpSample],
+) {
+    let total_us: f64 = ops.iter().map(|o| o.gpu_ns as f64 / 1000.0).sum();
+    let window = (end - start).max(0.0);
+    let scale = if total_us > window && total_us > 0.0 {
+        window / total_us
+    } else {
+        1.0
+    };
+    let mut cursor = start;
+    for op in ops {
+        let dur = op.gpu_ns as f64 / 1000.0 * scale;
+        out.push(json!({
+            "ph": "X",
+            "name": op.symbol.clone().unwrap_or_else(|| op.name.clone()),
+            "pid": 3,
+            "tid": format!("queue_{queue_id}"),
+            "ts": cursor,
+            "dur": dur,
+            "args": {
+                "raw_name": op.name,
+                "symbol": op.symbol,
+                "count": op.count,
+            },
+        }));
+        cursor += dur;
+    }
+}
+
 pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
     let mut trace_events: Vec<Value> = Vec::new();
 
@@ -77,11 +117,20 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
     // Pair-tracking maps:
     // module_call_id -> (t_enter_us, qualname, class_name, depth, fields)
     let mut open_modules: HashMap<u64, OpenModule> = HashMap::new();
-    // cb_id -> (t_commit_us, queue_id, label)
-    let mut open_cbs: HashMap<u64, (f64, u64, Option<String>)> = HashMap::new();
-    // cb_id -> Vec<OpSample> queued for emission once the CB completes
-    // (so we can use the committed ts for the op's ts).
+    // cb_id -> (t_commit_us, queue_id, label, t_scheduled_us)
+    let mut open_cbs: HashMap<u64, OpenCb> = HashMap::new();
+    // cb_id -> GPU window of that id's latest completed buffer whose ops
+    // have not arrived yet: the hook emits MetalCbOps from the completion
+    // handler, after MetalCbCompleted (#270).
+    let mut awaiting_ops: HashMap<u64, GpuWindow> = HashMap::new();
+    // Ops that arrived before their buffer completed (not what the hook
+    // does, but tolerated).
     let mut pending_ops: HashMap<u64, Vec<smeltr_core::event::OpSample>> = HashMap::new();
+    // queue_id -> end of the last buffer executed on it: buffers on one
+    // queue run one after the other, so a buffer's GPU window starts no
+    // earlier than its predecessor's end.
+    let mut queue_busy_until: HashMap<u64, f64> = HashMap::new();
+    let mut async_id: u64 = 0;
 
     for ev in events {
         let ts_us = ev.ts_mono_ns as f64 / 1000.0;
@@ -136,7 +185,12 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                 label,
                 ..
             } => {
-                open_cbs.insert(*cb_id, (ts_us, *queue_id, label.clone()));
+                open_cbs.insert(*cb_id, (ts_us, *queue_id, label.clone(), None));
+            }
+            Payload::MetalCbScheduled { cb_id, .. } => {
+                if let Some(cb) = open_cbs.get_mut(cb_id) {
+                    cb.3 = Some(ts_us);
+                }
             }
             Payload::MetalCbCompleted {
                 cb_id,
@@ -146,46 +200,57 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                 in_flight_ns,
                 ..
             } => {
-                if let Some((t_commit, queue_id, label)) = open_cbs.remove(cb_id) {
+                if let Some((t_commit, queue_id, label, t_sched)) = open_cbs.remove(cb_id) {
                     let name = label.unwrap_or_else(|| format!("cb_{cb_id}"));
-                    let dur = *in_flight_ns as f64 / 1000.0;
+                    let args = json!({
+                        "cb_id": cb_id,
+                        "status": status,
+                        "error_code": error_code,
+                        "error_domain": error_domain,
+                    });
+                    // In flight (commit -> complete): pipelined buffers
+                    // overlap, which only async events can show (#270).
+                    async_id += 1;
+                    let in_flight_end = t_commit + *in_flight_ns as f64 / 1000.0;
+                    for (ph, ts) in [("b", t_commit), ("e", in_flight_end)] {
+                        trace_events.push(json!({
+                            "ph": ph,
+                            "cat": "in_flight",
+                            "id": async_id,
+                            "name": name,
+                            "pid": 2,
+                            "tid": format!("queue_{queue_id}"),
+                            "ts": ts,
+                            "args": args,
+                        }));
+                    }
+                    // GPU execution: serialized per queue, never overlapping.
+                    let busy = queue_busy_until.entry(queue_id).or_insert(0.0);
+                    let start = t_sched.unwrap_or(t_commit).max(t_commit).max(*busy);
+                    let end = in_flight_end.max(start);
+                    *busy = end;
                     trace_events.push(json!({
                         "ph": "X",
                         "name": name,
                         "pid": 2,
                         "tid": format!("queue_{queue_id}"),
-                        "ts": t_commit,
-                        "dur": dur,
-                        "args": {
-                            "cb_id": cb_id,
-                            "status": status,
-                            "error_code": error_code,
-                            "error_domain": error_domain,
-                        },
+                        "ts": start,
+                        "dur": end - start,
+                        "args": args,
                     }));
-                    if let Some(ops) = pending_ops.remove(cb_id) {
-                        for op in ops {
-                            let op_name = op.symbol.clone().unwrap_or_else(|| op.name.clone());
-                            trace_events.push(json!({
-                                "ph": "X",
-                                "name": op_name,
-                                "pid": 3,
-                                "tid": format!("cb_{cb_id}"),
-                                "ts": t_commit,
-                                "dur": op.gpu_ns as f64 / 1000.0,
-                                "args": {
-                                    "raw_name": op.name,
-                                    "symbol": op.symbol,
-                                    "count": op.count,
-                                },
-                            }));
+                    let window = (start, end, queue_id);
+                    match pending_ops.remove(cb_id) {
+                        Some(ops) => push_kernels(&mut trace_events, window, &ops),
+                        None => {
+                            awaiting_ops.insert(*cb_id, window);
                         }
                     }
                 }
             }
-            Payload::MetalCbOps { cb_id, ops } => {
-                pending_ops.entry(*cb_id).or_default().extend(ops.clone());
-            }
+            Payload::MetalCbOps { cb_id, ops } => match awaiting_ops.remove(cb_id) {
+                Some(window) => push_kernels(&mut trace_events, window, ops),
+                None => pending_ops.entry(*cb_id).or_default().extend(ops.clone()),
+            },
             Payload::Mark { label, fields } => {
                 let mut ev = serde_json::json!({
                     "ph": "i",
@@ -613,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn chrome_trace_ops_emit_on_kernels_lane_at_commit_ts() {
+    fn chrome_trace_ops_emit_on_the_queues_kernel_lane() {
         let meta = SessionMetadata::now_starting(SessionId::new());
         let evs = vec![
             ev(
@@ -665,10 +730,154 @@ mod tests {
             .collect();
         assert_eq!(kernel_events.len(), 1);
         assert_eq!(kernel_events[0]["name"], "gemm_t_n_bf16_64_64_32");
-        assert_eq!(kernel_events[0]["tid"], "cb_9");
+        // One kernel lane per queue: a lane per cb_id merged every buffer
+        // that reused the pointer (#270).
+        assert_eq!(kernel_events[0]["tid"], "queue_1");
         assert_eq!(kernel_events[0]["ts"], 10.0);
         assert_eq!(kernel_events[0]["dur"], 2.0);
         assert_eq!(kernel_events[0]["args"]["raw_name"], "K_abcd_64x64x1");
+    }
+
+    fn cb_lifetime(
+        seq: u64,
+        cb_id: u64,
+        commit: u64,
+        done: u64,
+        kernels: &[(&str, u64)],
+    ) -> Vec<Event> {
+        vec![
+            ev(
+                seq,
+                commit,
+                Source::MetalHook,
+                Payload::MetalCbCommitted {
+                    cb_id,
+                    queue_id: 1,
+                    queue_depth: 0,
+                    label: None,
+                },
+            ),
+            ev(
+                seq + 1,
+                done,
+                Source::MetalHook,
+                Payload::MetalCbCompleted {
+                    cb_id,
+                    queue_id: 1,
+                    status: 4,
+                    error_code: None,
+                    error_domain: None,
+                    in_flight_ns: done - commit,
+                },
+            ),
+            // The hook emits a buffer's ops from its completion handler,
+            // after MetalCbCompleted.
+            ev(
+                seq + 2,
+                done + 1,
+                Source::MetalHook,
+                Payload::MetalCbOps {
+                    cb_id,
+                    ops: kernels
+                        .iter()
+                        .map(|(sym, ns)| OpSample {
+                            name: format!("K_{sym}"),
+                            symbol: Some((*sym).into()),
+                            gpu_ns: *ns,
+                            count: 1,
+                        })
+                        .collect(),
+                },
+            ),
+        ]
+    }
+
+    fn kernels(v: &serde_json::Value) -> Vec<(String, f64, f64)> {
+        v["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["pid"] == 3 && e["ph"] == "X")
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_string(),
+                    e["ts"].as_f64().unwrap(),
+                    e["dur"].as_f64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// #270: ops arrive after their buffer's completion, but were attached
+    /// at the *next* completion with the same (recycled) cb_id — at that
+    /// buffer's time — and the last buffer's ops were dropped.
+    #[test]
+    fn kernels_land_in_their_own_buffer_even_when_the_id_is_reused() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut evs = cb_lifetime(1, 9, 0, 100_000, &[("first", 20_000)]);
+        evs.extend(cb_lifetime(4, 9, 200_000, 300_000, &[("second", 30_000)]));
+        let v = parse_trace(&to_chrome_trace(&evs, &meta));
+        let k = kernels(&v);
+        assert_eq!(k.len(), 2, "{k:?}");
+        let first = k.iter().find(|x| x.0 == "first").expect("first kernel");
+        let second = k
+            .iter()
+            .find(|x| x.0 == "second")
+            .expect("last buffer's kernel");
+        assert!(first.1 >= 0.0 && first.1 + first.2 <= 100.0, "{first:?}");
+        assert!(
+            second.1 >= 200.0 && second.1 + second.2 <= 300.0,
+            "{second:?}"
+        );
+    }
+
+    /// #270: every kernel of a buffer was emitted at its commit time, so
+    /// they nested like a call stack. They run one after the other.
+    #[test]
+    fn kernels_of_a_buffer_are_laid_out_one_after_the_other() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let evs = cb_lifetime(1, 9, 0, 100_000, &[("a", 30_000), ("b", 50_000)]);
+        let v = parse_trace(&to_chrome_trace(&evs, &meta));
+        let k = kernels(&v);
+        let a = k.iter().find(|x| x.0 == "a").unwrap();
+        let b = k.iter().find(|x| x.0 == "b").unwrap();
+        assert_eq!((a.1, a.2), (0.0, 30.0));
+        assert_eq!((b.1, b.2), (30.0, 50.0));
+    }
+
+    /// #270: pipelined buffers' commit→complete slices partially overlapped
+    /// on one thread, which chrome://tracing and Perfetto cannot nest.
+    #[test]
+    fn complete_events_on_a_thread_never_partially_overlap() {
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut evs = cb_lifetime(1, 1, 0, 100_000, &[("x", 40_000)]);
+        evs.extend(cb_lifetime(4, 2, 50_000, 160_000, &[("y", 40_000)]));
+        evs.sort_by_key(|e| e.ts_mono_ns);
+        let v = parse_trace(&to_chrome_trace(&evs, &meta));
+        let mut by_thread: std::collections::HashMap<String, Vec<(f64, f64)>> = Default::default();
+        for e in v["traceEvents"].as_array().unwrap() {
+            if e["ph"] == "X" {
+                by_thread
+                    .entry(format!("{}/{}", e["pid"], e["tid"]))
+                    .or_default()
+                    .push((
+                        e["ts"].as_f64().unwrap(),
+                        e["ts"].as_f64().unwrap() + e["dur"].as_f64().unwrap(),
+                    ));
+            }
+        }
+        for (t, mut spans) in by_thread {
+            spans.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            for w in spans.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let nested = b.1 <= a.1;
+                let disjoint = b.0 >= a.1;
+                assert!(
+                    nested || disjoint,
+                    "thread {t}: {a:?} and {b:?} partially overlap"
+                );
+            }
+        }
     }
 
     #[test]

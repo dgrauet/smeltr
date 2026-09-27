@@ -19,7 +19,7 @@ use std::time::UNIX_EPOCH;
 /// symbolication can stretch that.
 pub const CRASH_REPORT_GRACE_NS: u64 = 120_000_000_000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CrashJoin {
     pub path: String,
     pub crashed_pid: u32,
@@ -399,7 +399,68 @@ fn window_end_ns(
 pub fn join_crash(report: &mut crate::report::Report, dir: &Path) {
     if let Some(j) = session_crash(dir) {
         report.findings.insert(0, crash_finding(&j));
+    } else if let Some(f) = post_mortem_crash(dir) {
+        report.findings.insert(0, f);
     }
+}
+
+/// The crash a crash-report post-mortem was written for (#270: `analyze`
+/// ignored it and called the session ambient-shaped). The trigger recorded
+/// in the metadata names the report; post-mortems written before it was
+/// recorded fall back to their newest crash report.
+fn post_mortem_crash(dir: &Path) -> Option<Finding> {
+    let meta = smeltr_core::reader::read_metadata(dir).ok()?;
+    let is_crash_pm = match &meta.post_mortem {
+        Some(t) => t.reason == "crash-report",
+        None => dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("post-mortem-crash-report-")),
+    };
+    if !is_crash_pm {
+        return None;
+    }
+    let wanted = meta
+        .post_mortem
+        .as_ref()
+        .and_then(|t| t.crash_report.clone());
+    let events = smeltr_core::reader::read_events(dir).ok()?;
+    let (path, pid, signal, summary, codes, proc_name) =
+        events.iter().rev().find_map(|e| match &e.payload {
+            Payload::CrashReportEmitted {
+                path,
+                crashed_pid,
+                signal,
+                exception_codes,
+                summary,
+                proc_name,
+            } if wanted.as_deref().is_none_or(|w| w == path) => Some((
+                path,
+                crashed_pid,
+                signal,
+                summary,
+                exception_codes,
+                proc_name,
+            )),
+            _ => None,
+        })?;
+    let who = proc_name.as_deref().unwrap_or("A process");
+    let title = match signal {
+        Some(sig) => format!("{who} crashed ({sig}): the crash this post-mortem was written for"),
+        None => format!("{who} crashed: the crash this post-mortem was written for"),
+    };
+    let mut detail = String::new();
+    if let Some(pid) = pid {
+        detail.push_str(&format!("pid {pid}. "));
+    }
+    if !summary.is_empty() {
+        detail.push_str(&format!("{summary}. "));
+    }
+    if !codes.is_empty() {
+        detail.push_str(&format!("exception codes: {}. ", codes.join(", ")));
+    }
+    detail.push_str(&format!("crash report: {path}"));
+    Some(Finding::new(Severity::Critical, Category::RootCause, title).with_detail(detail))
 }
 
 /// The crash report of a recorded run that crashed, joined from
@@ -419,13 +480,47 @@ pub fn session_crash(dir: &Path) -> Option<CrashJoin> {
     if meta.exit_code == Some(0) {
         return None;
     }
+    if let Some(kept) = kept_crash(dir) {
+        return Some(kept);
+    }
     let start_ns = rfc3339_unix_ns(&meta.started_rfc3339)?;
     let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
     let end_ns = window_end_ns(dir, &meta, &events);
 
-    diagnostic_reports_dirs().iter().find_map(|reports_dir| {
-        find_crash_report(reports_dir, *pid, start_ns, end_ns, CRASH_REPORT_GRACE_NS)
-    })
+    diagnostic_reports_dirs()
+        .iter()
+        .find_map(|reports_dir| {
+            find_crash_report(reports_dir, *pid, start_ns, end_ns, CRASH_REPORT_GRACE_NS)
+        })
+        .map(|j| keep_crash(dir, j))
+}
+
+/// The session's copy of its crash report, and the join that points at it.
+const KEPT_REPORT_FILE: &str = "crash-report.ips";
+const KEPT_JOIN_FILE: &str = "crash.json";
+
+/// The join kept by an earlier [`keep_crash`], if any.
+fn kept_crash(dir: &Path) -> Option<CrashJoin> {
+    let text = std::fs::read_to_string(dir.join(KEPT_JOIN_FILE)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Keep a copy of the report next to the session (#270): macOS purges
+/// DiagnosticReports, and the root cause of an old crashed run was lost
+/// with it. Best effort: on any failure the original join is returned.
+fn keep_crash(dir: &Path, j: CrashJoin) -> CrashJoin {
+    let copy = dir.join(KEPT_REPORT_FILE);
+    if std::fs::copy(&j.path, &copy).is_err() {
+        return j;
+    }
+    let kept = CrashJoin {
+        path: copy.display().to_string(),
+        ..j.clone()
+    };
+    match serde_json::to_string(&kept) {
+        Ok(text) if std::fs::write(dir.join(KEPT_JOIN_FILE), &text).is_ok() => kept,
+        _ => j,
+    }
 }
 
 /// Stop signals requested by the user or by a supervisor. Hard-coded rather
@@ -888,6 +983,96 @@ mod tests {
         let joined = session_crash(&dir);
         std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
         assert!(joined.is_some(), "report written during the run must join");
+    }
+
+    /// #270: `analyze` on a crash-report post-mortem (a SIGSEGV) said "the
+    /// expected shape of the ambient session": no rule read the crash the
+    /// post-mortem was written for.
+    #[test]
+    #[serial_test::serial]
+    fn a_crash_post_mortem_reports_its_crash() {
+        use smeltr_core::session::{PostMortemTrigger, SessionId, SessionMetadata};
+        use smeltr_core::writer::SessionWriter;
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+        let crash = |path: &str, pid, sig: &str, seq| smeltr_core::event::Event {
+            ts_mono_ns: seq,
+            ts_wall_ns: seq,
+            session_id: uuid::Uuid::nil(),
+            source: smeltr_core::event::Source::CrashReport,
+            pid: None,
+            seq,
+            payload: Payload::CrashReportEmitted {
+                path: path.into(),
+                crashed_pid: Some(pid),
+                signal: Some(sig.into()),
+                exception_codes: vec![],
+                summary: "KERN_INVALID_ADDRESS at 0x20".into(),
+                proc_name: Some("python3.10".into()),
+            },
+        };
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.post_mortem = Some(PostMortemTrigger {
+            reason: "crash-report".into(),
+            crash_report: Some("/r/python.ips".into()),
+            pid: Some(4242),
+        });
+        let mut w = SessionWriter::create(meta).unwrap();
+        w.write_event(&crash("/r/python.ips", 4242, "SIGSEGV", 1))
+            .unwrap();
+        w.write_event(&crash("/r/other.ips", 7, "SIGABRT", 2))
+            .unwrap();
+        let dir = w.dir().to_path_buf();
+        w.finalize(None, "post-mortem".into()).unwrap();
+
+        let mut report = crate::report::Report {
+            findings: Vec::new(),
+            session_short: None,
+            event_count: 0,
+        };
+        join_crash(&mut report, &dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+        let f = report.findings.first().expect("a crash finding");
+        assert_eq!(f.category, Category::RootCause);
+        assert!(f.title.contains("SIGSEGV"), "title: {}", f.title);
+        assert!(f.title.contains("python3.10"), "title: {}", f.title);
+    }
+
+    /// #270: the root cause was re-derived from DiagnosticReports on every
+    /// analysis, and macOS purges those: July crash sessions had lost the
+    /// SIGABRT they reported at the time. The first join keeps a copy.
+    #[test]
+    #[serial_test::serial]
+    fn a_joined_crash_survives_the_report_being_purged() {
+        use std::time::{Duration, SystemTime};
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+        let now = SystemTime::now();
+        let rfc = |t: SystemTime| {
+            time::OffsetDateTime::from(t)
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let started = rfc(now - Duration::from_secs(60));
+        let dir = scoped_session(home.path(), 11672, vec![], &started, None, &[]);
+        let ips = reports.path().join("python-2026-07-16.ips");
+        std::fs::write(&ips, MULTILINE).unwrap();
+
+        let first = session_crash(&dir).expect("joined while the report exists");
+        std::fs::remove_file(&ips).unwrap(); // macOS purged it
+        let later = session_crash(&dir);
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+        let later = later.expect("the crash must survive the purge");
+        assert_eq!(later.signal, first.signal);
+        assert!(
+            std::path::Path::new(&later.path).exists(),
+            "the kept report must exist: {}",
+            later.path
+        );
     }
 
     fn footprint_ev(

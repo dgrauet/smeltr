@@ -337,9 +337,40 @@ pub struct Event {
     pub payload: Payload,
 }
 
+/// Time covered by `events`, earliest to latest stamp. Not first to last in
+/// file order: files are not in time order (hook frames arrive after a ring
+/// drain, sidecar events are stamped where they happen and sent later), so
+/// that under-reported it (#270).
+pub fn time_span_ns(events: &[Event]) -> u64 {
+    let lo = events.iter().map(|e| e.ts_mono_ns).min();
+    let hi = events.iter().map(|e| e.ts_mono_ns).max();
+    match (lo, hi) {
+        (Some(lo), Some(hi)) => hi - lo,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_span_is_min_to_max_not_first_to_last() {
+        let at = |ts| Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: ts,
+            session_id: Uuid::nil(),
+            source: Source::Mark,
+            pid: None,
+            seq: ts,
+            payload: Payload::Mark {
+                label: String::new(),
+                fields: Default::default(),
+            },
+        };
+        assert_eq!(time_span_ns(&[at(50), at(10), at(80), at(60)]), 70);
+        assert_eq!(time_span_ns(&[]), 0);
+    }
 
     fn round_trip(payload: Payload, source: Source) {
         let e = Event {

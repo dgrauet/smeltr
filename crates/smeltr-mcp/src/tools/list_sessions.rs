@@ -31,13 +31,21 @@ const CACHE_AFTER_END_NS: u64 = 10 * 60 * 1_000_000_000;
 /// What `list_sessions` needs from a session that cannot change any more,
 /// keyed on its event file's size and mtime. Reading every event of every
 /// session took 98 s on a real 272-session store (#261).
+///
+/// Also keyed on the smeltr version that computed it (#270): after an
+/// upgrade that changes a rule, a cached root cause would otherwise outlive
+/// the rule that produced it.
 #[derive(Serialize, Deserialize)]
 struct CachedSummary {
     events_len: u64,
     events_mtime_ns: u64,
+    #[serde(default)]
+    smeltr_version: String,
     event_count: usize,
     root_cause_title: Option<String>,
 }
+
+const CACHE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn events_key(dir: &std::path::Path) -> Option<(u64, u64)> {
     let m = std::fs::metadata(smeltr_core::session::events_path_for_read(dir)).ok()?;
@@ -53,7 +61,8 @@ fn events_key(dir: &std::path::Path) -> Option<(u64, u64)> {
 fn read_cache(dir: &std::path::Path) -> Option<CachedSummary> {
     let text = std::fs::read_to_string(dir.join(SUMMARY_CACHE_FILE)).ok()?;
     let c: CachedSummary = serde_json::from_str(&text).ok()?;
-    (events_key(dir)? == (c.events_len, c.events_mtime_ns)).then_some(c)
+    (events_key(dir)? == (c.events_len, c.events_mtime_ns) && c.smeltr_version == CACHE_VERSION)
+        .then_some(c)
 }
 
 /// Ended long enough ago that nothing will change it any more.
@@ -78,6 +87,7 @@ fn write_cache(dir: &std::path::Path, event_count: usize, root_cause_title: &Opt
     let c = CachedSummary {
         events_len,
         events_mtime_ns,
+        smeltr_version: CACHE_VERSION.to_string(),
         event_count,
         root_cause_title: root_cause_title.clone(),
     };
@@ -597,5 +607,28 @@ mod tests {
         let r = page(Some(0), None);
         assert_eq!(r.sessions.len(), 1);
         assert_eq!(r.next_offset, Some(1));
+    }
+
+    /// #270: the cache was keyed on the event file only, so after an upgrade
+    /// that changes a rule, settled sessions kept their old root cause while
+    /// `analyze` showed the new one.
+    #[test]
+    #[serial_test::serial]
+    fn a_cache_written_by_another_version_is_ignored() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let dir = finished_session("2026-01-01T00:00:00Z");
+        let (events_len, events_mtime_ns) = events_key(&dir).unwrap();
+        // What an older smeltr left: no version, a root cause it no longer finds.
+        let stale = serde_json::json!({
+            "events_len": events_len,
+            "events_mtime_ns": events_mtime_ns,
+            "event_count": 999,
+            "root_cause_title": "stale finding",
+        });
+        std::fs::write(dir.join(SUMMARY_CACHE_FILE), stale.to_string()).unwrap();
+        let s = page(None, None).sessions.remove(0);
+        assert_ne!(s.root_cause_title.as_deref(), Some("stale finding"));
+        assert_eq!(s.event_count, 25);
     }
 }

@@ -32,6 +32,10 @@ pub struct Response {
     pub memory_deltas: Vec<MemoryDelta>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub origin_deltas: Vec<OriginDelta>,
+    /// Set when the two sessions were measured differently (one recorded
+    /// before smeltr 0.28.9, whose Metal GPU times read ~35 % low) — #270.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_caveat: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,8 +60,13 @@ pub struct DeltaStats {
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
-    let (a, a_events) = stats(&params.session_a)?;
-    let (b, b_events) = stats(&params.session_b)?;
+    let (a, a_events, a_dir) = stats(&params.session_a)?;
+    let (b, b_events, b_dir) = stats(&params.session_b)?;
+    let meta = |d: &std::path::Path| smeltr_core::reader::read_metadata(d).ok();
+    let timing_caveat = match (meta(&a_dir), meta(&b_dir)) {
+        (Some(ma), Some(mb)) => smeltr_analyzer::diff::timing_caveat(&ma, &mb),
+        _ => None,
+    };
     let event_count_diff = b.event_count as i64 - a.event_count as i64;
     let duration_diff_ns = b.duration_ns as i64 - a.duration_ns as i64;
     let root_cause_match = a.root_cause_title == b.root_cause_title;
@@ -78,21 +87,19 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         scopes_only_in_b: diff.scopes_only_in_b,
         memory_deltas,
         origin_deltas,
+        timing_caveat,
     })
 }
 
-fn stats(arg: &str) -> Result<(SessionStats, Vec<Event>), ToolError> {
+fn stats(arg: &str) -> Result<(SessionStats, Vec<Event>, std::path::PathBuf), ToolError> {
     let dir = resolve_session(arg)?;
     let events = smeltr_core::reader::read_events(&dir)?;
     let stats = stats_from_events(&dir, &events);
-    Ok((stats, events))
+    Ok((stats, events, dir))
 }
 
 fn stats_from_events(dir: &std::path::Path, events: &[Event]) -> SessionStats {
-    let duration_ns = match (events.first(), events.last()) {
-        (Some(first), Some(last)) => last.ts_mono_ns.saturating_sub(first.ts_mono_ns),
-        _ => 0,
-    };
+    let duration_ns = smeltr_core::event::time_span_ns(events);
     let mut counts: HashMap<String, usize> = HashMap::new();
     for ev in events {
         *counts.entry(source_str(&ev.source).into()).or_insert(0) += 1;

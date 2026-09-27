@@ -82,10 +82,7 @@ pub fn summarize_delta(
     let delta = &events[cur..];
     let new_events = delta.len() as u64;
 
-    let elapsed_ns = match (events.first(), events.last()) {
-        (Some(a), Some(b)) => b.ts_mono_ns.saturating_sub(a.ts_mono_ns),
-        _ => 0,
-    };
+    let elapsed_ns = smeltr_core::event::time_span_ns(events);
 
     let mut counts: BTreeMap<&'static str, u64> = BTreeMap::new();
     for e in delta {
