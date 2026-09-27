@@ -97,8 +97,10 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    // Each session logs its own storage failures once per
+                    // episode; logging here too would repeat every 500 ms.
                     if let Err(e) = flush_router.flush_all() {
-                        tracing::warn!(error = %e, "periodic session flush failed");
+                        tracing::debug!(error = %e, "periodic session flush failed");
                     }
                 }
                 _ = flush_shutdown.changed() => {

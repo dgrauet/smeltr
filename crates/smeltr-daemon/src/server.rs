@@ -290,9 +290,10 @@ async fn handle_msg(
         ClientToDaemon::GetSession { id } => {
             tokio::task::spawn_blocking(move || match find_session_dir(id) {
                 Ok(Some(dir)) => match (read_events(&dir), read_metadata(&dir)) {
-                    (Ok(events), Ok(metadata)) => {
-                        DaemonToClient::SessionEvents { events, metadata }
-                    }
+                    (Ok(events), Ok(metadata)) => DaemonToClient::SessionEvents {
+                        events,
+                        metadata: Box::new(metadata),
+                    },
                     (Err(e), _) | (_, Err(e)) => DaemonToClient::Error {
                         message: e.to_string(),
                     },
@@ -509,7 +510,7 @@ mod tests {
                 &mut daemon_end,
                 &DaemonToClient::SessionEvents {
                     events,
-                    metadata: meta,
+                    metadata: Box::new(meta),
                 },
             )
             .await

@@ -44,8 +44,19 @@ const MIN_VALID_FILE_LEN: u64 = HEAD_MAGIC.len() as u64 + 4 + TRAILER_SIZE; // 2
 
 pub const CHUNK_EVENTS: u32 = 1024;
 pub const CHUNK_BYTES: u64 = 256 * 1024;
-pub const FLUSH_MIN_BYTES: u64 = 4096;
-pub const MAX_CHUNK_BYTES: u64 = 512 * 1024; // scan sanity bound
+/// A flush seals the in-progress chunk once it holds at least this many
+/// uncompressed bytes. 0: any buffered event. It was 4096, and since the
+/// daemon's periodic flush is what makes events durable, a daemon SIGKILL
+/// lost every event of a short chunked run (#268). The cost is at most two
+/// small chunks per second on a quiet session.
+pub const FLUSH_MIN_BYTES: u64 = 0;
+/// Largest compressed chunk the writer produces, and so the largest the
+/// recovery scan accepts. The writer seals before an event would push a
+/// chunk past `min(max_bytes, MAX_FRAME_BYTES)` uncompressed, so a chunk is
+/// at most one maximal frame (16 MiB + 4); zstd's worst case adds < 0.5 %.
+/// It was 512 KiB while one large event could make a bigger chunk, and the
+/// scan then dropped that chunk and every later one (#268).
+pub const MAX_CHUNK_BYTES: u64 = 17 * 1024 * 1024;
 pub const MAX_CHUNKS: usize = 1_048_576;
 
 /// Seal thresholds (injectable so tests can use tiny values).
@@ -116,15 +127,36 @@ pub fn detect(file: &mut File) -> io::Result<Format> {
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(Format::Legacy),
         Err(e) => return Err(e),
     }
-    if head[..3] == HEAD_MAGIC[..3] {
-        if head[3] == FORMAT_VERSION {
-            Ok(Format::Chunked)
-        } else {
-            Ok(Format::Unsupported(head[3]))
+    Ok(detect_bytes(&head))
+}
+
+/// [`detect`] on the file's first bytes (fewer than 4: legacy).
+pub fn detect_bytes(head: &[u8]) -> Format {
+    match head {
+        [a, b, c, v, ..] if [*a, *b, *c] == HEAD_MAGIC[..3] => {
+            if *v == FORMAT_VERSION {
+                Format::Chunked
+            } else {
+                Format::Unsupported(*v)
+            }
         }
-    } else {
-        Ok(Format::Legacy)
+        _ => Format::Legacy,
     }
+}
+
+/// Where the trailer of `buf` says the footer starts, when the trailer magic
+/// is present and the offset is plausible — the end of the chunk area even
+/// when the footer body itself is corrupt.
+pub fn claimed_footer_offset(buf: &[u8]) -> Option<usize> {
+    let len = buf.len();
+    let trailer = buf.get(len.checked_sub(TRAILER_SIZE as usize)?..)?;
+    if read_u64_le(trailer, 12) != FOOTER_MAGIC {
+        return None;
+    }
+    let off = usize::try_from(read_u64_le(trailer, 0)).ok()?;
+    (HEAD_MAGIC.len()..len - TRAILER_SIZE as usize)
+        .contains(&off)
+        .then_some(off)
 }
 
 /// Write the footer body + trailer. `footer_offset` is the absolute byte position
@@ -161,6 +193,14 @@ pub fn write_footer_at<W: Write>(
 /// - `Err(SessionFormatError::FooterCorrupt(...))` if the magic matches but the
 ///   data is invalid (range, size equation, or CRC).
 pub fn read_footer(file: &mut File) -> Result<Option<Vec<ChunkIndexEntry>>, SessionFormatError> {
+    Ok(read_footer_with_offset(file)?.map(|(entries, _)| entries))
+}
+
+/// [`read_footer`] over any seekable reader, also returning where the
+/// footer body starts (the end of the chunk area).
+pub fn read_footer_with_offset<R: Read + Seek>(
+    file: &mut R,
+) -> Result<Option<(Vec<ChunkIndexEntry>, u64)>, SessionFormatError> {
     let len = file.seek(SeekFrom::End(0))?;
     if len < MIN_VALID_FILE_LEN {
         return Ok(None);
@@ -233,23 +273,34 @@ pub fn read_footer(file: &mut File) -> Result<Option<Vec<ChunkIndexEntry>>, Sess
         p += ENTRY_SIZE;
     }
 
-    Ok(Some(entries))
+    Ok(Some((entries, footer_offset)))
+}
+
+/// Magic number opening every zstd frame.
+pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Whether a zstd frame starting at `frame[0]` carries a content checksum
+/// (Frame_Header_Descriptor bit 2). Sessions written since #268 always do.
+pub fn frame_has_checksum(frame: &[u8]) -> bool {
+    frame.len() > 4 && frame[..4] == ZSTD_MAGIC && frame[4] & 0x04 != 0
 }
 
 /// Decompress a sealed chunk's compressed bytes and decode all events within.
 ///
-/// Uses `zstd::stream::read::Decoder` over a `Cursor` — never `zstd::bulk`.
+/// Strict: a chunk is sealed whole, so anything short of complete events
+/// ending exactly at the end of one valid zstd frame — including a truncated
+/// event, which used to be taken for a clean end — is an error.
 pub fn decode_chunk(bytes: &[u8]) -> io::Result<Vec<Event>> {
-    let mut dec = zstd::stream::read::Decoder::new(Cursor::new(bytes))?;
+    let mut data = Vec::new();
+    zstd::stream::read::Decoder::with_buffer(bytes)?
+        .single_frame()
+        .read_to_end(&mut data)?;
+    let mut cur = Cursor::new(&data[..]);
     let mut out = Vec::new();
     loop {
-        match read_frame::<_, Event>(&mut dec) {
+        match read_frame::<_, Event>(&mut cur) {
             Ok(Some(ev)) => out.push(ev),
-            Ok(None) => break, // clean EOF at frame boundary
-            Err(crate::codec::CodecError::Truncated) => break,
-            Err(crate::codec::CodecError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                break;
-            }
+            Ok(None) => break,
             Err(e) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -261,50 +312,71 @@ pub fn decode_chunk(bytes: &[u8]) -> io::Result<Vec<Event>> {
     Ok(out)
 }
 
-/// Read the compressed bytes of one chunk from `file` at `offset` (pointing to the
-/// comp_len u32 header). Returns `None` at clean truncation: EOF, zero comp_len, or
-/// comp_len exceeding `MAX_CHUNK_BYTES` or extending past end-of-file.
-fn read_chunk_at(
-    file: &mut File,
-    offset: u64,
-    file_len: u64,
-) -> io::Result<Option<(Vec<u8>, u64)>> {
-    if offset + 4 > file_len {
-        return Ok(None);
+/// The chunk at `offset` (its `comp_len` prefix) if it lies within `end`
+/// and decodes; with `need_checksum`, only a checksummed chunk counts — a
+/// resync must not take stray bytes for a chunk.
+fn try_chunk(
+    buf: &[u8],
+    offset: usize,
+    end: usize,
+    need_checksum: bool,
+) -> Option<(Vec<Event>, usize)> {
+    let len_bytes: [u8; 4] = buf.get(offset..offset + 4)?.try_into().ok()?;
+    let comp_len = u32::from_le_bytes(len_bytes) as usize;
+    let body_end = (offset + 4).checked_add(comp_len)?;
+    if comp_len == 0 || comp_len as u64 > MAX_CHUNK_BYTES || body_end > end {
+        return None;
     }
-    file.seek(SeekFrom::Start(offset))?;
-    let mut lb = [0u8; 4];
-    match file.read_exact(&mut lb) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
+    let body = &buf[offset + 4..body_end];
+    if body.get(..4)? != ZSTD_MAGIC || (need_checksum && !frame_has_checksum(body)) {
+        return None;
     }
-    let comp_len = u32::from_le_bytes(lb) as u64;
-    if comp_len == 0 || comp_len > MAX_CHUNK_BYTES || offset + 4 + comp_len > file_len {
-        return Ok(None);
-    }
-    let mut buf = vec![0u8; comp_len as usize];
-    match file.read_exact(&mut buf) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
-    }
-    Ok(Some((buf, offset + 4 + comp_len)))
+    decode_chunk(body).ok().map(|evs| (evs, body_end))
 }
 
-/// Decode all sealed chunks from a chunked session file starting at offset 4
-/// (immediately after HEAD_MAGIC). EOF-tolerant: a truncated or undecodable
-/// chunk stops the scan and returns whatever was recovered.
-pub fn scan_chunks(file: &mut File) -> io::Result<Vec<Event>> {
-    let file_len = file.seek(SeekFrom::End(0))?;
+/// Decode every chunk of `buf[..end]` (a chunked file without a usable
+/// footer), skipping damaged regions. A damaged chunk used to end the scan
+/// silently, dropping every later chunk; now the scan resynchronizes on the
+/// next checksummed chunk and `damage` says what was skipped.
+pub fn scan_chunks_checked(buf: &[u8], end: usize, damage: &mut Vec<String>) -> Vec<Event> {
+    let end = end.min(buf.len());
     let mut out = Vec::new();
-    let mut cursor = HEAD_MAGIC.len() as u64;
-    while let Some((bytes, next)) = read_chunk_at(file, cursor, file_len)? {
-        match decode_chunk(&bytes) {
-            Ok(mut evs) => out.append(&mut evs),
-            Err(_) => break, // terminal torn chunk → clean truncation
+    let mut cursor = HEAD_MAGIC.len();
+    while cursor < end {
+        if let Some((mut evs, next)) = try_chunk(buf, cursor, end, false) {
+            out.append(&mut evs);
+            cursor = next;
+            continue;
         }
-        cursor = next;
+        match (cursor + 1..end).find(|&p| try_chunk(buf, p, end, true).is_some()) {
+            Some(p) => {
+                damage.push(format!(
+                    "bytes {cursor}..{p} of the event file are unreadable and were skipped"
+                ));
+                cursor = p;
+            }
+            None => {
+                damage.push(format!(
+                    "the last {} bytes of the event file are unreadable (truncated or damaged)",
+                    end - cursor
+                ));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Decode all chunks from a chunked session file; damage is logged, not
+/// returned (see `reader::read_events_checked`).
+pub fn scan_chunks(file: &mut File) -> io::Result<Vec<Event>> {
+    let mut buf = Vec::new();
+    file.seek(SeekFrom::Start(0))?;
+    file.read_to_end(&mut buf)?;
+    let mut damage = Vec::new();
+    let out = scan_chunks_checked(&buf, buf.len(), &mut damage);
+    if !damage.is_empty() {
+        tracing::warn!("{}", damage.join("; "));
     }
     Ok(out)
 }
@@ -349,6 +421,19 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].ts_mono_ns, 1);
         assert_eq!(got[1].source, Source::MetalHook);
+    }
+
+    /// #268: a sealed chunk ending mid-event is damage, not a clean end.
+    #[test]
+    fn decode_chunk_rejects_a_truncated_event() {
+        let mut raw = Vec::new();
+        write_frame(&mut raw, &ev(1, Source::Mark)).unwrap();
+        write_frame(&mut raw, &ev(2, Source::Mark)).unwrap();
+        raw.truncate(raw.len() - 3);
+        let mut enc = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+        enc.write_all(&raw).unwrap();
+        let comp = enc.finish().unwrap();
+        assert!(decode_chunk(&comp).is_err());
     }
 
     #[test]

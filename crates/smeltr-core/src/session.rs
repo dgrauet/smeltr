@@ -83,6 +83,16 @@ pub struct SessionMetadata {
     /// What triggered a post-mortem session (#267); `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_mortem: Option<PostMortemTrigger>,
+    /// Events the writer accepted but had to drop because the disk refused
+    /// writes for longer than its in-memory backlog could absorb (#268).
+    /// Readers report it as damage: the event file alone cannot show a gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_events: Option<u64>,
+    /// Events written to the event file, set at finalize (#268). A reader
+    /// that decodes fewer knows the file lost data — even when it was cut
+    /// exactly at a frame or chunk boundary, which looks like a clean end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_count: Option<u64>,
 }
 
 /// The event a post-mortem session was flushed for.
@@ -156,6 +166,8 @@ impl SessionMetadata {
             term_signal: None,
             gputrace_path: None,
             post_mortem: None,
+            dropped_events: None,
+            event_count: None,
         }
     }
 }
@@ -226,7 +238,15 @@ pub fn metadata_path(dir: &Path) -> PathBuf {
 pub fn write_metadata(dir: &Path, meta: &SessionMetadata) -> std::io::Result<()> {
     let text = toml::to_string(meta)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    std::fs::write(metadata_path(dir), text)
+    // Write a sibling then rename over: a plain write truncates first, so a
+    // full disk or a crash mid-write left an empty metadata.toml and a
+    // session nothing could open (#268). The rename is atomic.
+    let tmp = dir.join(format!(".metadata.toml.{}.tmp", std::process::id()));
+    let res = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, metadata_path(dir)));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 pub fn events_path(dir: &Path) -> PathBuf {

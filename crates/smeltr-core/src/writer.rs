@@ -1,36 +1,175 @@
 //! Append-only session writer. One instance per active session.
+//!
+//! Both formats compress into memory and append to the events file in whole
+//! units: one zstd frame (legacy) or one length-prefixed chunk (chunked).
+//! A unit is on disk entirely or not at all. When a write fails (ENOSPC,
+//! EIO), the file is cut back to the end of the last complete unit and the
+//! unit stays pending, retried on the next seal, flush or finalize — so the
+//! file is always a readable prefix of the session, and a disk that frees up
+//! again loses nothing (#268).
+//!
+//! The legacy writer used to stream straight into a zstd encoder over the
+//! file: an ENOSPC between an event's length prefix and its body left a hole
+//! in the decompressed stream, and every event after it decoded to garbage.
+//! The chunked writer poisoned itself for good on the first failed seal.
 
 use crate::chunked::{self, ChunkConfig, ChunkIndexEntry};
-use crate::codec::write_frame;
+use crate::codec::{encode_frame, CodecError, MAX_FRAME_BYTES};
 use crate::event::Event;
 use crate::session::{events_path_zst, session_dir, SessionMetadata};
+use std::collections::VecDeque;
 use std::fs::{create_dir_all, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-enum Backend {
-    Legacy(Option<zstd::stream::Encoder<'static, File>>),
-    Chunked(Option<ChunkedState>),
+/// A legacy zstd frame ends once it holds this many uncompressed bytes, even
+/// without a flush: it bounds the memory held and what a torn tail can cost.
+pub const LEGACY_FRAME_BYTES: u64 = 256 * 1024;
+
+/// Compressed bytes allowed to wait in memory while the disk refuses writes.
+/// Beyond it, newly sealed units are dropped and counted in
+/// `SessionMetadata::dropped_events`.
+pub const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
+
+const ZSTD_LEVEL: i32 = 3;
+
+/// A zstd encoder with the content checksum on, so a flipped byte fails to
+/// decode instead of decoding to a wrong value (#268). Files written without
+/// it still read: the checksum is a per-frame header flag.
+fn new_encoder() -> io::Result<zstd::stream::Encoder<'static, Vec<u8>>> {
+    let mut enc = zstd::stream::Encoder::new(Vec::new(), ZSTD_LEVEL)?;
+    enc.include_checksum(true)?;
+    Ok(enc)
 }
 
-struct ChunkedState {
-    file: File,
-    cfg: ChunkConfig,
-    cursor: u64,
+/// Events compressed in memory, not yet sealed into a unit.
+struct Batch {
     enc: zstd::stream::Encoder<'static, Vec<u8>>,
     event_count: u32,
     uncompressed_bytes: u64,
     min_ts: u64,
     max_ts: u64,
     source_bitmap: u64,
+}
+
+impl Batch {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            enc: new_encoder()?,
+            event_count: 0,
+            uncompressed_bytes: 0,
+            min_ts: u64::MAX,
+            max_ts: 0,
+            source_bitmap: 0,
+        })
+    }
+
+    fn push(&mut self, frame: &[u8], ev: &Event) -> io::Result<()> {
+        self.enc.write_all(frame)?;
+        self.event_count += 1;
+        self.uncompressed_bytes += frame.len() as u64;
+        self.min_ts = self.min_ts.min(ev.ts_mono_ns);
+        self.max_ts = self.max_ts.max(ev.ts_mono_ns);
+        self.source_bitmap |= 1 << ev.source.as_u8();
+        Ok(())
+    }
+}
+
+/// A sealed unit waiting to be appended.
+struct Unit {
+    bytes: Vec<u8>,
+    events: u32,
+    /// Chunked only; `offset` is filled in once the unit is on disk.
+    entry: Option<ChunkIndexEntry>,
+}
+
+/// The events file plus the units that could not be written yet.
+struct Appender {
+    file: File,
+    /// End of the last unit fully on disk.
+    cursor: u64,
+    pending: VecDeque<Unit>,
+    pending_bytes: usize,
+    /// `MAX_PENDING_BYTES`; a field so tests can make it small.
+    max_pending_bytes: usize,
+    dropped_events: u64,
+    /// Events in the units fully on disk.
+    written_events: u64,
+    last_error: Option<String>,
     index: Vec<ChunkIndexEntry>,
-    poisoned: bool,
+}
+
+impl Appender {
+    fn new(file: File, cursor: u64) -> Self {
+        Self {
+            file,
+            cursor,
+            pending: VecDeque::new(),
+            pending_bytes: 0,
+            max_pending_bytes: MAX_PENDING_BYTES,
+            dropped_events: 0,
+            written_events: 0,
+            last_error: None,
+            index: Vec::new(),
+        }
+    }
+
+    /// Queue a unit; drops it (and counts its events) when the backlog is
+    /// already at `max_pending_bytes`. Returns whether it was kept.
+    fn enqueue(&mut self, unit: Unit) -> bool {
+        if !self.pending.is_empty()
+            && self.pending_bytes + unit.bytes.len() > self.max_pending_bytes
+        {
+            self.dropped_events += u64::from(unit.events);
+            return false;
+        }
+        self.pending_bytes += unit.bytes.len();
+        self.pending.push_back(unit);
+        true
+    }
+
+    /// Write every pending unit, in order. On failure the file is cut back
+    /// to `cursor` so a partly written unit never stays on disk.
+    fn drain(&mut self) -> io::Result<()> {
+        while let Some(unit) = self.pending.front() {
+            let res = self
+                .file
+                .seek(SeekFrom::Start(self.cursor))
+                .and_then(|_| self.file.write_all(&unit.bytes));
+            if let Err(e) = res {
+                if let Err(te) = self.file.set_len(self.cursor) {
+                    tracing::warn!(error = %te, "could not cut a partly written unit");
+                }
+                self.last_error = Some(e.to_string());
+                return Err(e);
+            }
+            let Some(unit) = self.pending.pop_front() else {
+                break;
+            };
+            self.pending_bytes -= unit.bytes.len();
+            if let Some(mut entry) = unit.entry {
+                entry.offset = self.cursor;
+                self.index.push(entry);
+            }
+            self.cursor += unit.bytes.len() as u64;
+            self.written_events += u64::from(unit.events);
+        }
+        self.last_error = None;
+        Ok(())
+    }
+}
+
+enum Kind {
+    Legacy,
+    Chunked(ChunkConfig),
 }
 
 pub struct SessionWriter {
     dir: PathBuf,
-    backend: Backend,
     metadata: SessionMetadata,
+    kind: Kind,
+    batch: Batch,
+    out: Appender,
 }
 
 impl SessionWriter {
@@ -46,202 +185,188 @@ impl SessionWriter {
         metadata: SessionMetadata,
         chunked_requested: bool,
     ) -> std::io::Result<Self> {
-        if chunked_requested || std::env::var("SMELTR_SESSION_INDEX").as_deref() == Ok("1") {
-            return Self::create_with_chunk_config(metadata, Some(ChunkConfig::default()));
-        }
-        // Legacy: append-mode streaming zstd directly to file.
-        let dir = session_dir(&metadata);
-        create_dir_all(&dir)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(events_path_zst(&dir))?;
-        let encoder = zstd::stream::Encoder::new(file, 3)?;
-        let w = Self {
-            dir,
-            backend: Backend::Legacy(Some(encoder)),
-            metadata,
-        };
-        w.persist_metadata()?;
-        Ok(w)
+        let chunked =
+            chunked_requested || std::env::var("SMELTR_SESSION_INDEX").as_deref() == Ok("1");
+        Self::create_with_chunk_config(metadata, chunked.then(ChunkConfig::default))
     }
 
+    /// `None` writes the legacy format: a sequence of zstd frames.
     pub fn create_with_chunk_config(
         metadata: SessionMetadata,
         cfg: Option<ChunkConfig>,
     ) -> std::io::Result<Self> {
-        let Some(cfg) = cfg else {
-            return Self::create_legacy(metadata);
-        };
         let dir = session_dir(&metadata);
         create_dir_all(&dir)?;
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(events_path_zst(&dir))?;
-        file.write_all(&chunked::HEAD_MAGIC)?;
-        let enc = zstd::stream::Encoder::new(Vec::new(), 3)?;
-        let state = ChunkedState {
-            file,
-            cfg,
-            cursor: chunked::HEAD_MAGIC.len() as u64,
-            enc,
-            event_count: 0,
-            uncompressed_bytes: 0,
-            min_ts: u64::MAX,
-            max_ts: 0,
-            source_bitmap: 0,
-            index: Vec::new(),
-            poisoned: false,
+        let (kind, out) = match cfg {
+            Some(cfg) => {
+                let mut file = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(events_path_zst(&dir))?;
+                file.write_all(&chunked::HEAD_MAGIC)?;
+                let cursor = chunked::HEAD_MAGIC.len() as u64;
+                (Kind::Chunked(cfg), Appender::new(file, cursor))
+            }
+            None => {
+                let file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(events_path_zst(&dir))?;
+                let cursor = file.metadata()?.len();
+                (Kind::Legacy, Appender::new(file, cursor))
+            }
         };
         let w = Self {
             dir,
-            backend: Backend::Chunked(Some(state)),
             metadata,
+            kind,
+            batch: Batch::new()?,
+            out,
         };
         w.persist_metadata()?;
         Ok(w)
     }
 
-    /// Internal: create a legacy writer (used when cfg is None).
-    fn create_legacy(metadata: SessionMetadata) -> std::io::Result<Self> {
-        let dir = session_dir(&metadata);
-        create_dir_all(&dir)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(events_path_zst(&dir))?;
-        let encoder = zstd::stream::Encoder::new(file, 3)?;
-        let w = Self {
-            dir,
-            backend: Backend::Legacy(Some(encoder)),
-            metadata,
-        };
-        w.persist_metadata()?;
-        Ok(w)
+    /// Uncompressed bytes after which the current batch is sealed.
+    ///
+    /// Chunked batches never exceed one frame's maximum, so every chunk the
+    /// writer produces fits `chunked::MAX_CHUNK_BYTES`, the bound the recovery
+    /// scan accepts.
+    fn batch_limit(&self) -> u64 {
+        match self.kind {
+            Kind::Legacy => LEGACY_FRAME_BYTES,
+            Kind::Chunked(cfg) => cfg.max_bytes.min(u64::from(MAX_FRAME_BYTES)),
+        }
     }
 
-    pub fn write_event(&mut self, ev: &Event) -> Result<(), crate::codec::CodecError> {
-        match &mut self.backend {
-            Backend::Legacy(Some(enc)) => {
-                write_frame(enc, ev)?;
-                return Ok(());
+    /// Accepts an event. `Ok` means the writer holds it — in memory until the
+    /// next seal or flush writes it. An error means it was not kept: it could
+    /// not be encoded, or the disk has refused writes for so long that the
+    /// in-memory backlog is full and the unit holding it was dropped.
+    pub fn write_event(&mut self, ev: &Event) -> Result<(), CodecError> {
+        let frame = encode_frame(ev)?;
+        let limit = self.batch_limit();
+        if self.batch.event_count > 0 && self.batch.uncompressed_bytes + frame.len() as u64 > limit
+        {
+            self.seal_and_try_drain()?;
+        }
+        self.batch.push(&frame, ev)?;
+        let full = match self.kind {
+            Kind::Legacy => self.batch.uncompressed_bytes >= limit,
+            Kind::Chunked(cfg) => {
+                self.batch.event_count >= cfg.max_events || self.batch.uncompressed_bytes >= limit
             }
-            Backend::Legacy(None) => {
-                return Err(crate::codec::CodecError::Io(std::io::Error::other(
-                    "writer already finalized",
-                )));
+        };
+        if full {
+            self.seal_and_try_drain()?;
+        }
+        Ok(())
+    }
+
+    /// Seal, then attempt the write. A failed write is not an error here: the
+    /// unit stays pending and `flush` reports it.
+    fn seal_and_try_drain(&mut self) -> io::Result<()> {
+        self.seal()?;
+        let _ = self.out.drain();
+        Ok(())
+    }
+
+    /// Turn the current batch into a unit and queue it. Errors when the unit
+    /// had to be dropped.
+    fn seal(&mut self) -> io::Result<()> {
+        if self.batch.event_count == 0 {
+            return Ok(());
+        }
+        let batch = std::mem::replace(&mut self.batch, Batch::new()?);
+        let events = batch.event_count;
+        let (min_ts, max_ts, source_bitmap) = (batch.min_ts, batch.max_ts, batch.source_bitmap);
+        let compressed = match batch.enc.finish() {
+            Ok(b) => b,
+            Err(e) => {
+                self.out.dropped_events += u64::from(events);
+                return Err(e);
             }
-            Backend::Chunked(None) => {
-                return Err(crate::codec::CodecError::Io(std::io::Error::other(
-                    "writer already finalized",
-                )));
-            }
-            Backend::Chunked(Some(ref mut st)) => {
-                if st.poisoned {
-                    return Err(crate::codec::CodecError::Io(std::io::Error::other(
-                        "writer poisoned",
+        };
+        let unit = match self.kind {
+            Kind::Legacy => Unit {
+                bytes: compressed,
+                events,
+                entry: None,
+            },
+            Kind::Chunked(_) => {
+                let comp_len = u32::try_from(compressed.len())
+                    .ok()
+                    .filter(|&n| u64::from(n) <= chunked::MAX_CHUNK_BYTES);
+                let Some(comp_len) = comp_len else {
+                    self.out.dropped_events += u64::from(events);
+                    return Err(io::Error::other(format!(
+                        "chunk of {} bytes exceeds MAX_CHUNK_BYTES",
+                        compressed.len()
                     )));
+                };
+                let mut bytes = Vec::with_capacity(4 + compressed.len());
+                bytes.extend_from_slice(&comp_len.to_le_bytes());
+                bytes.extend_from_slice(&compressed);
+                Unit {
+                    bytes,
+                    events,
+                    entry: Some(ChunkIndexEntry {
+                        offset: 0,
+                        comp_len,
+                        min_ts,
+                        max_ts,
+                        source_bitmap,
+                        event_count: events,
+                    }),
                 }
-                let n = write_frame(&mut st.enc, ev).inspect_err(|_| {
-                    st.poisoned = true;
-                })?;
-                st.uncompressed_bytes += n as u64;
-                st.event_count += 1;
-                st.min_ts = st.min_ts.min(ev.ts_mono_ns);
-                st.max_ts = st.max_ts.max(ev.ts_mono_ns);
-                st.source_bitmap |= 1 << ev.source.as_u8();
             }
         };
-        // After Chunked(Some) updates state, seal if thresholds are met.
-        // Re-check via helper to release the borrow before calling self.seal().
-        self.seal_if_needed()?;
-        Ok(())
-    }
-
-    /// Seal if thresholds exceeded. Called after write_event updates state.
-    fn seal_if_needed(&mut self) -> std::io::Result<()> {
-        let should_seal = if let Backend::Chunked(Some(ref st)) = self.backend {
-            !st.poisoned
-                && (st.event_count >= st.cfg.max_events
-                    || st.uncompressed_bytes >= st.cfg.max_bytes)
+        // Make room first: the disk may have recovered since the last try.
+        if !self.out.pending.is_empty() {
+            let _ = self.out.drain();
+        }
+        if self.out.enqueue(unit) {
+            Ok(())
         } else {
-            false
-        };
-        if should_seal {
-            self.seal()?;
+            Err(io::Error::other(format!(
+                "disk refusing writes and {} bytes already pending: {events} events dropped",
+                self.out.pending_bytes
+            )))
         }
-        Ok(())
-    }
-
-    /// Seal the current in-progress chunk: finish zstd, write to file, append index entry.
-    fn seal(&mut self) -> std::io::Result<()> {
-        let Backend::Chunked(Some(ref mut st)) = self.backend else {
-            return Ok(());
-        };
-        if st.event_count == 0 {
-            return Ok(());
-        }
-        // Replace encoder with a fresh one.
-        let old_enc = std::mem::replace(
-            &mut st.enc,
-            zstd::stream::Encoder::new(Vec::new(), 3).inspect_err(|_| {
-                st.poisoned = true;
-            })?,
-        );
-        let bytes = old_enc.finish().inspect_err(|_| {
-            st.poisoned = true;
-        })?;
-        if bytes.len() > u32::MAX as usize {
-            st.poisoned = true;
-            return Err(std::io::Error::other("chunk too large"));
-        }
-        let offset_before = st.cursor;
-        let comp_len = bytes.len() as u32;
-        let mut buf = Vec::with_capacity(4 + bytes.len());
-        buf.extend_from_slice(&comp_len.to_le_bytes());
-        buf.extend_from_slice(&bytes);
-        st.file.write_all(&buf).inspect_err(|_| {
-            st.poisoned = true;
-        })?;
-        st.index.push(ChunkIndexEntry {
-            offset: offset_before,
-            comp_len,
-            min_ts: st.min_ts,
-            max_ts: st.max_ts,
-            source_bitmap: st.source_bitmap,
-            event_count: st.event_count,
-        });
-        st.cursor += buf.len() as u64;
-        st.event_count = 0;
-        st.uncompressed_bytes = 0;
-        st.min_ts = u64::MAX;
-        st.max_ts = 0;
-        st.source_bitmap = 0;
-        Ok(())
     }
 
     pub fn dir(&self) -> &std::path::Path {
         &self.dir
     }
 
-    /// Flushes the underlying writer so events become visible to readers.
+    /// The last write error, while units are still waiting for the disk.
+    /// `None` once everything pending has been written.
+    pub fn storage_error(&self) -> Option<&str> {
+        self.out.last_error.as_deref()
+    }
+
+    /// Accepted events dropped so far because the backlog was full.
+    pub fn dropped_events(&self) -> u64 {
+        self.out.dropped_events
+    }
+
+    /// Makes every accepted event durable: seals the current batch — even a
+    /// single event, so a daemon SIGKILL right after loses nothing that was
+    /// flushed (#268) — and writes everything pending.
     pub fn flush(&mut self) -> std::io::Result<()> {
-        // For chunked: seal if threshold met, then flush file.
-        if let Backend::Chunked(Some(ref st)) = self.backend {
-            let should_seal = !st.poisoned
-                && st.event_count > 0
-                && st.uncompressed_bytes >= st.cfg.flush_min_bytes;
-            if should_seal {
-                self.seal()?;
-            }
-        }
-        match &mut self.backend {
-            Backend::Legacy(Some(enc)) => enc.flush(),
-            Backend::Legacy(None) => Ok(()),
-            Backend::Chunked(Some(st)) => st.file.flush(),
-            Backend::Chunked(None) => Ok(()),
-        }
+        let min = match self.kind {
+            Kind::Legacy => 0,
+            Kind::Chunked(cfg) => cfg.flush_min_bytes,
+        };
+        let sealed = if self.batch.event_count > 0 && self.batch.uncompressed_bytes >= min {
+            self.seal()
+        } else {
+            Ok(())
+        };
+        self.out.drain()?;
+        sealed?;
+        self.out.file.flush()
     }
 
     /// Finalize, recording the signal that killed the child when it died by
@@ -260,43 +385,51 @@ impl SessionWriter {
         self.finalize(exit_code, ended_rfc3339)
     }
 
+    /// Writes everything accepted, the chunked footer, and the metadata.
+    /// Units the disk still refuses are counted as dropped; the metadata is
+    /// written regardless, and the first error is returned.
     pub fn finalize(
         mut self,
         exit_code: Option<i32>,
         ended_rfc3339: String,
     ) -> std::io::Result<()> {
-        match &mut self.backend {
-            Backend::Legacy(_) => {
-                if let Backend::Legacy(Some(enc)) =
-                    std::mem::replace(&mut self.backend, Backend::Legacy(None))
-                {
-                    enc.finish()?;
-                }
+        let mut first_err = self.seal().err();
+        if let Err(e) = self.out.drain() {
+            let lost: u64 = self.out.pending.iter().map(|u| u64::from(u.events)).sum();
+            self.out.dropped_events += lost;
+            first_err.get_or_insert(e);
+        } else if let Kind::Chunked(_) = self.kind {
+            if self.out.index.len() > chunked::MAX_CHUNKS {
+                tracing::warn!(
+                    "chunked session has {} chunks, exceeds MAX_CHUNKS={}",
+                    self.out.index.len(),
+                    chunked::MAX_CHUNKS
+                );
             }
-            Backend::Chunked(_) => {
-                // Seal remaining buffered events.
-                self.seal()?;
-                if let Backend::Chunked(Some(mut st)) =
-                    std::mem::replace(&mut self.backend, Backend::Chunked(None))
-                {
-                    if !st.poisoned {
-                        if st.index.len() > chunked::MAX_CHUNKS {
-                            tracing::warn!(
-                                "chunked session has {} chunks, exceeds MAX_CHUNKS={}",
-                                st.index.len(),
-                                chunked::MAX_CHUNKS
-                            );
-                        }
-                        chunked::write_footer_at(&mut st.file, st.cursor, &st.index)?;
-                        st.file.flush()?;
-                    }
-                    // If poisoned: skip footer; file remains scan-recoverable.
-                }
+            let out = &mut self.out;
+            let res = out
+                .file
+                .seek(SeekFrom::Start(out.cursor))
+                .and_then(|_| chunked::write_footer_at(&mut out.file, out.cursor, &out.index))
+                .and_then(|_| out.file.flush());
+            if let Err(e) = res {
+                // No footer is fine: the chunks stay scan-recoverable. A torn
+                // one is not, so cut it.
+                let _ = out.file.set_len(out.cursor);
+                first_err.get_or_insert(e);
             }
         }
         self.metadata.exit_code = exit_code;
         self.metadata.ended_rfc3339 = Some(ended_rfc3339);
-        self.persist_metadata()
+        self.metadata.event_count = Some(self.out.written_events);
+        if self.out.dropped_events > 0 {
+            self.metadata.dropped_events = Some(self.out.dropped_events);
+        }
+        let meta = self.persist_metadata();
+        match first_err {
+            Some(e) => Err(e),
+            None => meta,
+        }
     }
 
     fn persist_metadata(&self) -> std::io::Result<()> {
@@ -365,6 +498,225 @@ mod tests {
         assert_eq!(entries[0].offset, 4); // right after HEAD_MAGIC
         assert!(entries[0].source_bitmap & (1 << Source::Mark.as_u8()) != 0);
         std::env::remove_var("SMELTR_SESSION_INDEX");
+    }
+
+    /// Swap the events file for a read-only handle: every write then fails
+    /// for real (EBADF), with no mock in between.
+    fn break_disk(w: &mut SessionWriter) {
+        let path = crate::session::events_path_zst(&w.dir);
+        w.out.file = std::fs::File::open(path).unwrap();
+    }
+
+    fn repair_disk(w: &mut SessionWriter) {
+        let path = crate::session::events_path_zst(&w.dir);
+        w.out.file = OpenOptions::new().write(true).open(path).unwrap();
+    }
+
+    /// #268: a failed seal is transient. Chunks wait in memory up to the
+    /// backlog cap; beyond it they are dropped, counted, and the count lands
+    /// in the metadata. Once writes succeed again, everything kept is written.
+    #[test]
+    #[serial]
+    fn chunked_backlog_is_bounded_and_drops_are_counted() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let cfg = crate::chunked::ChunkConfig {
+            max_events: 10,
+            max_bytes: 1 << 30,
+            flush_min_bytes: 0,
+        };
+        let mut w = SessionWriter::create_with_chunk_config(meta, Some(cfg)).unwrap();
+        let dir = w.dir().to_path_buf();
+        for i in 0..10u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+        }
+        assert!(w.storage_error().is_none());
+
+        break_disk(&mut w);
+        // Room for one more chunk only.
+        w.out.max_pending_bytes = 1;
+        let mut refused = 0;
+        for i in 10..100u64 {
+            if w.write_event(&ev(i, Source::Mark)).is_err() {
+                refused += 1;
+            }
+        }
+        assert!(w.storage_error().is_some(), "the failure must be visible");
+        assert!(w.flush().is_err());
+        assert_eq!(w.dropped_events(), 80, "8 of the 9 chunks dropped");
+        assert_eq!(refused, 8, "each dropped chunk is reported once");
+
+        repair_disk(&mut w);
+        for i in 100..105u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+        }
+        w.flush().unwrap();
+        assert!(w.storage_error().is_none(), "recovered");
+        w.finalize(Some(0), "end".into()).unwrap();
+
+        let seqs: Vec<u64> = crate::reader::read_events(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.seq)
+            .collect();
+        let want: Vec<u64> = (0..20).chain(100..105).collect();
+        assert_eq!(seqs, want);
+        let meta = crate::reader::read_metadata(&dir).unwrap();
+        assert_eq!(meta.dropped_events, Some(80));
+    }
+
+    /// Same for the legacy format: the failed frame is kept and written
+    /// once the disk accepts it, and the stream stays decodable.
+    #[test]
+    #[serial]
+    fn legacy_failed_write_is_retried_not_lost() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut w = SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        w.write_event(&ev(0, Source::Mark)).unwrap();
+        w.flush().unwrap();
+        break_disk(&mut w);
+        for i in 1..50u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+        }
+        assert!(w.flush().is_err());
+        repair_disk(&mut w);
+        w.write_event(&ev(50, Source::Mark)).unwrap();
+        w.finalize(Some(0), "end".into()).unwrap();
+        let seqs: Vec<u64> = crate::reader::read_events(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, (0..51).collect::<Vec<_>>());
+    }
+
+    /// #268: the daemon flushes every 500 ms; with the default config a
+    /// flush must make even a handful of events durable. A SIGKILL (the
+    /// writer dropped without finalize) used to lose everything under
+    /// FLUSH_MIN_BYTES — a whole short chunked run.
+    #[test]
+    #[serial]
+    fn chunked_default_flush_makes_few_events_durable() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut w = SessionWriter::create_with_format(meta, true).unwrap();
+        let dir = w.dir().to_path_buf();
+        for i in 0..3u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+        }
+        w.flush().unwrap();
+        drop(w); // SIGKILL: no finalize, no footer
+        assert_eq!(crate::reader::read_events(&dir).unwrap().len(), 3);
+    }
+
+    /// #268: one huge event makes a chunk over the old 512 KiB scan bound.
+    /// The recovery scan (no footer: daemon killed) dropped that chunk and
+    /// every chunk after it. Writer and scanner must agree on the bound.
+    #[test]
+    #[serial]
+    fn huge_event_chunk_is_recovered_by_the_scan() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut w = SessionWriter::create_with_format(meta, true).unwrap();
+        let dir = w.dir().to_path_buf();
+        // ~1.5 MB of hex from a xorshift: compresses to ~750 KB at best.
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let big: String = (0..96 * 1024)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                format!("{x:016x}")
+            })
+            .collect();
+        w.write_event(&ev(0, Source::Mark)).unwrap();
+        let mut huge = ev(1, Source::Mark);
+        huge.payload = crate::event::Payload::Mark {
+            label: big,
+            fields: Default::default(),
+        };
+        w.write_event(&huge).unwrap();
+        w.flush().unwrap();
+        for i in 2..5u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+        }
+        w.flush().unwrap();
+        drop(w); // no footer: the scan path
+        let seqs: Vec<u64> = crate::reader::read_events(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// Even with a configured byte threshold far above it, no chunk exceeds
+    /// what the scan accepts.
+    #[test]
+    #[serial]
+    fn chunks_never_exceed_the_scan_bound() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let cfg = crate::chunked::ChunkConfig {
+            max_events: 1_000_000,
+            max_bytes: 1 << 40,
+            flush_min_bytes: 0,
+        };
+        let mut w = SessionWriter::create_with_chunk_config(meta, Some(cfg)).unwrap();
+        let dir = w.dir().to_path_buf();
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for i in 0..24u64 {
+            // 1 MiB of printable noise: barely compressible.
+            let label: String = (0..1 << 20)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    char::from(b' ' + (x % 95) as u8)
+                })
+                .collect();
+            let mut e = ev(i, Source::Mark);
+            e.payload = crate::event::Payload::Mark {
+                label,
+                fields: Default::default(),
+            };
+            w.write_event(&e).unwrap();
+        }
+        w.finalize(Some(0), "end".into()).unwrap();
+        let mut f = std::fs::File::open(crate::session::events_path_zst(&dir)).unwrap();
+        let entries = crate::chunked::read_footer(&mut f).unwrap().unwrap();
+        assert!(entries.len() >= 2);
+        for e in &entries {
+            assert!(u64::from(e.comp_len) <= crate::chunked::MAX_CHUNK_BYTES);
+        }
+        assert_eq!(crate::reader::read_events(&dir).unwrap().len(), 24);
+    }
+
+    /// Older smeltr releases read legacy files with one streaming decoder:
+    /// the checksummed, frame-per-flush files must still decode that way.
+    #[test]
+    #[serial]
+    fn legacy_frames_still_decode_as_one_stream() {
+        let _home = temp_home();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(SessionId::new())).unwrap();
+        let dir = w.dir().to_path_buf();
+        for i in 0..30u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+            if i % 7 == 6 {
+                w.flush().unwrap();
+            }
+        }
+        w.finalize(Some(0), "end".into()).unwrap();
+        let f = std::fs::File::open(crate::session::events_path_zst(&dir)).unwrap();
+        let mut dec = zstd::stream::read::Decoder::new(f).unwrap();
+        let mut n = 0;
+        while let Some(e) = crate::codec::read_frame::<_, Event>(&mut dec).unwrap() {
+            assert_eq!(e.seq, n);
+            n += 1;
+        }
+        assert_eq!(n, 30);
     }
 
     #[test]

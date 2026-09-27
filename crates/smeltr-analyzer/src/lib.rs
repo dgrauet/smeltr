@@ -69,6 +69,43 @@ pub fn analyze_session(dir: &std::path::Path, events: &[Event]) -> Report {
     report
 }
 
+/// Title prefix of the finding that flags a damaged or truncated session.
+pub const INCOMPLETE_DATA_TITLE: &str = "Session data is incomplete";
+
+/// [`analyze_session`] over what [`smeltr_core::reader::read_events_checked`]
+/// returned: when the event file is damaged, the report opens with a finding
+/// saying so, and conclusions that only an absence of events supports are
+/// withdrawn — a truncated file used to yield "No instrumented GPU workload"
+/// (#268).
+pub fn analyze_session_checked(
+    dir: &std::path::Path,
+    events: &[Event],
+    damage: Option<&smeltr_core::reader::Damage>,
+) -> Report {
+    let mut report = analyze_session(dir, events);
+    if let Some(damage) = damage {
+        report
+            .findings
+            .retain(|f| f.title != rules::sidecar_absent::NOTHING_INSTRUMENTED_TITLE);
+        report.findings.insert(
+            0,
+            Finding::new(
+                Severity::Warning,
+                Category::ContributingFactor,
+                format!(
+                    "{INCOMPLETE_DATA_TITLE}: this report covers only the {} event(s) that could be read",
+                    events.len()
+                ),
+            )
+            .with_detail(format!(
+                "{damage}. Findings based on the absence of an event (no GPU work, no sidecar, \
+                 no crash) may be wrong."
+            )),
+        );
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -104,7 +104,9 @@ pub enum DaemonToClient {
     },
     SessionEvents {
         events: Vec<Event>,
-        metadata: smeltr_core::session::SessionMetadata,
+        /// Boxed to keep the enum small; serde encodes a `Box` exactly as
+        /// its content, so the wire format is unchanged.
+        metadata: Box<smeltr_core::session::SessionMetadata>,
     },
     EventNotification {
         event: Event,
