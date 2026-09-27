@@ -198,6 +198,14 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Internal: the process `record` spawns. Waits until the daemon has
+    /// accepted the session, then execs the command in place (same pid).
+    #[command(name = "__exec-gate", hide = true)]
+    ExecGate {
+        cmd: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -212,6 +220,9 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    if let Cmd::ExecGate { cmd, args } = &args.cmd {
+        commands::record::exec_gate(cmd, args);
+    }
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         match args.cmd {
@@ -275,6 +286,7 @@ fn main() -> anyhow::Result<()> {
                 commands::origins::run(session.as_deref(), last, top)
             }
             Cmd::Tail { session } => commands::tail::run(session).await,
+            Cmd::ExecGate { .. } => unreachable!("handled before the runtime starts"),
             Cmd::Record {
                 cmd,
                 args,
