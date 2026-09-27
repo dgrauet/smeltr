@@ -174,6 +174,27 @@ def test_a_timed_out_exchange_does_not_desync_the_stream(fake_daemon):
         c.close()
 
 
+def test_closed_clients_release_their_file_descriptors(fake_daemon):
+    import gc
+    import os
+
+    def open_fds():
+        return len(os.listdir("/dev/fd"))
+
+    c = _Client()
+    c.connect()
+    c.close()
+    before = open_fds()
+    for _ in range(20):
+        c = _Client()
+        c.connect()
+        c.emit({"kind": "Mark", "label": "x"}, pid=1)
+        c.close()
+        del c
+        gc.collect()
+    assert open_fds() <= before + 2
+
+
 def test_socket_does_not_raise_sigpipe(fake_daemon):
     """A program that restored SIGPIPE=SIG_DFL died (exit 141) when the
     daemon went away mid-write."""

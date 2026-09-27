@@ -134,6 +134,9 @@ class _Client:
         self._sender: threading.Thread | None = None
         self._sender_idle = False
         self._wake_r, self._wake_w = _wake_pipe()
+        # Closed when the client is collected, never earlier: an emit racing
+        # close() could otherwise write its wake byte into a reused fd.
+        self._pipe_finalizer = weakref.finalize(self, _close_fds, self._wake_r, self._wake_w)
         # Best-effort counts: each is written by one side only.
         self._dropped_emit = 0  # queue full, on the emitting threads
         self._dropped_send = 0  # failed exchanges, on the sender thread
@@ -449,11 +452,8 @@ class _Client:
         belong to the parent (its sender still delivers that queue). The
         child reconnects on its first emit."""
         sock = self._sock
-        for fd in (self._wake_r, self._wake_w):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        # The child has no other thread that could still use the pipe.
+        self._pipe_finalizer()
         self._init_runtime_state()
         if sock is not None:
             # Closes the child's copy of the descriptor only; the parent's
@@ -479,6 +479,14 @@ class _Client:
             raise ClientError(f"server frame too large: {length} bytes")
         body = _recv_exact(self._sock, length)
         return cbor2.loads(body)
+
+
+def _close_fds(*fds: int) -> None:
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _encode(value: dict[str, Any]) -> bytes:
