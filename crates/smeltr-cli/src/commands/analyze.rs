@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use smeltr_core::reader::read_events;
+use smeltr_core::reader::read_events_checked;
 
 pub fn run(arg_last: bool, session_id: Option<String>, include_ambient: bool) -> Result<()> {
     let dir = pick(arg_last, session_id, include_ambient)?;
@@ -23,9 +23,13 @@ fn pick(
 }
 
 fn build_report(dir: &std::path::Path) -> Result<smeltr_analyzer::report::Report> {
-    let events =
-        read_events(dir).with_context(|| format!("reading events from {}", dir.display()))?;
-    Ok(smeltr_analyzer::analyze_session(dir, &events))
+    let (events, damage) = read_events_checked(dir)
+        .with_context(|| format!("reading events from {}", dir.display()))?;
+    Ok(smeltr_analyzer::analyze_session_checked(
+        dir,
+        &events,
+        damage.as_ref(),
+    ))
 }
 
 #[cfg(test)]
@@ -100,5 +104,50 @@ mod tests {
             report.session_short.as_deref(),
             Some(meta_id.short().as_str()),
         );
+    }
+
+    /// #268: a truncated session is reported as incomplete, not analyzed as
+    /// if the readable part were the whole run ("No instrumented GPU
+    /// workload" from a file cut at 30 %).
+    #[test]
+    #[serial]
+    fn truncated_session_is_reported_incomplete() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(SessionId::new())).unwrap();
+        let dir = w.dir().to_path_buf();
+        for i in 0..200u64 {
+            w.write_event(&Event {
+                ts_mono_ns: i,
+                ts_wall_ns: i,
+                session_id: uuid::Uuid::nil(),
+                source: Source::System,
+                pid: None,
+                seq: i,
+                payload: Payload::SessionStarted { wall_unix_ns: i },
+            })
+            .unwrap();
+            if i % 20 == 19 {
+                w.flush().unwrap();
+            }
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+        let path = dir.join("events.cbor.zst");
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() * 3 / 10]).unwrap();
+
+        let report = super::build_report(&dir).unwrap();
+        let titles: Vec<&str> = report.findings.iter().map(|f| f.title.as_str()).collect();
+        assert!(
+            titles[0].starts_with("Session data is incomplete"),
+            "first finding must flag the damage: {titles:?}"
+        );
+        assert!(
+            !titles
+                .iter()
+                .any(|t| t.starts_with("No instrumented GPU workload")),
+            "no conclusion from missing data: {titles:?}"
+        );
+        assert!(report.render().contains("Session data is incomplete"));
     }
 }

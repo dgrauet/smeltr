@@ -33,8 +33,13 @@ pub const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 
 const ZSTD_LEVEL: i32 = 3;
 
+/// A zstd encoder with the content checksum on, so a flipped byte fails to
+/// decode instead of decoding to a wrong value (#268). Files written without
+/// it still read: the checksum is a per-frame header flag.
 fn new_encoder() -> io::Result<zstd::stream::Encoder<'static, Vec<u8>>> {
-    zstd::stream::Encoder::new(Vec::new(), ZSTD_LEVEL)
+    let mut enc = zstd::stream::Encoder::new(Vec::new(), ZSTD_LEVEL)?;
+    enc.include_checksum(true)?;
+    Ok(enc)
 }
 
 /// Events compressed in memory, not yet sealed into a unit.
@@ -88,6 +93,8 @@ struct Appender {
     /// `MAX_PENDING_BYTES`; a field so tests can make it small.
     max_pending_bytes: usize,
     dropped_events: u64,
+    /// Events in the units fully on disk.
+    written_events: u64,
     last_error: Option<String>,
     index: Vec<ChunkIndexEntry>,
 }
@@ -101,6 +108,7 @@ impl Appender {
             pending_bytes: 0,
             max_pending_bytes: MAX_PENDING_BYTES,
             dropped_events: 0,
+            written_events: 0,
             last_error: None,
             index: Vec::new(),
         }
@@ -144,6 +152,7 @@ impl Appender {
                 self.index.push(entry);
             }
             self.cursor += unit.bytes.len() as u64;
+            self.written_events += u64::from(unit.events);
         }
         self.last_error = None;
         Ok(())
@@ -412,6 +421,7 @@ impl SessionWriter {
         }
         self.metadata.exit_code = exit_code;
         self.metadata.ended_rfc3339 = Some(ended_rfc3339);
+        self.metadata.event_count = Some(self.out.written_events);
         if self.out.dropped_events > 0 {
             self.metadata.dropped_events = Some(self.out.dropped_events);
         }
@@ -682,6 +692,31 @@ mod tests {
             assert!(u64::from(e.comp_len) <= crate::chunked::MAX_CHUNK_BYTES);
         }
         assert_eq!(crate::reader::read_events(&dir).unwrap().len(), 24);
+    }
+
+    /// Older smeltr releases read legacy files with one streaming decoder:
+    /// the checksummed, frame-per-flush files must still decode that way.
+    #[test]
+    #[serial]
+    fn legacy_frames_still_decode_as_one_stream() {
+        let _home = temp_home();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(SessionId::new())).unwrap();
+        let dir = w.dir().to_path_buf();
+        for i in 0..30u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+            if i % 7 == 6 {
+                w.flush().unwrap();
+            }
+        }
+        w.finalize(Some(0), "end".into()).unwrap();
+        let f = std::fs::File::open(crate::session::events_path_zst(&dir)).unwrap();
+        let mut dec = zstd::stream::read::Decoder::new(f).unwrap();
+        let mut n = 0;
+        while let Some(e) = crate::codec::read_frame::<_, Event>(&mut dec).unwrap() {
+            assert_eq!(e.seq, n);
+            n += 1;
+        }
+        assert_eq!(n, 30);
     }
 
     #[test]

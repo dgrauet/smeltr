@@ -19,12 +19,17 @@ pub struct Response {
     /// op level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gputrace_path: Option<String>,
+    /// Set when the event file is damaged, truncated, or lost events while
+    /// being written: `event_count` and the report then cover only what
+    /// could be read (#268).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_incomplete: Option<String>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
     let dir = resolve_session(&params.session)?;
-    let events = smeltr_core::reader::read_events(&dir)?;
-    let report = smeltr_analyzer::analyze_session(&dir, &events);
+    let (events, damage) = smeltr_core::reader::read_events_checked(&dir)?;
+    let report = smeltr_analyzer::analyze_session_checked(&dir, &events, damage.as_ref());
     let gputrace_path = smeltr_core::reader::read_metadata(&dir)
         .ok()
         .and_then(|m| m.gputrace_path);
@@ -32,6 +37,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         report,
         event_count: events.len(),
         gputrace_path,
+        data_incomplete: damage.map(|d| d.to_string()),
     })
 }
 
@@ -151,5 +157,48 @@ mod tests {
             .find(|f| f.category == smeltr_analyzer::Category::RootCause)
             .expect("le verdict de crash doit sortir par le MCP");
         assert!(root.title.contains("crashed"), "title: {}", root.title);
+    }
+
+    /// #268: a truncated chunked session used to come back with
+    /// `event_count: 1024` of 3008 and nothing saying so.
+    #[test]
+    #[serial_test::serial]
+    fn truncated_session_is_flagged_incomplete() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let mut w =
+            SessionWriter::create_with_format(SessionMetadata::now_starting(id), true).unwrap();
+        let dir = w.dir().to_path_buf();
+        for i in 0..300u64 {
+            w.write_event(&Event {
+                ts_mono_ns: i,
+                ts_wall_ns: i,
+                session_id: Uuid::nil(),
+                source: Source::System,
+                pid: None,
+                seq: i,
+                payload: Payload::SessionStarted { wall_unix_ns: i },
+            })
+            .unwrap();
+            if i % 50 == 49 {
+                w.flush().unwrap();
+            }
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+        let path = dir.join("events.cbor.zst");
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+        })
+        .unwrap();
+        assert!(resp.event_count < 300);
+        let incomplete = resp.data_incomplete.expect("damage must be surfaced");
+        assert!(incomplete.contains("missing"), "{incomplete}");
+        assert!(resp.report.findings[0]
+            .title
+            .starts_with("Session data is incomplete"));
     }
 }

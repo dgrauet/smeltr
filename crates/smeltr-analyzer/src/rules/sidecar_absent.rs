@@ -132,6 +132,10 @@ pub fn detect_nothing_instrumented(events: &[Event]) -> Option<NothingInstrument
     })
 }
 
+/// Withdrawn by `analyze_session_checked` when the event file is damaged:
+/// missing data would otherwise read as "nothing was instrumented".
+pub const NOTHING_INSTRUMENTED_TITLE: &str = "No instrumented GPU workload in this session";
+
 pub struct SidecarAbsentRule;
 
 impl Rule for SidecarAbsentRule {
@@ -144,7 +148,7 @@ impl Rule for SidecarAbsentRule {
             return vec![Finding::new(
                 Severity::Info,
                 Category::ContributingFactor,
-                "No instrumented GPU workload in this session",
+                NOTHING_INSTRUMENTED_TITLE,
             )
             .with_detail(nothing.advice())];
         }
