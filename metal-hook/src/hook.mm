@@ -113,6 +113,10 @@ static inline void smeltr_store_ns_per_tick(double v) {
 /// Detect MTLCounterSamplingPointAtStageBoundary support and find the
 /// timestamp counter set. Called once at hook init.
 static void smeltr_detect_stage_sampling(id<MTLDevice> device) {
+    // Test-only: behave like a device without stage-boundary sampling
+    // (paravirtualized GPUs, older families).
+    const char *no_stage = getenv("SMELTR_HOOK_TEST_NO_STAGE_SAMPLING");
+    if (no_stage && strcmp(no_stage, "1") == 0) return;
     for (id<MTLCounterSet> cs in [device counterSets]) {
         if ([[cs name] isEqualToString:MTLCommonCounterSetTimestamp]) {
             g_timestamp_counter_set = cs;
@@ -219,8 +223,9 @@ static const void *kSmeltrEncoderSBIdxKey   = &kSmeltrEncoderSBIdxKey;   // NSNu
 static const void *kSmeltrEncoderDispIdxKey = &kSmeltrEncoderDispIdxKey; // NSMutableArray<NSNumber>: per-dispatch start_idx (-1 if not sampled), parallel to kSmeltrEncoderDispKey
 
 // 512 dispatches max per encoder (2 samples per dispatch). Beyond this,
-// extra dispatches contribute to a pro-rata pool of the remaining
-// encoder-level time, like the stage-boundary path.
+// extra dispatches are recorded with 0 ns: dispatch-sampled encoders are
+// excluded from the pro-rata pool, so their overflow time is lost (#264 —
+// not fixed yet: dispatch-boundary sampling needs an M3+ to exercise).
 static const NSUInteger kDispatchBoundarySampleCap = 1024;
 
 static const NSUInteger kStageBoundarySampleCount = 2;  // start + end
@@ -314,12 +319,45 @@ static const void *kSmeltrCbSchedTsKey = &kSmeltrCbSchedTsKey;
 // CB_COMMITTED/CB_COMPLETED/CB_OPS set and takes exactly one depth +1/-1.
 static const void *kSmeltrCbTrackedKey = &kSmeltrCbTrackedKey;
 
-/// Returns YES exactly once per CB (nested calls happen on one thread, so a
-/// plain associated-object check is race-free).
-static BOOL smeltr_cb_mark_tracked(id cb) {
-    if (objc_getAssociatedObject(cb, kSmeltrCbTrackedKey)) return NO;
+/// Test-only (SMELTR_HOOK_TEST_NO_CB_CLASS_COMMIT=1): leave the command-
+/// buffer class's `commit` alone so every commit goes through the queue-level
+/// swizzle, which otherwise only sees buffers of other classes.
+static BOOL g_test_no_cb_class_commit = NO;
+
+static void smeltr_cb_set_tracked(id cb) {
     objc_setAssociatedObject(cb, kSmeltrCbTrackedKey, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+/// Returns YES exactly once per commit (nested calls happen on one thread,
+/// so a plain associated-object check is race-free).
+///
+/// A commit also claims every command buffer the claimed one wraps (#264).
+/// Under MTL_CAPTURE_ENABLED, MTL_DEBUG_LAYER or MTL_SHADER_VALIDATION the
+/// app commits a wrapper (MTLToolsObject subclass: CaptureMTLCommandBuffer,
+/// MTLDebugCommandBuffer, …) whose commit commits the inner buffer; either
+/// interception point may see either object (macOS 14's debug queue goes
+/// through the queue swizzle twice), and the per-object check alone let
+/// both through, recording every CB twice. Layers stack, hence the walk.
+static BOOL smeltr_cb_mark_tracked(id cb) {
+    if (objc_getAssociatedObject(cb, kSmeltrCbTrackedKey)) return NO;
+    smeltr_cb_set_tracked(cb);
+    SEL base_sel = sel_registerName("baseObject");
+    id wrapped[8];
+    int n = 0;
+    id obj = cb;
+    while (n < 8 && [obj respondsToSelector:base_sel]) {
+        obj = ((id (*)(id, SEL))objc_msgSend)(obj, base_sel);
+        if (!obj) break;
+        wrapped[n++] = obj;
+    }
+    // Either object can be seen first: when the buffer this one wraps was
+    // already recorded, this commit is the same one.
+    for (int i = 0; i < n; i++) {
+        if (objc_getAssociatedObject(wrapped[i], kSmeltrCbTrackedKey)) return NO;
+    }
+    for (int i = 0; i < n; i++) smeltr_cb_set_tracked(wrapped[i]);
+    SMELTR_TRACE("tracking commit of %s (%d wrapped)", class_getName(object_getClass(cb)), n);
     return YES;
 }
 
@@ -346,24 +384,32 @@ static dispatch_source_t g_warn_timer = NULL;
 
 static const void *kSmeltrQueueLastDoneKey = &kSmeltrQueueLastDoneKey;
 
-static SmeltrAtomicU64 *queue_last_done_of(id queue) {
-    SmeltrAtomicU64 *box = objc_getAssociatedObject(queue, kSmeltrQueueLastDoneKey);
+static os_unfair_lock g_queue_box_lock = OS_UNFAIR_LOCK_INIT;
+
+/// Per-queue counter stored as an associated object, created on first use.
+/// Creation is locked: two threads committing their first buffers to one
+/// queue each created a box, one increment went to the box the other
+/// thread then replaced, and the depth counter drifted or underflowed
+/// (#264).
+static SmeltrAtomicU64 *smeltr_queue_box(id queue, const void *key) {
+    SmeltrAtomicU64 *box = objc_getAssociatedObject(queue, key);
+    if (box) return box;
+    os_unfair_lock_lock(&g_queue_box_lock);
+    box = objc_getAssociatedObject(queue, key);
     if (!box) {
         box = [SmeltrAtomicU64 withValue:0];
-        objc_setAssociatedObject(queue, kSmeltrQueueLastDoneKey, box,
-                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(queue, key, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    os_unfair_lock_unlock(&g_queue_box_lock);
     return box;
 }
 
+static SmeltrAtomicU64 *queue_last_done_of(id queue) {
+    return smeltr_queue_box(queue, kSmeltrQueueLastDoneKey);
+}
+
 static SmeltrAtomicU64 *queue_depth_of(id queue) {
-    SmeltrAtomicU64 *box = objc_getAssociatedObject(queue, kSmeltrQueueDepthKey);
-    if (!box) {
-        box = [SmeltrAtomicU64 withValue:0];
-        objc_setAssociatedObject(queue, kSmeltrQueueDepthKey, box,
-                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return box;
+    return smeltr_queue_box(queue, kSmeltrQueueDepthKey);
 }
 
 /// Execution window for pro-rata attribution. Compute CBs on one queue
@@ -579,7 +625,7 @@ static NSInteger smeltr_dispatch_sample_pre(id enc) {
     NSNumber *idxBox = objc_getAssociatedObject(enc, kSmeltrEncoderSBIdxKey);
     if (!idxBox) return -1;
     NSUInteger idx = [idxBox unsignedIntegerValue];
-    if (idx + 2 > kDispatchBoundarySampleCap) return -1;  // overflow → pro-rata
+    if (idx + 2 > kDispatchBoundarySampleCap) return -1;  // overflow: recorded as 0 ns
     id<MTLCounterSampleBuffer> sb = objc_getAssociatedObject(enc, kSmeltrEncoderSBKey);
     if (!sb) return -1;
     SEL sel = sel_registerName("sampleCountersInBuffer:atSampleIndex:withBarrier:");
@@ -1089,36 +1135,38 @@ static void smeltr_gputrace_note_commit(void) {
     return cb;
 }
 
-- (void)smeltr_commit {
-    SMELTR_TRACE("swizzled_commit hit on class=%s cb=%p",
-                 class_getName([self class]), self);
-    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring
-        && smeltr_cb_mark_tracked(self)) {
-        @try {
-            id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
-            id<MTLCommandQueue> q = [cb commandQueue];
-            uint64_t cb_id = (uint64_t)(uintptr_t)cb;
-            uint64_t q_id  = (uint64_t)(uintptr_t)q;
-            uint64_t commit_ts = smeltr_mono_ns();
-            uint32_t new_depth = (uint32_t)(atomic_fetch_add_explicit(
-                &queue_depth_of(q)->value, 1, memory_order_relaxed) + 1);
+/// Record one commit: CB_COMMITTED now, CB_SCHEDULED / CB_COMPLETED /
+/// CB_OPS from Metal's handlers, device-memory samples at both ends, the
+/// queue-depth counter and the `--gputrace` commit count. Shared by the
+/// class `commit` swizzle and the queue-level `commitCommandBuffer:wake:`
+/// swizzle: two copies of this code had drifted, the queue one emitting no
+/// memory samples and never stopping a capture (#264). The caller has
+/// already claimed the CB with smeltr_cb_mark_tracked.
+static void smeltr_track_commit(id cb_obj, id queue_obj) {
+    @try {
+        id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)cb_obj;
+        id<MTLCommandQueue> q = (id<MTLCommandQueue>)queue_obj;
+        uint64_t cb_id = (uint64_t)(uintptr_t)cb;
+        uint64_t q_id  = (uint64_t)(uintptr_t)q;
+        uint64_t commit_ts = smeltr_mono_ns();
+        uint32_t new_depth = q ? (uint32_t)(atomic_fetch_add_explicit(
+            &queue_depth_of(q)->value, 1, memory_order_relaxed) + 1) : 0;
 
-            // Stash commit timestamp on the CB for in_flight_ns at completion.
-            objc_setAssociatedObject(cb, kSmeltrCbCommitTsKey,
-                [SmeltrAtomicU64 withValue:commit_ts],
-                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Stash commit timestamp on the CB for in_flight_ns at completion.
+        objc_setAssociatedObject(cb, kSmeltrCbCommitTsKey,
+            [SmeltrAtomicU64 withValue:commit_ts],
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-            NSString *label = [cb label];
-            const char *label_c = label ? [label UTF8String] : NULL;
-            smeltr_write_cb_committed(g_ring, commit_ts, cb_id, q_id,
-                new_depth, label_c);
-            smeltr_emit_device_mem_sample("cb_committed");
-            smeltr_gputrace_note_commit();
+        NSString *label = [cb respondsToSelector:@selector(label)] ? [cb label] : nil;
+        const char *label_c = label ? [label UTF8String] : NULL;
+        smeltr_write_cb_committed(g_ring, commit_ts, cb_id, q_id,
+            new_depth, label_c);
+        smeltr_emit_device_mem_sample("cb_committed");
+        smeltr_gputrace_note_commit();
 
-            // Register handlers. Capture ids by value into the blocks (they
-            // become __block-stable copies).
-            __block uint64_t captured_cb_id = cb_id;
-            __block uint64_t captured_q_id  = q_id;
+        uint64_t captured_cb_id = cb_id;
+        uint64_t captured_q_id  = q_id;
+        if ([cb respondsToSelector:@selector(addScheduledHandler:)]) {
             [cb addScheduledHandler:^(id<MTLCommandBuffer> sched_cb) {
                 uint64_t sched_ts = smeltr_mono_ns();
                 objc_setAssociatedObject(sched_cb, kSmeltrCbSchedTsKey,
@@ -1129,49 +1177,66 @@ static void smeltr_gputrace_note_commit(void) {
                         captured_cb_id, captured_q_id);
                 }
             }];
+        }
+        if ([cb respondsToSelector:@selector(addCompletedHandler:)]) {
+            // The depth is decremented on the queue it was incremented on.
+            id<MTLCommandQueue> depth_q = q;
             [cb addCompletedHandler:^(id<MTLCommandBuffer> done_cb) {
                 if (!g_ring) return;
-                uint64_t done_ts = smeltr_mono_ns();
-                SmeltrAtomicU64 *box = objc_getAssociatedObject(done_cb, kSmeltrCbCommitTsKey);
-                uint64_t in_flight = 0;
-                if (box) {
-                    uint64_t t0 = atomic_load_explicit(&box->value, memory_order_relaxed);
-                    if (t0 > 0 && done_ts > t0) in_flight = done_ts - t0;
-                }
-                NSError *err = [done_cb error];
-                int32_t err_present = err ? 1 : 0;
-                int64_t err_code = err ? (int64_t)err.code : 0;
-                const char *domain = err ? [err.domain UTF8String] : NULL;
-                uint32_t status = (uint32_t)[done_cb status];
-                smeltr_write_cb_completed(g_ring, done_ts,
-                    captured_cb_id, captured_q_id, status,
-                    err_present, err_code, domain, in_flight);
-                smeltr_emit_cb_ops_pso(done_cb, captured_cb_id,
-                    smeltr_cb_gpu_window(done_cb, [done_cb commandQueue],
-                                         done_ts, in_flight));
-                smeltr_emit_device_mem_sample("cb_completed");
-                id<MTLCommandQueue> q2 = [done_cb commandQueue];
-                if (q2) {
-                    atomic_fetch_sub_explicit(&queue_depth_of(q2)->value, 1,
-                        memory_order_relaxed);
-                }
-                if (g_inflight_q) {
-                    dispatch_async(g_inflight_q, ^{
-                        [g_inflight removeObjectForKey:@(captured_cb_id)];
-                    });
+                @try {
+                    uint64_t done_ts = smeltr_mono_ns();
+                    SmeltrAtomicU64 *box = objc_getAssociatedObject(done_cb, kSmeltrCbCommitTsKey);
+                    uint64_t in_flight = 0;
+                    if (box) {
+                        uint64_t t0 = atomic_load_explicit(&box->value, memory_order_relaxed);
+                        if (t0 > 0 && done_ts > t0) in_flight = done_ts - t0;
+                    }
+                    NSError *err = [done_cb error];
+                    int32_t err_present = err ? 1 : 0;
+                    int64_t err_code = err ? (int64_t)err.code : 0;
+                    const char *domain = err ? [err.domain UTF8String] : NULL;
+                    uint32_t status = (uint32_t)[done_cb status];
+                    smeltr_write_cb_completed(g_ring, done_ts,
+                        captured_cb_id, captured_q_id, status,
+                        err_present, err_code, domain, in_flight);
+                    smeltr_emit_cb_ops_pso(done_cb, captured_cb_id,
+                        smeltr_cb_gpu_window(done_cb, [done_cb commandQueue],
+                                             done_ts, in_flight));
+                    smeltr_emit_device_mem_sample("cb_completed");
+                    if (depth_q) {
+                        atomic_fetch_sub_explicit(&queue_depth_of(depth_q)->value, 1,
+                            memory_order_relaxed);
+                    }
+                    if (g_inflight_q) {
+                        dispatch_async(g_inflight_q, ^{
+                            [g_inflight removeObjectForKey:@(captured_cb_id)];
+                        });
+                    }
+                } @catch (NSException *e) {
+                    smeltr_log("exception in completed handler: %s", e.reason.UTF8String);
                 }
             }];
-            // Track in-flight for warning timer.
-            if (g_inflight_q) {
-                uint64_t cb_id_capture = cb_id;
-                uint64_t ts_capture = commit_ts;
-                dispatch_async(g_inflight_q, ^{
-                    g_inflight[@(cb_id_capture)] = @(ts_capture);
-                });
-            }
-        } @catch (NSException *e) {
-            smeltr_log("exception in commit hook: %s", e.reason.UTF8String);
+        } else {
+            SMELTR_TRACE("cb does not respond to addCompletedHandler: cb=%p", cb);
         }
+        // Track in-flight for warning timer.
+        if (g_inflight_q) {
+            uint64_t ts_capture = commit_ts;
+            dispatch_async(g_inflight_q, ^{
+                g_inflight[@(captured_cb_id)] = @(ts_capture);
+            });
+        }
+    } @catch (NSException *e) {
+        smeltr_log("exception in commit hook: %s", e.reason.UTF8String);
+    }
+}
+
+- (void)smeltr_commit {
+    SMELTR_TRACE("swizzled_commit hit on class=%s cb=%p",
+                 class_getName([self class]), self);
+    if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring
+        && smeltr_cb_mark_tracked(self)) {
+        smeltr_track_commit(self, [(id<MTLCommandBuffer>)self commandQueue]);
     }
     // Tail call: invoke original commit.
     [self smeltr_commit];
@@ -1376,15 +1441,17 @@ static void smeltr_gputrace_note_commit(void) {
 @end
 
 static void smeltr_install_cb_swizzle(id<MTLCommandBuffer> cb) {
-    // Armer ici et pas dans le swizzle de -commandBuffer : MLX obtient ses
-    // command buffers par -commandBufferWithDescriptor:, un chemin distinct.
+    // Arm here and not in the -commandBuffer swizzle: MLX gets its command
+    // buffers through -commandBufferWithDescriptor:, a separate path.
     // This function is the choke point of all three paths, hence the only
     // place where arming is guaranteed to run.
     smeltr_gputrace_maybe_start(cb);
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class cbcls = object_getClass(cb);
-        if (swizzle_instance(cbcls, @selector(commit), @selector(smeltr_commit))) {
+        if (g_test_no_cb_class_commit) {
+            smeltr_log("test override: %s.commit not swizzled", class_getName(cbcls));
+        } else if (swizzle_instance(cbcls, @selector(commit), @selector(smeltr_commit))) {
             smeltr_log("swizzled %s.commit", class_getName(cbcls));
         } else {
             smeltr_log("failed to swizzle %s.commit", class_getName(cbcls));
@@ -1651,30 +1718,34 @@ static void smeltr_swizzle_device_class(void) {
                 }
             }
             smeltr_recalibration_init(d);
-            // Programmatic Metal capture: strictly opt-in, both variables
-            // being set only by `smeltr record --gputrace`.
-            const char *gt_n = getenv("SMELTR_HOOK_GPUTRACE_CBS");
-            const char *gt_p = getenv("SMELTR_HOOK_GPUTRACE_PATH");
-            if (gt_n && gt_p && *gt_p) {
-                long n = strtol(gt_n, NULL, 10);
-                if (n > 0 && n <= 100000) {
-                    g_gputrace_target_cbs = (uint32_t)n;
-                    g_gputrace_path = strdup(gt_p);
-                } else {
-                    smeltr_log("SMELTR_HOOK_GPUTRACE_CBS=%s ignored "
-                               "(out of range 1..100000)", gt_n);
-                }
-            }
-            const char *ml = getenv("SMELTR_HOOK_ML_ENCODER");
-            if (ml && strcmp(ml, "1") == 0) {
-                g_ml_encoder_enabled = YES;
-                smeltr_install_ml_encoder_swizzle();
-            }
         } else {
             smeltr_log("stage_sampling: calibration failed, falling back to 2.5a pro-rata");
         }
     } else {
         smeltr_log("stage_sampling not supported on this device, using 2.5a pro-rata");
+    }
+
+    // Independent of counter sampling (#264): these used to be parsed only
+    // once stage-sampling calibration had succeeded, so a device without it
+    // silently skipped `--gputrace` and the ML encoder.
+    // Programmatic Metal capture: strictly opt-in, both variables being set
+    // only by `smeltr record --gputrace`.
+    const char *gt_n = getenv("SMELTR_HOOK_GPUTRACE_CBS");
+    const char *gt_p = getenv("SMELTR_HOOK_GPUTRACE_PATH");
+    if (gt_n && gt_p && *gt_p) {
+        long n = strtol(gt_n, NULL, 10);
+        if (n > 0 && n <= 100000) {
+            g_gputrace_target_cbs = (uint32_t)n;
+            g_gputrace_path = strdup(gt_p);
+        } else {
+            smeltr_log("SMELTR_HOOK_GPUTRACE_CBS=%s ignored "
+                       "(out of range 1..100000)", gt_n);
+        }
+    }
+    const char *ml = getenv("SMELTR_HOOK_ML_ENCODER");
+    if (ml && strcmp(ml, "1") == 0) {
+        g_ml_encoder_enabled = YES;
+        smeltr_install_ml_encoder_swizzle();
     }
 
     const char *retry_ms = getenv("SMELTR_HOOK_SAMPLING_RETRY_MS");
@@ -1687,6 +1758,8 @@ static void smeltr_swizzle_device_class(void) {
                        retry_ms);
         }
     }
+    const char *no_class_commit = getenv("SMELTR_HOOK_TEST_NO_CB_CLASS_COMMIT");
+    g_test_no_cb_class_commit = no_class_commit && strcmp(no_class_commit, "1") == 0;
     const char *install_delay = getenv("SMELTR_HOOK_TEST_INSTALL_DELAY_US");
     if (install_delay) {
         long v = strtol(install_delay, NULL, 10);
@@ -1790,119 +1863,11 @@ static void smeltr_swz_commitCommandBufferWake(id self, SEL _cmd, id cb, BOOL wa
                  self, cb, (int)wake);
     if (atomic_load_explicit(&g_enabled, memory_order_relaxed) && g_ring && cb
         && smeltr_cb_mark_tracked(cb)) {
-        @try {
-            uint64_t cb_id = (uint64_t)(uintptr_t)cb;
-            uint64_t q_id  = (uint64_t)(uintptr_t)self;
-            uint64_t commit_ts = smeltr_mono_ns();
-            // Same in-flight counter as the CB-class commit path (+1 here,
-            // -1 in the completion handler) — NOT the queue's private
-            // numCommandBuffers, which is cumulative and inflated the
-            // queue-pressure analyzer to five-digit depths (#112).
-            uint32_t depth = (uint32_t)(atomic_fetch_add_explicit(
-                &queue_depth_of(self)->value, 1, memory_order_relaxed) + 1);
-            // Stash commit timestamp on the CB so the completion callback can
-            // compute in_flight_ns even when Apple's startTime is unavailable.
-            objc_setAssociatedObject(cb, kSmeltrCbCommitTsKey,
-                [SmeltrAtomicU64 withValue:commit_ts],
-                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            // Fallback: install encoder swizzles at commit time for CB families
-            // not reached by the commandBuffer / commandBufferWithDescriptor paths
-            // (e.g. MLX 0.31 on macOS 14+). dispatch_once inside is idempotent.
-            smeltr_install_cb_swizzle((id<MTLCommandBuffer>)cb);
-            NSString *label = nil;
-            if ([cb respondsToSelector:@selector(label)]) {
-                label = [(id<MTLCommandBuffer>)cb label];
-            }
-            const char *label_c = label ? [label UTF8String] : NULL;
-            smeltr_write_cb_committed(g_ring, commit_ts, cb_id, q_id,
-                depth, label_c);
-            if (g_inflight_q) {
-                uint64_t cb_id_capture = cb_id;
-                uint64_t ts_capture = commit_ts;
-                dispatch_async(g_inflight_q, ^{
-                    g_inflight[@(cb_id_capture)] = @(ts_capture);
-                });
-            }
-            // Register a completion handler via the public Metal API. We do
-            // this here (rather than swizzling the private
-            // commandBufferDidComplete:startTime:completionTime:error:
-            // selector, whose Apple-internal calling convention disagrees
-            // with the documented (double, double, NSError*) shape and
-            // crashes ARC in objc_retain on the bogus 'error' arg).
-            //
-            // commitCommandBuffer:wake: is invoked just before the CB is
-            // submitted to the GPU, which is exactly the right moment to
-            // attach a completion handler: the CB is still in the
-            // NotEnqueued/Enqueued state, and Metal permits adding
-            // handlers up until commit. This catches CBs created via any
-            // path (commandBufferWithDescriptor:, commandBuffer,
-            // commandBufferWithUnretainedReferences, etc.).
-            SEL addSched = @selector(addScheduledHandler:);
-            if ([cb respondsToSelector:addSched]) {
-                uint64_t sched_cb_id = cb_id;
-                uint64_t sched_q_id = q_id;
-                [(id<MTLCommandBuffer>)cb addScheduledHandler:^(id<MTLCommandBuffer> sched_cb) {
-                    uint64_t sched_ts = smeltr_mono_ns();
-                    objc_setAssociatedObject(sched_cb, kSmeltrCbSchedTsKey,
-                        [SmeltrAtomicU64 withValue:sched_ts],
-                        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    if (g_ring) {
-                        smeltr_write_cb_scheduled(g_ring, sched_ts,
-                            sched_cb_id, sched_q_id);
-                    }
-                }];
-            }
-            SEL addHandler = @selector(addCompletedHandler:);
-            if ([cb respondsToSelector:addHandler]) {
-                uint64_t q_id_capture = q_id;
-                void (^handler)(id<MTLCommandBuffer>) = ^(id<MTLCommandBuffer> done_cb) {
-                    if (!g_ring) return;
-                    @try {
-                        uint64_t done_cb_id = (uint64_t)(uintptr_t)done_cb;
-                        uint64_t done_ts = smeltr_mono_ns();
-                        uint64_t in_flight = 0;
-                        SmeltrAtomicU64 *box = objc_getAssociatedObject(
-                            done_cb, kSmeltrCbCommitTsKey);
-                        if (box) {
-                            uint64_t t0 = atomic_load_explicit(
-                                &box->value, memory_order_relaxed);
-                            if (t0 > 0 && done_ts > t0) in_flight = done_ts - t0;
-                        }
-                        NSError *err = [done_cb error];
-                        int32_t err_present = err ? 1 : 0;
-                        int64_t err_code = err ? (int64_t)err.code : 0;
-                        const char *domain = err ? [err.domain UTF8String] : NULL;
-                        uint32_t status = (uint32_t)[done_cb status];
-                        smeltr_write_cb_completed(g_ring, done_ts,
-                            done_cb_id, q_id_capture, status,
-                            err_present, err_code, domain, in_flight);
-                        smeltr_emit_cb_ops_pso(done_cb, done_cb_id,
-                            smeltr_cb_gpu_window(done_cb, [done_cb commandQueue],
-                                                 done_ts, in_flight));
-                        id<MTLCommandQueue> done_q = [done_cb commandQueue];
-                        if (done_q) {
-                            atomic_fetch_sub_explicit(
-                                &queue_depth_of(done_q)->value, 1,
-                                memory_order_relaxed);
-                        }
-                        if (g_inflight_q) {
-                            uint64_t cb_id_capture = done_cb_id;
-                            dispatch_async(g_inflight_q, ^{
-                                [g_inflight removeObjectForKey:@(cb_id_capture)];
-                            });
-                        }
-                    } @catch (NSException *e) {
-                        smeltr_log("exception in addCompletedHandler: %s",
-                                   e.reason.UTF8String);
-                    }
-                };
-                [(id<MTLCommandBuffer>)cb addCompletedHandler:handler];
-            } else {
-                SMELTR_TRACE("cb does not respond to addCompletedHandler: cb=%p", cb);
-            }
-        } @catch (NSException *e) {
-            smeltr_log("exception in commit (parent) hook: %s", e.reason.UTF8String);
-        }
+        // Fallback: install encoder swizzles at commit time for CB families
+        // not reached by the commandBuffer / commandBufferWithDescriptor paths
+        // (e.g. MLX 0.31 on macOS 14+). dispatch_once inside is idempotent.
+        smeltr_install_cb_swizzle((id<MTLCommandBuffer>)cb);
+        smeltr_track_commit(cb, self);
     }
     orig_commitCommandBufferWake(self, _cmd, cb, wake);
 }
@@ -2092,5 +2057,10 @@ static void smeltr_hook_init(void) {
 
 __attribute__((destructor))
 static void smeltr_hook_fini(void) {
-    if (g_ring) { smeltr_ring_close(g_ring); g_ring = NULL; }
+    // Stop recording but leave the ring mapped: Metal completion handlers
+    // and the warning/recalibration timers can still run during exit, and
+    // they load g_ring then write through it — unmapping here raced with
+    // them (#264). The process is exiting; the kernel reclaims the mapping
+    // and releases the ring's flock.
+    atomic_store_explicit(&g_enabled, false, memory_order_release);
 }

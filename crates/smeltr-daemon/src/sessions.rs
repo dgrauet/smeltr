@@ -101,7 +101,10 @@ impl ActiveSession {
         meta.kind = smeltr_core::session::SessionKind::Scoped { pid, argv };
         meta.scope_token = scope_token.clone();
         meta.gputrace_path = gputrace_path;
-        if let Some(n) = name {
+        if let Some(n) = name
+            .as_deref()
+            .and_then(smeltr_core::session::validate_session_name)
+        {
             meta.name = Some(n);
         }
         let writer = SessionWriter::create_with_format(meta, chunked)?;
@@ -462,6 +465,39 @@ mod tests {
         let dirs = smeltr_core::reader::list_sessions().unwrap();
         let meta = smeltr_core::reader::read_metadata(&dirs[0]).unwrap();
         assert_eq!(meta.name.as_deref(), Some("my-run"));
+    }
+
+    /// #267: `record --name` bypassed the validation SMELTR_SESSION_NAME
+    /// gets (cap 200, no control characters, no '/'): 5000-character names
+    /// and raw terminal escapes were stored and printed by `sessions ls`.
+    #[test]
+    #[serial]
+    fn open_scoped_validates_the_explicit_name() {
+        let open = |name: &str| {
+            let _h = temp_home();
+            std::env::remove_var("SMELTR_SESSION_NAME");
+            let s = ActiveSession::open_scoped(
+                ScopedOpts {
+                    pid: 4242,
+                    argv: vec!["python".into()],
+                    scope_token: None,
+                    name: Some(name.into()),
+                    chunked: false,
+                    gputrace_path: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            s.finalize(Some(0), None, "test").unwrap();
+            let dirs = smeltr_core::reader::list_sessions().unwrap();
+            smeltr_core::reader::read_metadata(&dirs[0]).unwrap().name
+        };
+        assert_eq!(open("ctl\u{1b}[31mRED\u{7}"), None);
+        assert_eq!(open("a/b"), None);
+        assert_eq!(open("   "), None);
+        assert_eq!(open("x".repeat(5000).as_str()).map(|n| n.len()), Some(200));
+        assert_eq!(open("  ok-run ").as_deref(), Some("ok-run"));
     }
 
     #[test]

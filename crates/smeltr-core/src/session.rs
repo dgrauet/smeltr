@@ -80,35 +80,53 @@ pub struct SessionMetadata {
     /// Path of the captured `.gputrace`, when `--gputrace` asked for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gputrace_path: Option<String>,
+    /// What triggered a post-mortem session (#267); `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_mortem: Option<PostMortemTrigger>,
+}
+
+/// The event a post-mortem session was flushed for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostMortemTrigger {
+    /// Trigger class: `crash-report`, `mach-exception`, `metal-error`,
+    /// `daemon-panic`.
+    pub reason: String,
+    /// The crash report that triggered it, for `crash-report`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crash_report: Option<String>,
+    /// The process concerned, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 const SESSION_NAME_MAX_LEN: usize = 200;
 
-/// Validate and normalize a session name candidate.
+/// Validate and normalize a session name candidate, from
+/// SMELTR_SESSION_NAME or `record --name` (#267: the flag bypassed this).
 ///
 /// - Trims surrounding whitespace.
 /// - Drops if empty after trim.
 /// - Drops (with `warn`) if it contains NUL, other control chars, or `/`.
 /// - Truncates to 200 bytes, on a character boundary (with `warn`).
-fn validate_session_name(raw: &str) -> Option<String> {
+pub fn validate_session_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
     if trimmed.chars().any(|c| c == '\0') {
-        tracing::warn!("SMELTR_SESSION_NAME contains NUL — ignoring");
+        tracing::warn!("session name contains NUL — ignoring");
         return None;
     }
     if trimmed.chars().any(|c| c.is_control()) {
-        tracing::warn!("SMELTR_SESSION_NAME contains control characters — ignoring");
+        tracing::warn!("session name contains control characters — ignoring");
         return None;
     }
     if trimmed.contains('/') {
-        tracing::warn!("SMELTR_SESSION_NAME contains '/' — ignoring");
+        tracing::warn!("session name contains '/' — ignoring");
         return None;
     }
     if trimmed.len() > SESSION_NAME_MAX_LEN {
-        tracing::warn!("SMELTR_SESSION_NAME longer than {SESSION_NAME_MAX_LEN} bytes — truncating");
+        tracing::warn!("session name longer than {SESSION_NAME_MAX_LEN} bytes — truncating");
         let mut end = SESSION_NAME_MAX_LEN;
         while !trimmed.is_char_boundary(end) {
             end -= 1;
@@ -137,6 +155,7 @@ impl SessionMetadata {
             end_reason: None,
             term_signal: None,
             gputrace_path: None,
+            post_mortem: None,
         }
     }
 }
@@ -155,7 +174,8 @@ fn hostname_or_unknown() -> String {
 /// Without HOME (a stripped environment) it falls back to the temp dir
 /// rather than panicking.
 pub fn smeltr_home() -> PathBuf {
-    if let Some(p) = std::env::var_os("SMELTR_HOME") {
+    // Empty counts as unset, as for the socket path (#245, #272).
+    if let Some(p) = std::env::var_os("SMELTR_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
     }
     std::env::var_os("HOME")
@@ -465,5 +485,21 @@ argv = []
             std::env::set_var("SMELTR_HOME", v);
         }
         assert!(fallback.ends_with(".smeltr"), "{fallback:?}");
+    }
+
+    /// #272: an empty SMELTR_HOME was taken as the path "", so sessions
+    /// landed in `./sessions` of whatever directory the process ran in,
+    /// while `socket_path` already treated empty values as unset (#245).
+    #[test]
+    #[serial_test::serial]
+    fn an_empty_smeltr_home_is_unset() {
+        let saved = std::env::var_os("SMELTR_HOME");
+        std::env::set_var("SMELTR_HOME", "");
+        let got = smeltr_home();
+        match saved {
+            Some(v) => std::env::set_var("SMELTR_HOME", v),
+            None => std::env::remove_var("SMELTR_HOME"),
+        }
+        assert!(got.ends_with(".smeltr"), "got {got:?}");
     }
 }

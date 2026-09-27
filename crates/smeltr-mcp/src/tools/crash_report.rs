@@ -42,8 +42,31 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
 ///   event; the newest one is the report that triggered the flush;
 /// - a recorded run that crashed ended before ReportCrash wrote its report,
 ///   so it is joined from DiagnosticReports exactly as `analyze` does.
+///
+/// A post-mortem records its trigger (#267): its snapshot holds every crash
+/// on the machine in the last 60 s, so the newest one was any app's.
 fn report_path(dir: &std::path::Path) -> Option<String> {
+    let trigger = smeltr_core::reader::read_metadata(dir)
+        .ok()
+        .and_then(|m| m.post_mortem);
+    if let Some(t) = &trigger {
+        if let Some(path) = &t.crash_report {
+            return Some(path.clone());
+        }
+    }
     let events = smeltr_core::reader::read_events(dir).unwrap_or_default();
+    if let Some(t) = trigger {
+        // Only a crash of the process the post-mortem is about.
+        let pid = t.pid?;
+        return events.iter().rev().find_map(|e| match &e.payload {
+            Payload::CrashReportEmitted {
+                path,
+                crashed_pid: Some(p),
+                ..
+            } if *p == pid => Some(path.clone()),
+            _ => None,
+        });
+    }
     let emitted = events.iter().rev().find_map(|e| match &e.payload {
         Payload::CrashReportEmitted { path, .. } => Some(path.clone()),
         _ => None,
@@ -125,6 +148,68 @@ mod tests {
             Some(trigger.to_str().unwrap())
         );
         assert_eq!(resp.size_bytes, Some(14));
+    }
+
+    /// #267: the snapshot holds every crash on the machine in the last 60 s,
+    /// so "newest" was any app's. A post-mortem now records its trigger.
+    #[test]
+    #[serial_test::serial]
+    fn a_post_mortem_returns_its_trigger_not_the_newest_crash() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        let trigger = reports.path().join("trigger.ips");
+        let later = reports.path().join("unrelated.ips");
+        std::fs::write(&trigger, "trigger report").unwrap();
+        std::fs::write(&later, "unrelated report").unwrap();
+
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.post_mortem = Some(smeltr_core::session::PostMortemTrigger {
+            reason: "crash-report".into(),
+            crash_report: Some(trigger.display().to_string()),
+            pid: Some(1),
+        });
+        let mut w = SessionWriter::create(meta).unwrap();
+        w.write_event(&crash_event(&trigger, 1)).unwrap();
+        w.write_event(&crash_event(&later, 2)).unwrap();
+        w.finalize(None, "post-mortem".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+        })
+        .unwrap();
+        assert_eq!(resp.text.as_deref(), Some("trigger report"));
+    }
+
+    /// A post-mortem for a Metal error has no crash report of its own; an
+    /// unrelated crash in its snapshot is not one.
+    #[test]
+    #[serial_test::serial]
+    fn a_metal_error_post_mortem_has_no_crash_report() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let reports = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_DIAGNOSTIC_REPORTS_DIR", reports.path());
+        let unrelated = reports.path().join("unrelated.ips");
+        std::fs::write(&unrelated, "unrelated report").unwrap();
+
+        let id = SessionId::new();
+        let mut meta = SessionMetadata::now_starting(id);
+        meta.post_mortem = Some(smeltr_core::session::PostMortemTrigger {
+            reason: "metal-error".into(),
+            crash_report: None,
+            pid: None,
+        });
+        let mut w = SessionWriter::create(meta).unwrap();
+        w.write_event(&crash_event(&unrelated, 1)).unwrap();
+        w.finalize(None, "post-mortem".into()).unwrap();
+
+        let resp = run(Params {
+            session: id.short(),
+        });
+        std::env::remove_var("SMELTR_DIAGNOSTIC_REPORTS_DIR");
+        assert!(resp.unwrap().crash_report_path.is_none());
     }
 
     /// A recorded run that crashed: ReportCrash writes the `.ips` after the

@@ -138,6 +138,12 @@ CBOR length-prefixed frames over a Unix socket. See
 - `SMELTR_HOOK_TEST_INSTALL_DELAY_US=<n>` — test override: sleep between the hook's
   "dealloc swizzle already installed?" check and the install, making the install race
   deterministic (#264; `smeltr-metal-harness/tests/dealloc_install_race.rs`).
+- `SMELTR_HOOK_TEST_NO_CB_CLASS_COMMIT=1` — test override: the hook leaves the
+  command-buffer class's `commit` alone, so every commit goes through the queue-level
+  `commitCommandBuffer:wake:` swizzle (normally only buffers of other classes). Both
+  paths share `smeltr_track_commit`; the test checks they record the same frames (#264).
+- `SMELTR_HOOK_TEST_NO_STAGE_SAMPLING=1` — test override: behave like a device without
+  stage-boundary counter sampling (paravirtualized GPUs, older families).
 - `SMELTR_HOOK_SAMPLING_RETRY_MS=<n>` — backoff before retrying stage/dispatch
   counter sampling after it auto-disabled on sustained sample-buffer alloc
   failures (default 30000; the disable used to be permanent — #113).
@@ -194,7 +200,9 @@ CBOR length-prefixed frames over a Unix socket. See
   decodes only the chunks overlapping the requested `(source, time)` filter via
   `read_events_filtered`. Default remains the legacy mono-stream format; the
   reader auto-detects both. See `crates/smeltr-core/src/chunked.rs`.
-- `SMELTR_SESSION_NAME` — user-facing session name (validated: cap 200, no NUL/control/`/`);
+- `SMELTR_SESSION_NAME` — user-facing session name (validated: cap 200, no NUL/control/`/`;
+  `record --name` goes through the same `validate_session_name`, refused up front by the CLI
+  and dropped by the daemon — #267);
   surfaced by `list_sessions` and accepted as an alias by every CLI/MCP session arg via
   `smeltr_mcp::types::resolve_session`.
 - `SMELTR_SCOPE_MEM_SAMPLE` — on by default. Every `smeltr.scope("...")` enter and exit

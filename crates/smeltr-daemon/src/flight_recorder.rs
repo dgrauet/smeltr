@@ -7,8 +7,13 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Instant;
 
+/// Upper bound on buffered events, whatever the window (#267): a burst
+/// inside 60 s grew the daemon to a 191 MB footprint.
+pub const MAX_EVENTS: usize = 100_000;
+
 pub struct FlightRecorder {
     window: std::time::Duration,
+    max_events: usize,
     /// Events with the instant they were pushed. Eviction goes by that
     /// arrival time, not `ts_mono_ns`: each session stamps events from its
     /// own clock (the ambient one days old, a recording's near 0), so the
@@ -18,13 +23,19 @@ pub struct FlightRecorder {
 
 impl FlightRecorder {
     pub fn new(window: std::time::Duration) -> Self {
+        Self::with_max_events(window, MAX_EVENTS)
+    }
+
+    pub fn with_max_events(window: std::time::Duration, max_events: usize) -> Self {
         Self {
             window,
+            max_events,
             inner: Mutex::new(VecDeque::with_capacity(8192)),
         }
     }
 
-    /// Push an event. Evicts events that arrived more than `window` ago.
+    /// Push an event. Evicts events that arrived more than `window` ago, and
+    /// the oldest beyond `max_events`.
     pub fn push(&self, ev: Event) {
         self.push_at(ev, Instant::now());
     }
@@ -33,6 +44,9 @@ impl FlightRecorder {
     pub fn push_at(&self, ev: Event, now: Instant) {
         let mut q = self.inner.lock().unwrap();
         q.push_back((now, ev));
+        while q.len() > self.max_events {
+            q.pop_front();
+        }
         while let Some((arrived, _)) = q.front() {
             if now.saturating_duration_since(*arrived) > self.window {
                 q.pop_front();
@@ -83,6 +97,20 @@ mod tests {
                 fields: Default::default(),
             },
         }
+    }
+
+    /// #267: bounded by time only, a burst (100k × 1 KB events inside the
+    /// window) peaked the daemon at a 191 MB footprint. The newest events
+    /// are the ones a post-mortem needs.
+    #[test]
+    fn keeps_at_most_max_events_newest_first() {
+        let fr = FlightRecorder::with_max_events(std::time::Duration::from_secs(60), 10);
+        let t0 = Instant::now();
+        for i in 0..25 {
+            fr.push_at(ev(i), t0);
+        }
+        let kept: Vec<u64> = fr.snapshot().iter().map(|e| e.seq).collect();
+        assert_eq!(kept, (15..25).collect::<Vec<_>>());
     }
 
     #[test]
