@@ -311,8 +311,10 @@ Equivalent paths:
 
 - **CLI:** `smeltr export <session-ref> [--format chrome-trace|json] [--output PATH]`
   (default format chrome-trace, default output `<short_id>.json`, use `-` for stdout).
-- **MCP:** `export_session(session, format, output_path)` writes the
-  file and returns its path.
+- **MCP:** `export_session(session, format, output_path, overwrite)` writes the
+  file and returns its path. `output_path` must be absolute, its directory
+  must exist, and it may not lie inside `$SMELTR_HOME/sessions`; an existing
+  file is an error unless `overwrite: true`.
 - **Python:** `smeltr.export(filepath, format="chrome-trace", session=None)`.
   With no `session`, exports this process's recording when it runs under
   `smeltr record` (the daemon matches its `SMELTR_SCOPE_TOKEN`), else the

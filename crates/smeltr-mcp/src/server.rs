@@ -288,7 +288,7 @@ fn tool_list() -> Vec<Tool> {
         ),
         tool::<crate::tools::export_session::Params>(
             "export_session",
-            "Export a recorded session to chrome-trace JSON (openable in chrome://tracing / Perfetto / Speedscope) or raw JSON. Writes to disk and returns the file path.",
+            "Export a recorded session to chrome-trace JSON (openable in chrome://tracing / Perfetto / Speedscope) or raw JSON. Writes to disk and returns the file path. `output_path` must be absolute, in an existing directory outside the smeltr sessions store; an existing file is replaced only with `overwrite: true`.",
         ),
         tool::<crate::tools::model_loads::Params>(
             "get_model_loads",
