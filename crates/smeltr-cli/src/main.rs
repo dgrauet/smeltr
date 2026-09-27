@@ -121,8 +121,12 @@ enum Cmd {
         #[arg(long, default_value = "chrome-trace")]
         format: String,
         /// Output path. Use `-` for stdout. Default: `<short_id>.json`.
+        /// Never inside the sessions store.
         #[arg(long, short = 'o')]
         output: Option<String>,
+        /// Replace the output file if it already exists.
+        #[arg(long)]
+        force: bool,
     },
     /// Per-scope MTLDevice memory peak/avg/end and per-scope live-heap peak.
     Memory {
@@ -278,7 +282,8 @@ fn main() -> anyhow::Result<()> {
                 last,
                 format,
                 output,
-            } => commands::export::run(session.as_deref(), last, &format, output.as_deref()),
+                force,
+            } => commands::export::run(session.as_deref(), last, &format, output.as_deref(), force),
             Cmd::Memory {
                 session,
                 last,

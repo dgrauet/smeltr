@@ -202,6 +202,54 @@ pub fn smeltr_home() -> PathBuf {
         .join(".smeltr")
 }
 
+/// Where an export may write `path`: never inside the sessions store (a
+/// symlink at the target is resolved first), only into an existing
+/// directory, and over an existing file only when `overwrite` is set.
+/// Exporting onto a session's own event file used to succeed and destroyed
+/// a real session (#271 for the MCP tool, #287 for the CLI). Returns the
+/// resolved target, or why it is refused.
+pub fn checked_export_target(path: &Path, overwrite: bool) -> Result<PathBuf, String> {
+    let Some(file_name) = path.file_name() else {
+        return Err(format!("output path {} must name a file", path.display()));
+    };
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let parent = parent.canonicalize().map_err(|_| {
+        format!(
+            "output directory {} does not exist; create it first",
+            parent.display()
+        )
+    })?;
+    // Writing follows a symlink at the target.
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(_) => path.canonicalize().map_err(|_| {
+            format!(
+                "output path {} is a symlink whose target cannot be resolved",
+                path.display()
+            )
+        })?,
+        Err(_) => parent.join(file_name),
+    };
+    let store = sessions_root();
+    let store = store.canonicalize().unwrap_or(store);
+    if target.starts_with(&store) {
+        return Err(format!(
+            "output path {} is inside the smeltr sessions store {}; write the export somewhere else",
+            path.display(),
+            store.display()
+        ));
+    }
+    if target.exists() && !overwrite {
+        return Err(format!(
+            "output path {} already exists; allow replacing it explicitly",
+            path.display()
+        ));
+    }
+    Ok(target)
+}
+
 /// Returns `smeltr_home()/sessions`.
 pub fn sessions_root() -> PathBuf {
     smeltr_home().join("sessions")
