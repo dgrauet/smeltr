@@ -51,8 +51,9 @@ def test_panic_on_queues_systemexit_when_predicate_true(fake_daemon):
             _drain_panic_for_tests()
         assert ei.value.code == 99
 
-        triggered = [m for m in fake_daemon.received if m["payload"]["kind"] == "MlxPanicTriggered"]
-        assert len(triggered) >= 1
+        assert fake_daemon.wait_for(
+            lambda ms: any(m["payload"]["kind"] == "MlxPanicTriggered" for m in ms)
+        )
     finally:
         smeltr.detach()
 

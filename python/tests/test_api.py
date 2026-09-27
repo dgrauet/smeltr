@@ -9,7 +9,8 @@ from smeltr._client import ClientError
 def test_attach_sends_hello_payload(fake_daemon):
     smeltr.attach(poll_hz=0)
     try:
-        assert fake_daemon.received, "no events received"
+        # Sent by the background sender: delivery trails attach().
+        assert fake_daemon.wait_for(lambda ms: len(ms) > 0), "no events received"
         first = fake_daemon.received[0]
         p = first["payload"]
         assert p["kind"] == "PythonSidecarHello"
