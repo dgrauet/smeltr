@@ -5,21 +5,10 @@ use anyhow::Result;
 use smeltr_core::reader::read_events;
 
 pub fn run(arg_last: bool, session_id: Option<String>, include_ambient: bool) -> Result<()> {
-    let dir = pick(arg_last, session_id, include_ambient)?;
+    let dir = crate::session_resolver::resolve(session_id, arg_last, include_ambient)?;
     let report = build_report(&dir)?;
     println!("{}", report.render());
     Ok(())
-}
-
-/// The session to analyze. No argument means `--last` (#269: only the
-/// flag preferred the newest post-mortem, so the two disagreed).
-fn pick(
-    arg_last: bool,
-    session_id: Option<String>,
-    include_ambient: bool,
-) -> Result<std::path::PathBuf> {
-    let last = arg_last || session_id.is_none();
-    crate::session_resolver::resolve(session_id, last, include_ambient)
 }
 
 fn build_report(dir: &std::path::Path) -> Result<smeltr_analyzer::report::Report> {
@@ -34,41 +23,6 @@ mod tests {
     use smeltr_core::event::{Event, Payload, Source};
     use smeltr_core::session::{SessionId, SessionMetadata};
     use smeltr_core::writer::SessionWriter;
-
-    /// #269: `smeltr analyze` with no argument is documented as "same as
-    /// --last", but only `--last` preferred the post-mortem, so the two
-    /// picked different sessions.
-    #[test]
-    #[serial]
-    fn no_argument_picks_what_last_picks() {
-        use smeltr_core::session::SessionKind;
-        let home = tempfile::tempdir().unwrap();
-        std::env::set_var("SMELTR_HOME", home.path());
-        let mut scoped = SessionMetadata::now_starting(SessionId::new());
-        scoped.kind = SessionKind::Scoped {
-            pid: 1,
-            argv: vec!["python".into()],
-        };
-        scoped.started_rfc3339 = "2026-09-01T00:00:00Z".into();
-        SessionWriter::create(scoped)
-            .unwrap()
-            .finalize(Some(0), "2026-09-01T00:01:00Z".into())
-            .unwrap();
-        // A post-mortem written after the recording.
-        let pm = home
-            .path()
-            .join("sessions/post-mortem-crash-report-2026-09-02-000000-abcd1234");
-        std::fs::create_dir_all(&pm).unwrap();
-        let mut meta = SessionMetadata::now_starting(SessionId::new());
-        meta.started_rfc3339 = "2026-09-02T00:00:00Z".into();
-        smeltr_core::session::write_metadata(&pm, &meta).unwrap();
-        std::fs::write(pm.join("events.cbor.zst"), b"").unwrap();
-
-        let last = super::pick(true, None, false).unwrap();
-        let bare = super::pick(false, None, false).unwrap();
-        std::env::remove_var("SMELTR_HOME");
-        assert_eq!(bare, last);
-    }
 
     #[test]
     #[serial]

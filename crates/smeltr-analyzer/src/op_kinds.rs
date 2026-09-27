@@ -26,11 +26,15 @@ const TABLE: &[(&str, &str)] = &[
     ("block_softmax", "Softmax"),
     ("softmax", "Softmax"),
     ("rms_norm", "RMSNorm"),
+    // MLX 0.31 names the fused kernel `rms<dtype>` (#265).
+    ("rms", "RMSNorm"),
     ("layer_norm", "LayerNorm"),
     ("gelu", "GeLU"),
     ("silu", "SiLU"),
     ("rope", "RoPE"),
     ("implicit_gemm_conv", "Conv"),
+    ("depthwise_conv", "Conv"),
+    ("naive_unfold", "Unfold"),
     ("winograd_conv", "Conv"),
     ("conv2d", "Conv2d"),
     ("conv", "Conv"),
@@ -47,6 +51,7 @@ const TABLE: &[(&str, &str)] = &[
     ("rbits", "Random"),
     ("copy", "Copy"),
     ("affine_quantize", "Quantize"),
+    ("affine_dequantize", "Dequantize"),
     ("quantize", "Quantize"),
     ("dequantize", "Dequantize"),
 ];
@@ -76,7 +81,14 @@ pub fn resolve_kind(symbol: &str) -> Option<&'static str> {
     }
     // mx.compile fused kernels: mangled op chain + graph digest + a
     // `_contiguous` / `_strided` layout suffix.
-    if symbol.ends_with("_contiguous") || symbol.ends_with("_strided") {
+    // The strided variant can carry a dimension count (`_strided_2`, #265).
+    let layout = symbol.trim_end_matches(|c: char| c.is_ascii_digit());
+    let layout = if layout.len() < symbol.len() {
+        layout.strip_suffix('_').unwrap_or(symbol)
+    } else {
+        symbol
+    };
+    if layout.ends_with("_contiguous") || layout.ends_with("_strided") {
         return Some("FusedElementwise");
     }
     None
@@ -93,6 +105,29 @@ fn is_layout_prefix(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #265: real MLX 0.31 kernels the table missed on audited sessions
+    /// (`rmsfloat32` alone was 58 s of a Hunyuan3D run) — they showed as
+    /// raw symbols in every kind table.
+    #[test]
+    fn kernels_missed_on_real_sessions_resolve() {
+        assert_eq!(resolve_kind("rmsfloat32"), Some("RMSNorm"));
+        assert_eq!(resolve_kind("rmsbfloat16"), Some("RMSNorm"));
+        assert_eq!(
+            resolve_kind("affine_dequantize_bfloat16_gs_64_b_4"),
+            Some("Dequantize")
+        );
+        assert_eq!(resolve_kind("depthwise_conv_1d_bfloat16"), Some("Conv"));
+        assert_eq!(resolve_kind("naive_unfold_nd_float32_2"), Some("Unfold"));
+        assert_eq!(
+            resolve_kind("MultiplyAddf4e7b1a2c_strided_2"),
+            Some("FusedElementwise")
+        );
+        assert_eq!(
+            resolve_kind("MultiplyAddf4e7b1a2c_strided_3"),
+            Some("FusedElementwise")
+        );
+    }
 
     #[test]
     fn gemm_maps_to_matmul() {
