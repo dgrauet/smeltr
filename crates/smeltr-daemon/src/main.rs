@@ -68,6 +68,11 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!(error = %e, "session recovery failed"),
     }
 
+    let rings = smeltr_daemon::recovery::reap_orphan_rings();
+    if rings > 0 {
+        tracing::info!(count = rings, "removed rings left by dead recordings");
+    }
+
     let flight_recorder = Arc::new(smeltr_daemon::flight_recorder::FlightRecorder::new(
         std::time::Duration::from_secs(60),
     ));

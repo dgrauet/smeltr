@@ -94,6 +94,39 @@ fn check_name_flag(flag: Option<&str>) -> anyhow::Result<()> {
     }
 }
 
+/// Carries the hook dylib to the gate, which moves it to
+/// DYLD_INSERT_LIBRARIES for its exec.
+const GATE_DYLD_VAR: &str = "SMELTR_GATE_DYLD_INSERT_LIBRARIES";
+
+/// `smeltr __exec-gate -- <cmd> <args>`: wait for `record`'s go byte on
+/// stdin, then exec the command in place. EOF instead (the daemon refused
+/// the session) exits 126 without running anything.
+pub fn exec_gate(cmd: &str, args: &[String]) -> ! {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    let mut go = [0u8; 1];
+    if !matches!(std::io::stdin().read(&mut go), Ok(1)) {
+        std::process::exit(126);
+    }
+    let mut command = std::process::Command::new(cmd);
+    command.args(args).stdin(Stdio::null());
+    if let Some(dylib) = std::env::var_os(GATE_DYLD_VAR) {
+        command
+            .env("DYLD_INSERT_LIBRARIES", dylib)
+            .env_remove(GATE_DYLD_VAR);
+    }
+    let err = command.exec();
+    eprintln!("smeltr: cannot run `{cmd}`: {err}");
+    std::process::exit(127);
+}
+
+fn relay_signal(pid: u32, sig: i32) {
+    // SAFETY: kill(2) on the child's pid; failure (already exited) is fine.
+    unsafe {
+        libc::kill(pid as i32, sig);
+    }
+}
+
 /// Resolve the effective session name: --name flag takes precedence
 /// over SMELTR_SESSION_NAME env. Returns None when neither is set.
 fn resolve_session_name(flag: Option<&str>) -> Option<String> {
@@ -181,15 +214,26 @@ pub async fn run(
         }
     }
 
-    let mut builder = std::process::Command::new(cmd);
+    // The command starts only once the daemon has accepted the session
+    // (#269): it used to be spawned first, so a refused session (read-only
+    // store) killed a command already running, and its first events reached
+    // the daemon before the session existed. `__exec-gate` waits for one
+    // byte on its stdin, then execs the command in place — same pid, which
+    // is the pid attached below.
+    let mut builder = std::process::Command::new(std::env::current_exe()?);
     builder
+        .arg("__exec-gate")
+        .arg("--")
+        .arg(cmd)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
     if let Some((dylib, ring_path)) = &hook_decision {
-        builder.env("DYLD_INSERT_LIBRARIES", dylib);
+        // Applied by the gate right before its exec, so the hook loads
+        // into the command and not into the gate.
+        builder.env(GATE_DYLD_VAR, dylib);
         builder.env("SMELTR_RING_PATH", ring_path);
         if let (Some(path), Some(n)) = (&gputrace_target, gputrace) {
             // MTL_CAPTURE_ENABLED must be present at process STARTUP: Metal
@@ -221,6 +265,7 @@ pub async fn run(
 
     let mut child = builder.spawn()?;
     let pid = child.id();
+    let gate = child.stdin.take();
 
     // Attach scoped probes.
     let argv: Vec<String> = std::iter::once(cmd.to_string())
@@ -246,7 +291,7 @@ pub async fn run(
         })
         .await?;
     if !matches!(resp, DaemonToClient::Ack) {
-        let _ = child.kill();
+        drop(gate); // EOF: the gate exits without running the command
         let _ = child.wait();
         if let Some((_, ring_path)) = &hook_decision {
             smeltr_metal_ring::remove_ring_family(ring_path);
@@ -275,7 +320,7 @@ pub async fn run(
             })
             .await?;
         if !matches!(resp, DaemonToClient::Ack) {
-            let _ = child.kill();
+            drop(gate);
             let _ = child.wait();
             let _ = client
                 .request(ClientToDaemon::DetachScopedProbes {
@@ -289,8 +334,35 @@ pub async fn run(
         }
     }
 
-    // Wait for the child synchronously off the runtime worker.
-    let status = tokio::task::spawn_blocking(move || child.wait()).await??;
+    // Everything is attached: let the command start.
+    if let Some(mut gate) = gate {
+        use std::io::Write;
+        gate.write_all(b"g")?;
+    }
+
+    // Wait for the child synchronously off the runtime worker, staying
+    // alive through the signals that stop a run (#269): without handlers,
+    // Ctrl-C killed this client first and the daemon finalized the session
+    // with no exit status while the child's cleanup went to the ambient
+    // session. SIGINT is not relayed — the terminal already sent it to the
+    // whole foreground group, child included, and a second one would cut a
+    // Python KeyboardInterrupt cleanup short. SIGTERM/SIGHUP usually target
+    // this process alone and are relayed.
+    let status = {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigint = signal(SignalKind::interrupt())?;
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sighup = signal(SignalKind::hangup())?;
+        let mut wait = tokio::task::spawn_blocking(move || child.wait());
+        loop {
+            tokio::select! {
+                r = &mut wait => break r??,
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => relay_signal(pid, libc::SIGTERM),
+                _ = sighup.recv() => relay_signal(pid, libc::SIGHUP),
+            }
+        }
+    };
     let exit_code = status.code().unwrap_or(-1);
     // `exit_code` collapses every signal death to -1, which cannot tell a
     // jetsam SIGKILL from a Ctrl-C SIGINT. Keep the raw number so diagnostics
@@ -303,24 +375,41 @@ pub async fn run(
     // Let the probe drain remaining frames from the ring.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
+    // A detach the daemon did not acknowledge means it went away during the
+    // run (#269: this used to be silent). Its sessions were finalized at
+    // shutdown; whatever came after is not in the recording.
+    let mut acknowledged = true;
     if hook_decision.is_some() {
-        let _ = client
-            .request(ClientToDaemon::DetachMetalHook { pid })
-            .await;
+        acknowledged &= matches!(
+            client
+                .request(ClientToDaemon::DetachMetalHook { pid })
+                .await,
+            Ok(DaemonToClient::Ack)
+        );
     }
-    let _ = client
-        .request(ClientToDaemon::DetachScopedProbes {
-            pid,
-            exit_code: Some(exit_code),
-            term_signal,
-        })
-        .await;
+    acknowledged &= matches!(
+        client
+            .request(ClientToDaemon::DetachScopedProbes {
+                pid,
+                exit_code: Some(exit_code),
+                term_signal,
+            })
+            .await,
+        Ok(DaemonToClient::Ack)
+    );
+    if !acknowledged {
+        eprintln!(
+            "smeltr: lost the daemon during the run; the recording is incomplete \
+             (it stops where the daemon went away)"
+        );
+    }
 
     if let Some((_, ring_path)) = hook_decision {
         smeltr_metal_ring::remove_ring_family(&ring_path);
     }
 
-    Ok(exit_code)
+    // A signal death exits 128 + signal, like a shell (not 255 from -1).
+    Ok(term_signal.map_or(exit_code, |sig| 128 + sig))
 }
 
 #[cfg(test)]

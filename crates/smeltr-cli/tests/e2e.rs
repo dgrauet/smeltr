@@ -303,6 +303,92 @@ fn record_through_a_launcher_captures_the_childs_command_buffers() {
     assert!(rings.is_empty(), "rings left behind: {rings:?}");
 }
 
+/// #269: a SIGKILLed `record` client cannot detach or remove its rings.
+/// The daemon auto-detached at once — the hook's ring stopped being drained
+/// while the child kept committing — and nothing removed the rings.
+#[test]
+#[cfg_attr(not(target_os = "macos"), ignore)]
+fn a_killed_record_client_still_records_the_child_and_removes_its_rings() {
+    let Some((dylib_abs, harness)) = hook_fixture() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_path_buf();
+    let sock = tmp.path().join("smeltr.sock");
+    let mut daemon = DaemonGuard::spawn(&home, &sock);
+
+    let mut record = std::process::Command::new(env!("CARGO_BIN_EXE_smeltr"))
+        .env("SMELTR_HOME", &home)
+        .env("SMELTR_SOCKET", &sock)
+        .env("SMELTR_DYLIB", &dylib_abs)
+        .env("SMELTR_HARNESS_ENCODERS", "20")
+        .env("SMELTR_HARNESS_SLEEP_MS", "100")
+        .args(["record", harness.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    // Kill only once the session exists: before that, the command has not
+    // started (record's exec gate) and there is nothing to keep recording.
+    let sessions = home.join("sessions");
+    let started = std::time::Instant::now();
+    while !std::fs::read_dir(&sessions).is_ok_and(|d| {
+        d.filter_map(|e| e.ok()).any(|e| {
+            smeltr_core::reader::read_metadata(&e.path())
+                .is_ok_and(|m| matches!(m.kind, smeltr_core::session::SessionKind::Scoped { .. }))
+        })
+    }) {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "no scoped session"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    record.kill().unwrap();
+    record.wait().unwrap();
+    // The daemon removes the rings once the child has exited; a slow CI
+    // machine takes longer than a fixed delay to get there.
+    let rings_dir = home.join("rings");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::fs::read_dir(&rings_dir).is_ok_and(|d| d.count() > 0)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    daemon.stop();
+    std::thread::sleep(Duration::from_millis(100));
+
+    use smeltr_core::session::SessionKind;
+    let scoped_dir = std::fs::read_dir(home.join("sessions"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            smeltr_core::reader::read_metadata(p)
+                .is_ok_and(|m| matches!(m.kind, SessionKind::Scoped { .. }))
+        })
+        .expect("scoped session");
+    let committed = smeltr_core::reader::read_events(&scoped_dir)
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.payload,
+                smeltr_core::event::Payload::MetalCbCommitted { .. }
+            )
+        })
+        .count();
+    assert!(
+        committed >= 22,
+        "the child's 22 command buffers, got {committed}"
+    );
+    let rings: Vec<_> = std::fs::read_dir(home.join("rings"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .collect();
+    assert!(rings.is_empty(), "rings left behind: {rings:?}");
+}
+
 #[test]
 #[serial_test::serial]
 fn analyze_prints_report_from_session_dir() {
