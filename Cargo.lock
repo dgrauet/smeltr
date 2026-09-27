@@ -2386,6 +2386,7 @@ dependencies = [
  "serde",
  "serial_test",
  "smeltr-core",
+ "smeltr-metal-ring",
  "smeltr-probes-core",
  "smeltr-probes-crash-reports",
  "smeltr-probes-ioreport",

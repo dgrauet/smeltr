@@ -193,7 +193,9 @@ CBOR length-prefixed frames over a Unix socket. See
   decodes only the chunks overlapping the requested `(source, time)` filter via
   `read_events_filtered`. Default remains the legacy mono-stream format; the
   reader auto-detects both. See `crates/smeltr-core/src/chunked.rs`.
-- `SMELTR_SESSION_NAME` — user-facing session name (validated: cap 200, no NUL/control/`/`);
+- `SMELTR_SESSION_NAME` — user-facing session name (validated: cap 200, no NUL/control/`/`;
+  `record --name` goes through the same `validate_session_name`, refused up front by the CLI
+  and dropped by the daemon — #267);
   surfaced by `list_sessions` and accepted as an alias by every CLI/MCP session arg via
   `smeltr_mcp::types::resolve_session`.
 - `SMELTR_SCOPE_MEM_SAMPLE` — on by default. Every `smeltr.scope("...")` enter and exit

@@ -36,5 +36,6 @@ zstd = "0.13"
 libc = "0.2"
 
 [dev-dependencies]
+smeltr-metal-ring = { path = "../smeltr-metal-ring" }
 tempfile.workspace = true
 serial_test = "3"

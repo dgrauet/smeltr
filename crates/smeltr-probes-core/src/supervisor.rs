@@ -78,6 +78,10 @@ async fn run_with_restart(mut probe: Box<dyn Probe>, sink: SharedSink, cancel: C
 
         emit_health(&sink, name, probe.health());
 
+        // Inside smeltrd this path is not reached: the daemon's panic hook
+        // flushes the black box and aborts on any panic, probe tasks
+        // included (panic_flush.rs), by design. It serves embedders
+        // without such a hook.
         // Run in its own task so a panic is observed and reported instead
         // of silently ending supervision (#244).
         let started = tokio::time::Instant::now();

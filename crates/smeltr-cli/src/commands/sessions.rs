@@ -2,7 +2,6 @@ use crate::client::Client;
 use clap::Subcommand;
 use smeltr_core::fmt::binary_bytes;
 use smeltr_core::reader::{list_sessions, read_events, read_metadata};
-use smeltr_core::session::SessionId;
 use smeltr_daemon::protocol::{ClientToDaemon, DaemonToClient};
 
 #[derive(Subcommand, Debug)]
@@ -77,35 +76,23 @@ async fn ls() -> anyhow::Result<()> {
 }
 
 async fn show(id: &str) -> anyhow::Result<()> {
-    let sid = resolve_id(id)?;
-    // Try the daemon first.
-    if let Ok(mut c) = Client::connect().await {
-        match c.request(ClientToDaemon::GetSession { id: sid }).await {
-            Ok(DaemonToClient::SessionEvents { events, metadata }) => {
-                return print_session(&metadata, &events);
-            }
-            Ok(DaemonToClient::Error { message }) => {
-                tracing::debug!("daemon: {message}, falling back to disk");
-            }
-            _ => {}
-        }
-    }
-    let dir = smeltr_core::reader::find_session_dir(sid)?
-        .ok_or_else(|| anyhow::anyhow!("session {id} not found"))?;
-    let metadata = read_metadata(&dir)?;
-    let events = read_events(&dir)?;
+    // Straight from disk (#267): the daemon's GetSession sent the whole
+    // session in one frame, far past what a client reads for large ones,
+    // and the daemon flushes live sessions to disk every 500 ms anyway.
+    let (metadata, events) = load_session(id)?;
     print_session(&metadata, &events)
 }
 
-fn resolve_id(s: &str) -> anyhow::Result<SessionId> {
-    if let Ok(sid) = s.parse::<SessionId>() {
-        return Ok(sid);
-    }
-    // Same resolution as every other session arg (short id, full UUID, or
-    // SessionMetadata.name — #164).
-    let dir = smeltr_core::session_resolve::resolve_session(s)
-        .map_err(|e| anyhow::anyhow!("could not resolve session id `{s}`: {e}"))?;
-    Ok(read_metadata(&dir)?.session_id)
+type LoadedSession = (
+    smeltr_core::session::SessionMetadata,
+    Vec<smeltr_core::event::Event>,
+);
+
+/// Read a session from disk, resolved like every other session argument.
+fn load_session(id: &str) -> anyhow::Result<LoadedSession> {
+    let dir = smeltr_core::session_resolve::resolve_session(id)
+        .map_err(|e| anyhow::anyhow!("could not resolve session `{id}`: {e}"))?;
+    Ok((read_metadata(&dir)?, read_events(&dir)?))
 }
 
 fn print_session(
@@ -339,13 +326,39 @@ fn print_session(
 
 #[cfg(test)]
 mod tests {
+
+    /// #267: `sessions show` went through the daemon's GetSession (one
+    /// unbounded frame: 116 MB for a large ambient session), and resolved
+    /// the argument to an id, then back to a directory by id suffix — so a
+    /// copied or renamed session directory was "not found" while every
+    /// other command read it.
+    #[test]
+    #[serial_test::serial]
+    fn show_reads_a_renamed_session_directory_from_disk() {
+        use super::load_session;
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = smeltr_core::session::SessionId::new();
+        let meta = smeltr_core::session::SessionMetadata::now_starting(id);
+        let w = smeltr_core::writer::SessionWriter::create(meta).unwrap();
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), "2026-09-27T00:00:00Z".into()).unwrap();
+        let renamed = dir.with_file_name("my-copy");
+        std::fs::rename(&dir, &renamed).unwrap();
+
+        let loaded = load_session("my-copy");
+        std::env::remove_var("SMELTR_HOME");
+        let (meta, _events) = loaded.unwrap();
+        assert_eq!(meta.session_id, id);
+    }
+
     use serial_test::serial;
     use smeltr_core::session::{SessionId, SessionKind, SessionMetadata};
     use smeltr_core::writer::SessionWriter;
 
     #[test]
     #[serial]
-    fn resolve_id_accepts_session_name() {
+    fn show_accepts_session_name() {
         // `sessions show` must resolve names like every other subcommand
         // (analyze/breakdown/origins go through resolve_session — #164).
         let home = tempfile::tempdir().unwrap();
@@ -356,8 +369,8 @@ mod tests {
         let w = SessionWriter::create(meta).unwrap();
         w.finalize(Some(0), "test".into()).unwrap();
 
-        let resolved = super::resolve_id("my-named-run").unwrap();
-        assert_eq!(resolved, id);
+        let (meta, _) = super::load_session("my-named-run").unwrap();
+        assert_eq!(meta.session_id, id);
     }
 
     #[test]

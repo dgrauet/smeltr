@@ -118,10 +118,14 @@ pub fn install() -> anyhow::Result<()> {
     }
     let smeltrd_str = smeltrd.to_str().context("smeltrd path not utf-8")?;
 
-    let home = home_dir()?;
-    let smeltr_home = std::env::var("SMELTR_HOME")
-        .unwrap_or_else(|_| home.join(".smeltr").to_string_lossy().into_owned());
+    // The one resolver (#272): a second copy here read SMELTR_HOME as UTF-8
+    // only and took an empty value as a path.
+    let smeltr_home = smeltr_core::session::smeltr_home();
     let _ = std::fs::create_dir_all(&smeltr_home);
+    let smeltr_home = smeltr_home
+        .to_str()
+        .context("SMELTR_HOME path not utf-8 (the LaunchAgent plist needs UTF-8)")?
+        .to_string();
 
     let plist = plist_content(smeltrd_str, &smeltr_home);
     std::fs::write(&plist_path, plist)
@@ -469,10 +473,7 @@ async fn status() -> anyhow::Result<()> {
         );
     }
     println!("socket: {}", smeltr_daemon::server::socket_path().display());
-    println!(
-        "home:   {}",
-        std::env::var("SMELTR_HOME").unwrap_or_else(|_| "$HOME/.smeltr".into())
-    );
+    println!("home:   {}", smeltr_core::session::smeltr_home().display());
     Ok(())
 }
 

@@ -565,4 +565,37 @@ mod tests {
         page(None, None);
         assert!(!dir.join(SUMMARY_CACHE_FILE).exists());
     }
+
+    /// #272: a session still being recorded must never be cached — its
+    /// count and root cause keep changing. (Mutation "a session without an
+    /// end is settled" used to pass the whole suite.)
+    #[test]
+    #[serial_test::serial]
+    fn running_sessions_are_not_cached() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let mut meta = SessionMetadata::now_starting(SessionId::new());
+        meta.started_rfc3339 = "2026-01-01T00:00:00Z".into();
+        let mut w = SessionWriter::create(meta).unwrap();
+        w.flush().unwrap();
+        let dir = w.dir().to_path_buf();
+        page(None, None);
+        drop(w);
+        assert!(!dir.join(SUMMARY_CACHE_FILE).exists());
+    }
+
+    /// #272: `limit: 0` is served as 1 — an empty page pointing at its own
+    /// offset would loop a paging client forever. (Removing the guard used
+    /// to pass the whole suite.)
+    #[test]
+    #[serial_test::serial]
+    fn a_zero_limit_still_advances() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        session_started("2026-05-01T00:00:00Z");
+        session_started("2026-06-01T00:00:00Z");
+        let r = page(Some(0), None);
+        assert_eq!(r.sessions.len(), 1);
+        assert_eq!(r.next_offset, Some(1));
+    }
 }

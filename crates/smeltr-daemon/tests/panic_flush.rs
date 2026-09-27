@@ -2,7 +2,6 @@
 //! next boot recovers the orphaned session.
 
 use serial_test::serial;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 
 fn post_mortem_dir(home: &Path) -> Option<std::path::PathBuf> {
@@ -68,7 +67,8 @@ fn panic_aborts_saves_black_box_and_next_boot_recovers() {
     let sock = home.path().join("smeltrd.sock");
     let bin = env!("CARGO_BIN_EXE_smeltrd");
 
-    // 1. Daemon panics 300 ms after start -> hook must abort the process.
+    // 1. Daemon panics 300 ms after start -> hook must end the process.
+    let started = std::time::SystemTime::now();
     let status = std::process::Command::new(bin)
         .env("SMELTR_HOME", home.path())
         .env("SMELTR_SOCKET", &sock)
@@ -76,7 +76,17 @@ fn panic_aborts_saves_black_box_and_next_boot_recovers() {
         .status()
         .unwrap();
     assert!(!status.success());
-    assert_eq!(status.signal(), Some(libc::SIGABRT), "hook must abort");
+    // #272: a real abort() made ReportCrash write a smeltrd .ips to
+    // ~/Library/Logs/DiagnosticReports on every `cargo test` — the
+    // pollution #227 removed. Under the test override the hook exits with
+    // abort()'s status instead of raising SIGABRT.
+    assert_eq!(status.code(), Some(134), "status {status:?}");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert_eq!(
+        new_smeltrd_crash_reports(started),
+        Vec::<std::path::PathBuf>::new(),
+        "the panic test must not leave a macOS crash report"
+    );
 
     // 2. Black box on disk: post-mortem session + panic report.
     let pm = post_mortem_dir(home.path()).expect("post-mortem session dir");
@@ -99,4 +109,25 @@ fn panic_aborts_saves_black_box_and_next_boot_recovers() {
         count_recovered(home.path()) >= 1,
         "orphaned session must be recovered"
     );
+}
+
+/// `smeltrd*.ips` crash reports written after `since`.
+fn new_smeltrd_crash_reports(since: std::time::SystemTime) -> Vec<std::path::PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let dir = std::path::Path::new(&home).join("Library/Logs/DiagnosticReports");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("smeltrd"))
+        .filter(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t >= since)
+        })
+        .map(|e| e.path())
+        .collect()
 }

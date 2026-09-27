@@ -65,6 +65,17 @@ impl ProbeRuntime {
         }
     }
 
+    /// No global probes, for tests of the per-pid attach paths.
+    #[cfg(test)]
+    fn without_global(sink: Arc<DaemonSink>) -> Self {
+        Self {
+            handle: tokio::sync::Mutex::new(None),
+            sink,
+            scoped: tokio::sync::Mutex::new(HashMap::new()),
+            metal_hooks: tokio::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
     pub async fn attach_scoped(&self, pid: u32) {
         use smeltr_probes_core::Supervisor;
         let sink_dyn: smeltr_probes_core::SharedSink = self.sink.clone();
@@ -129,5 +140,48 @@ impl ProbeRuntime {
         if let Some(h) = self.handle.lock().await.take() {
             h.shutdown().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_router::SessionRouter;
+    use crate::sessions::ActiveSession;
+    use smeltr_core::event::Payload;
+    use smeltr_metal_ring::create_ring;
+
+    /// #272: re-attaching the hook for a pid must stop the probe it
+    /// replaces; otherwise the old one keeps draining its ring forever.
+    /// (Mutation "forget the replaced handle" used to pass every test.)
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reattaching_a_hook_stops_the_replaced_probe() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let router = Arc::new(SessionRouter::new(ambient.clone(), None, None));
+        let rt = ProbeRuntime::without_global(Arc::new(DaemonSink {
+            router: router.clone(),
+        }));
+        let old = home.path().join("old.ring");
+        let new = home.path().join("new.ring");
+        let mut old_writer = create_ring(&old, 1 << 16).unwrap();
+        drop(create_ring(&new, 1 << 16).unwrap());
+
+        rt.attach_metal_hook(4242, old.clone()).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        rt.attach_metal_hook(4242, new).await;
+        old_writer.write_buffer_free(1, 0xdead).unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        rt.detach_metal_hook(4242).await;
+
+        ambient.finalize(Some(0), None, "test").unwrap();
+        let dir = smeltr_core::reader::list_sessions().unwrap().remove(0);
+        let drained = smeltr_core::reader::read_events(&dir)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.payload, Payload::MetalBufferFree { buffer_id: 0xdead }));
+        assert!(!drained, "the replaced probe was still draining its ring");
     }
 }
