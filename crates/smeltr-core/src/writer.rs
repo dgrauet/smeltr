@@ -582,6 +582,25 @@ mod tests {
         assert_eq!(seqs, (0..51).collect::<Vec<_>>());
     }
 
+    /// #268: the daemon flushes every 500 ms; with the default config a
+    /// flush must make even a handful of events durable. A SIGKILL (the
+    /// writer dropped without finalize) used to lose everything under
+    /// FLUSH_MIN_BYTES — a whole short chunked run.
+    #[test]
+    #[serial]
+    fn chunked_default_flush_makes_few_events_durable() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut w = SessionWriter::create_with_format(meta, true).unwrap();
+        let dir = w.dir().to_path_buf();
+        for i in 0..3u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+        }
+        w.flush().unwrap();
+        drop(w); // SIGKILL: no finalize, no footer
+        assert_eq!(crate::reader::read_events(&dir).unwrap().len(), 3);
+    }
+
     #[test]
     #[serial]
     fn chunked_flush_seals_so_reader_sees_events_before_finalize() {

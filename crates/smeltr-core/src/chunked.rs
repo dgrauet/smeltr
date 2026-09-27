@@ -44,7 +44,12 @@ const MIN_VALID_FILE_LEN: u64 = HEAD_MAGIC.len() as u64 + 4 + TRAILER_SIZE; // 2
 
 pub const CHUNK_EVENTS: u32 = 1024;
 pub const CHUNK_BYTES: u64 = 256 * 1024;
-pub const FLUSH_MIN_BYTES: u64 = 4096;
+/// A flush seals the in-progress chunk once it holds at least this many
+/// uncompressed bytes. 0: any buffered event. It was 4096, and since the
+/// daemon's periodic flush is what makes events durable, a daemon SIGKILL
+/// lost every event of a short chunked run (#268). The cost is at most two
+/// small chunks per second on a quiet session.
+pub const FLUSH_MIN_BYTES: u64 = 0;
 pub const MAX_CHUNK_BYTES: u64 = 512 * 1024; // scan sanity bound
 pub const MAX_CHUNKS: usize = 1_048_576;
 

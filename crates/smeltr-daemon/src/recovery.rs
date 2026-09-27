@@ -86,7 +86,15 @@ pub fn recover_orphaned_sessions() -> std::io::Result<usize> {
         }
         // events-file mtime ≈ last write ≈ crash time; cheaper and more
         // robust than decoding a possibly-truncated stream.
-        meta.ended_rfc3339 = Some(events_mtime_rfc3339(&dir).unwrap_or_else(now_rfc3339));
+        // The periodic flush makes events durable every 500 ms, so the mtime
+        // is within that of the last event. It can still predate the start
+        // (clock step, copied session): never end before starting.
+        let ended = events_mtime(&dir).unwrap_or_else(OffsetDateTime::now_utc);
+        let ended = match OffsetDateTime::parse(&meta.started_rfc3339, &Rfc3339) {
+            Ok(started) if ended < started => started,
+            _ => ended,
+        };
+        meta.ended_rfc3339 = Some(ended.format(&Rfc3339).unwrap_or_else(|_| now_rfc3339()));
         meta.end_reason = Some("recovered-after-crash".to_string());
         if let Err(e) = write_metadata(&dir, &meta) {
             // One unwritable session must not abort the whole pass.
@@ -98,12 +106,12 @@ pub fn recover_orphaned_sessions() -> std::io::Result<usize> {
     Ok(recovered)
 }
 
-fn events_mtime_rfc3339(dir: &Path) -> Option<String> {
+fn events_mtime(dir: &Path) -> Option<OffsetDateTime> {
     let mtime = std::fs::metadata(events_path_for_read(dir))
         .ok()?
         .modified()
         .ok()?;
-    OffsetDateTime::from(mtime).format(&Rfc3339).ok()
+    Some(OffsetDateTime::from(mtime))
 }
 
 fn now_rfc3339() -> String {
@@ -187,6 +195,74 @@ mod tests {
         assert_eq!(m2.exit_code, Some(0));
         // Idempotent: second run recovers nothing.
         assert_eq!(recover_orphaned_sessions().unwrap(), 0);
+    }
+
+    fn mark(seq: u64) -> smeltr_core::event::Event {
+        smeltr_core::event::Event {
+            ts_mono_ns: seq,
+            ts_wall_ns: seq,
+            session_id: uuid::Uuid::nil(),
+            source: Source::Mark,
+            pid: None,
+            seq,
+            payload: Payload::Mark {
+                label: "x".into(),
+                fields: Default::default(),
+            },
+        }
+    }
+
+    fn parse(s: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(s, &Rfc3339).unwrap()
+    }
+
+    /// #268: a chunked session killed after a short run must end where its
+    /// last periodic flush landed. The flush used to write nothing under
+    /// 4 KiB, so the events file kept its creation mtime and the recovered
+    /// session ended the instant it started — and held no event.
+    #[test]
+    #[serial]
+    fn recovered_chunked_session_ends_at_its_last_flush() {
+        let _h = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let dir = smeltr_core::session::session_dir(&meta);
+        let mut w = SessionWriter::create_with_format(meta, true).unwrap();
+        w.write_event(&mark(1)).unwrap();
+        w.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        w.write_event(&mark(2)).unwrap();
+        w.flush().unwrap();
+        drop(w); // daemon SIGKILL
+        assert_eq!(recover_orphaned_sessions().unwrap(), 1);
+        let m = read_metadata(&dir).unwrap();
+        let (start, end) = (
+            parse(&m.started_rfc3339),
+            parse(m.ended_rfc3339.as_deref().unwrap()),
+        );
+        assert!(
+            end - start >= time::Duration::milliseconds(1100),
+            "ended {end} must follow the last flush, started {start}"
+        );
+        assert_eq!(smeltr_core::reader::read_events(&dir).unwrap().len(), 2);
+    }
+
+    /// The events file's mtime can predate the start (a clock step, a copied
+    /// session): the recovered end never precedes the start.
+    #[test]
+    #[serial]
+    fn recovered_end_never_precedes_start() {
+        let _h = temp_home();
+        let orphan = make_session(false);
+        let f = std::fs::File::options()
+            .write(true)
+            .open(smeltr_core::session::events_path_for_read(&orphan))
+            .unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+            .unwrap();
+        drop(f);
+        recover_orphaned_sessions().unwrap();
+        let m = read_metadata(&orphan).unwrap();
+        assert!(parse(m.ended_rfc3339.as_deref().unwrap()) >= parse(&m.started_rfc3339));
     }
 
     #[test]
