@@ -5,20 +5,22 @@
 //! loads…) come first, then routine telemetry by temporal proximity; what
 //! is dropped is summarized per kind in `elided`.
 
-use crate::types::{resolve_session, ToolError};
+use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, Payload};
 use std::collections::BTreeMap;
 
 const DEFAULT_WINDOW_NS: u64 = 200_000_000;
 const DEFAULT_MAX_EVENTS: usize = 50;
+/// `max_events: 100000` returned 4.3 M characters (#271).
+const MAX_MAX_EVENTS: usize = 500;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
     pub session: String,
     pub focal_seq: u64,
     pub window_ns: Option<u64>,
-    /// Cap on returned correlated events (default 50).
+    /// Cap on returned correlated events (default 50, 1..=500).
     pub max_events: Option<usize>,
 }
 
@@ -74,6 +76,12 @@ fn is_notable(e: &Event) -> bool {
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
+    let max_events = bounded_count(
+        "max_events",
+        params.max_events,
+        DEFAULT_MAX_EVENTS,
+        MAX_MAX_EVENTS,
+    )?;
     let dir = resolve_session(&params.session)?;
     let events = smeltr_core::reader::read_events(&dir)?;
     let focal = events
@@ -84,7 +92,6 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             ToolError::NotFound(format!("focal seq {} not in session", params.focal_seq))
         })?;
     let window = params.window_ns.unwrap_or(DEFAULT_WINDOW_NS);
-    let max_events = params.max_events.unwrap_or(DEFAULT_MAX_EVENTS);
     let from = focal.ts_mono_ns.saturating_sub(window);
     let to = focal.ts_mono_ns.saturating_add(window);
     let mut in_window: Vec<Event> = events
@@ -260,6 +267,26 @@ mod tests {
             "the Mark outranks closer routine telemetry"
         );
         assert_eq!(resp.elided.get("MlxMemoryPoll").copied(), Some(151));
+    }
+
+    /// #271: `max_events: 100000` returned 4.3 M characters.
+    #[test]
+    #[serial_test::serial]
+    fn out_of_range_max_events_is_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        for max_events in [0, 501, 100_000] {
+            let r = run(Params {
+                session: "deadbeef".into(),
+                focal_seq: 1,
+                window_ns: None,
+                max_events: Some(max_events),
+            });
+            assert!(
+                matches!(&r, Err(ToolError::BadArgs(m)) if m.contains("500")),
+                "max_events {max_events}: {r:?}"
+            );
+        }
     }
 
     #[test]

@@ -1,10 +1,13 @@
 //! `query_events` tool: filter session events by source/payload-kind/time.
 
-use crate::types::{resolve_session, ToolError};
+use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, Source};
 
-const DEFAULT_LIMIT: usize = 1000;
+/// ~270 characters per event: 100 events stay well inside an MCP client's
+/// tool-output limit, where the former 1000 came back as 266k (#271).
+const DEFAULT_LIMIT: usize = 100;
+const MAX_LIMIT: usize = 1000;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
@@ -13,6 +16,8 @@ pub struct Params {
     pub payload_kind: Option<String>,
     pub from_ts_mono_ns: Option<u64>,
     pub to_ts_mono_ns: Option<u64>,
+    /// Max events returned (default 100, 1..=1000). Narrow with the
+    /// filters, or page with `from_ts_mono_ns`, rather than raising it.
     pub limit: Option<usize>,
 }
 
@@ -25,8 +30,8 @@ pub struct Response {
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
+    let limit = bounded_count("limit", params.limit, DEFAULT_LIMIT, MAX_LIMIT)?;
     let dir = resolve_session(&params.session)?;
-    let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
 
     let filter = smeltr_core::EventFilter {
         source: match params.source.as_deref() {
@@ -143,6 +148,61 @@ mod tests {
         })
         .unwrap();
         assert_eq!(resp.matched, 1);
+    }
+
+    /// #271: the default of 1000 events came back as 266k characters, far
+    /// past an MCP client's tool-output limit.
+    #[test]
+    #[serial_test::serial]
+    fn default_page_is_100_events() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let id = SessionId::new();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(id)).unwrap();
+        for i in 0..150 {
+            w.write_event(&Event {
+                ts_mono_ns: i,
+                ts_wall_ns: 0,
+                session_id: Uuid::nil(),
+                source: Source::Mark,
+                pid: None,
+                seq: i,
+                payload: Payload::Mark {
+                    label: format!("m-{i}"),
+                    fields: Default::default(),
+                },
+            })
+            .unwrap();
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+        let resp = run(Params {
+            session: id.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(resp.events.len(), 100);
+        assert_eq!(resp.matched, 150);
+        assert!(resp.truncated);
+    }
+
+    /// #271: `limit: 100000` returned 25 M characters and `limit: 0` was
+    /// served silently. Both are refused, before the session is read.
+    #[test]
+    #[serial_test::serial]
+    fn out_of_range_limit_is_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        for limit in [0, 1001, 100_000] {
+            let r = run(Params {
+                session: "deadbeef".into(),
+                limit: Some(limit),
+                ..Default::default()
+            });
+            assert!(
+                matches!(&r, Err(ToolError::BadArgs(m)) if m.contains("1000")),
+                "limit {limit}: {r:?}"
+            );
+        }
     }
 
     #[test]

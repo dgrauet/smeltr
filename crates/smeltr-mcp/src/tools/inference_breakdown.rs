@@ -1,6 +1,6 @@
 //! `get_inference_breakdown` MCP tool.
 
-use crate::types::{resolve_session, ToolError};
+use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::{
     apply_op_group_by, compute_breakdown, prune_by_field_filter, BreakdownNotices, ModuleBreakdown,
@@ -13,11 +13,15 @@ use std::collections::BTreeMap;
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
     pub session: String,
+    /// Tree depth kept below the root (default 6, like `smeltr breakdown`;
+    /// 1..=64).
     pub max_depth: Option<u16>,
+    /// Children kept per node, largest GPU time first (default 20; 1..=200).
     pub top_n: Option<u32>,
     pub min_gpu_ns: Option<u64>,
     #[serde(default = "default_include_ops")]
     pub include_ops: bool,
+    /// Ops kept per node (default 5; 0..=50).
     #[serde(default = "default_top_ops")]
     pub top_ops_per_leaf: u32,
     /// Exact-match field filter. Keys are field names; values are JSON
@@ -72,6 +76,15 @@ pub struct Response {
     /// has always printed this; the tool used to omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Tree nodes (each with its whole subtree) cut by `max_depth`, `top_n`
+    /// or `min_gpu_ns`. Raise the bounds, or narrow with `field_filter`,
+    /// to see them. Absent when nothing was cut.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub elided_nodes: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -85,6 +98,17 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             )))
         }
     };
+    // Same defaults as `smeltr breakdown --depth 6 --top 20` (#271: they
+    // used to be unbounded, and a real session's tree was 1.19 M chars).
+    let max_depth = bounded_count("max_depth", params.max_depth, 6, 64)?;
+    let top_n = bounded_count("top_n", params.top_n, 20, 200)? as usize;
+    if params.top_ops_per_leaf > 50 {
+        return Err(ToolError::BadArgs(format!(
+            "top_ops_per_leaf must be at most 50, got {}",
+            params.top_ops_per_leaf
+        )));
+    }
+    let top_ops_per_leaf = params.top_ops_per_leaf as usize;
 
     let dir = resolve_session(&params.session)?;
     let events = read_events(&dir)?;
@@ -115,30 +139,11 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         }
     }
 
-    let max_depth = params.max_depth.unwrap_or(u16::MAX);
-    let top_n = params.top_n.unwrap_or(u32::MAX) as usize;
     let min_gpu_ns = params.min_gpu_ns.unwrap_or(0);
-
-    fn prune(n: &mut ModuleBreakdown, depth: u16, max_depth: u16, top_n: usize, min_gpu_ns: u64) {
-        if depth >= max_depth {
-            n.children.clear();
-            return;
-        }
-        n.children.retain(|c| c.gpu_ns_subtree >= min_gpu_ns);
-        n.children
-            .sort_by_key(|c| std::cmp::Reverse(c.gpu_ns_subtree));
-        if n.children.len() > top_n {
-            n.children.truncate(top_n);
-        }
-        for c in &mut n.children {
-            prune(c, depth + 1, max_depth, top_n, min_gpu_ns);
-        }
-    }
-    prune(&mut root, 0, max_depth, top_n, min_gpu_ns);
+    let elided_nodes = prune(&mut root, 0, max_depth, top_n, min_gpu_ns);
 
     apply_op_group_by(&mut root, group_by);
 
-    let top_ops_per_leaf = params.top_ops_per_leaf as usize;
     let include_ops = params.include_ops;
     fn shape_ops(n: &mut ModuleBreakdown, include: bool, top: usize) {
         if !include {
@@ -156,7 +161,44 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         root,
         attribution_gap,
         degraded,
+        elided_nodes,
     })
+}
+
+/// Every node of `n`'s subtree, `n` included.
+fn subtree_size(n: &ModuleBreakdown) -> u64 {
+    1 + n.children.iter().map(subtree_size).sum::<u64>()
+}
+
+/// Keeps `top_n` children per node (largest `gpu_ns_subtree` first, at or
+/// above `min_gpu_ns`) down to `max_depth`; returns how many nodes it cut.
+fn prune(
+    n: &mut ModuleBreakdown,
+    depth: u16,
+    max_depth: u16,
+    top_n: usize,
+    min_gpu_ns: u64,
+) -> u64 {
+    let mut elided = 0;
+    if depth >= max_depth {
+        elided += n.children.iter().map(subtree_size).sum::<u64>();
+        n.children.clear();
+        return elided;
+    }
+    n.children
+        .sort_by_key(|c| std::cmp::Reverse(c.gpu_ns_subtree));
+    let keep = n
+        .children
+        .iter()
+        .take(top_n)
+        .take_while(|c| c.gpu_ns_subtree >= min_gpu_ns)
+        .count();
+    elided += n.children[keep..].iter().map(subtree_size).sum::<u64>();
+    n.children.truncate(keep);
+    for c in &mut n.children {
+        elided += prune(c, depth + 1, max_depth, top_n, min_gpu_ns);
+    }
+    elided
 }
 
 #[cfg(test)]
@@ -171,6 +213,142 @@ mod tests {
     /// Params::field_filter (which stores JSON scalars to avoid a schemars dep).
     fn fv_to_json(v: &FieldValue) -> serde_json::Value {
         serde_json::to_value(v).unwrap()
+    }
+
+    /// A session whose module tree is a chain `c0 > c1 > … > c{depth-1}`
+    /// next to `width` sibling leaves `w0…` at the top level.
+    fn wide_and_deep_session(depth: u64, width: u64) -> SessionId {
+        let id = SessionId::new();
+        let mut w = SessionWriter::create(SessionMetadata::now_starting(id)).unwrap();
+        let mut seq = 0u64;
+        let mut emit = |payload: Payload| {
+            seq += 1;
+            w.write_event(&Event {
+                ts_mono_ns: seq,
+                ts_wall_ns: seq,
+                session_id: Uuid::nil(),
+                source: Source::PythonSidecar,
+                pid: None,
+                seq,
+                payload,
+            })
+            .unwrap();
+        };
+        let enter =
+            |call: u64, name: String, parent: Option<u64>, depth: u16| Payload::ModuleEntered {
+                module_call_id: call,
+                module_def_id: call,
+                qualname: name.clone(),
+                class_name: name,
+                parent_call_id: parent,
+                depth,
+                fields: Default::default(),
+            };
+        for d in 0..depth {
+            let parent = d.checked_sub(1).map(|p| p + 1);
+            emit(enter(d + 1, format!("c{d}"), parent, d as u16));
+        }
+        for d in (0..depth).rev() {
+            emit(Payload::ModuleReturned {
+                module_call_id: d + 1,
+            });
+        }
+        for i in 0..width {
+            emit(enter(1000 + i, format!("w{i}"), None, 0));
+            emit(Payload::ModuleReturned {
+                module_call_id: 1000 + i,
+            });
+        }
+        w.finalize(Some(0), "x".into()).unwrap();
+        id
+    }
+
+    fn tree_depth(n: &ModuleBreakdown) -> usize {
+        n.children
+            .iter()
+            .map(|c| 1 + tree_depth(c))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// #271: `max_depth` and `top_n` defaulted to unbounded, and the tree of
+    /// a real session came back as 1.19 M characters. The defaults now
+    /// match `smeltr breakdown` (`--depth 6 --top 20`), and what they cut
+    /// is counted rather than dropped silently.
+    #[test]
+    #[serial_test::serial]
+    fn defaults_bound_the_tree_like_the_cli() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        // Separate sessions: every node has 0 GPU time here, so which of
+        // equal siblings `top_n` keeps is unspecified.
+        let deep = wide_and_deep_session(9, 0);
+        let resp = run(Params {
+            session: deep.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(tree_depth(&resp.root), 6);
+        assert_eq!(resp.elided_nodes, 3, "the chain loses c6..c8");
+
+        let wide = wide_and_deep_session(0, 30);
+        let resp = run(Params {
+            session: wide.short(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(resp.root.children.len(), 20);
+        assert_eq!(resp.elided_nodes, 10);
+
+        let id = wide_and_deep_session(9, 30);
+        let all = run(Params {
+            session: id.short(),
+            max_depth: Some(64),
+            top_n: Some(200),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(all.root.children.len(), 31);
+        assert_eq!(tree_depth(&all.root), 9);
+        assert_eq!(all.elided_nodes, 0);
+        let json = serde_json::to_value(&all).unwrap();
+        assert!(json.get("elided_nodes").is_none(), "omitted when 0");
+    }
+
+    /// #271: caller-supplied bounds are capped; `top_n: 0` is refused.
+    #[test]
+    #[serial_test::serial]
+    fn out_of_range_bounds_are_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let cases = [
+            Params {
+                top_n: Some(0),
+                ..Default::default()
+            },
+            Params {
+                top_n: Some(201),
+                ..Default::default()
+            },
+            Params {
+                max_depth: Some(65),
+                ..Default::default()
+            },
+            Params {
+                top_ops_per_leaf: 51,
+                ..Default::default()
+            },
+        ];
+        for mut p in cases {
+            p.session = "deadbeef".into();
+            let desc = format!("{:?}/{:?}/{}", p.top_n, p.max_depth, p.top_ops_per_leaf);
+            let r = run(p);
+            assert!(
+                matches!(&r, Err(ToolError::BadArgs(_))),
+                "{desc}: {:?}",
+                r.map(|r| r.elided_nodes)
+            );
+        }
     }
 
     #[test]

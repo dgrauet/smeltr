@@ -13,7 +13,7 @@ pub struct Params {
     /// excluded from the listing as likely-orphan daemon-spawn sessions
     /// without workload. Set to true to include them.
     pub include_empty: Option<bool>,
-    /// Page size (default 50). Sessions come newest first by start time.
+    /// Page size (default 50, 1..=200). Sessions come newest first by start time.
     pub limit: Option<usize>,
     /// Sessions to skip, counted after the `include_empty` filter — pass
     /// the previous response's `next_offset`.
@@ -100,6 +100,8 @@ fn write_cache(dir: &std::path::Path, event_count: usize, root_cause_title: &Opt
 /// Default page size: a store of 272 sessions used to come back in one
 /// 74k-character response, past an MCP client's tool-output limit (#261).
 const DEFAULT_LIMIT: usize = 50;
+/// ~330 characters per session: 200 stay inside the response budget.
+const MAX_LIMIT: usize = 200;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -128,9 +130,9 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     // and every post-mortem after every recording (#261).
     let dirs = sessions_newest_first()?;
     let include_empty = params.include_empty.unwrap_or(false);
-    // At least 1: an empty page pointing at its own offset would loop a
-    // paging client forever.
-    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).max(1);
+    // Never 0: an empty page pointing at its own offset would loop a paging
+    // client forever (#272). Refused rather than served as 1 (#271).
+    let limit = crate::types::bounded_count("limit", params.limit, DEFAULT_LIMIT, MAX_LIMIT)?;
     let offset = params.offset.unwrap_or(0);
     let mut out = Vec::with_capacity(limit.min(dirs.len()));
     let mut matched = 0usize;
@@ -594,19 +596,30 @@ mod tests {
         assert!(!dir.join(SUMMARY_CACHE_FILE).exists());
     }
 
-    /// #272: `limit: 0` is served as 1 — an empty page pointing at its own
-    /// offset would loop a paging client forever. (Removing the guard used
-    /// to pass the whole suite.)
+    /// #272: an empty page pointing at its own offset would loop a paging
+    /// client forever. #271: `limit: 0` is refused rather than served as 1
+    /// (silent coercion), like every other tool's count argument; an error
+    /// stops a pager as surely. `limit: 1000` returned 84k characters.
     #[test]
     #[serial_test::serial]
-    fn a_zero_limit_still_advances() {
+    fn out_of_range_limit_is_bad_args() {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("SMELTR_HOME", home.path());
         session_started("2026-05-01T00:00:00Z");
         session_started("2026-06-01T00:00:00Z");
-        let r = page(Some(0), None);
-        assert_eq!(r.sessions.len(), 1);
-        assert_eq!(r.next_offset, Some(1));
+        for limit in [0, 201, 1000] {
+            let r = run(Params {
+                include_empty: Some(true),
+                limit: Some(limit),
+                offset: None,
+            });
+            assert!(
+                matches!(&r, Err(ToolError::BadArgs(m)) if m.contains("200")),
+                "limit {limit}: {:?}",
+                r.map(|r| r.next_offset)
+            );
+        }
+        assert_eq!(page(Some(200), None).sessions.len(), 2);
     }
 
     /// #270: the cache was keyed on the event file only, so after an upgrade

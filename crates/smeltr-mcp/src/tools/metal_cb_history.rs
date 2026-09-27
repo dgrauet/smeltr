@@ -1,15 +1,18 @@
 //! `get_metal_cb_history` tool: filter Metal events.
 
-use crate::types::{resolve_session, ToolError};
+use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_core::event::{Event, Payload};
 
 const DEFAULT_LIMIT: usize = 100;
+/// `limit: 100000` returned 24 M characters (#271).
+const MAX_LIMIT: usize = 1000;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
     pub session: String,
     pub queue_id: Option<u64>,
+    /// Max events returned (default 100, 1..=1000); page with `offset`.
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
@@ -24,6 +27,7 @@ pub struct Response {
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
+    let limit = bounded_count("limit", params.limit, DEFAULT_LIMIT, MAX_LIMIT)?;
     let dir = resolve_session(&params.session)?;
     let events = smeltr_core::reader::read_events(&dir)?;
     let total = events.len();
@@ -40,7 +44,6 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let matched = filtered.len();
 
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
     let mut sliced: Vec<Event> = filtered.into_iter().skip(offset).collect();
     let truncated = sliced.len() > limit;
     sliced.truncate(limit);
@@ -209,6 +212,25 @@ mod tests {
         assert_eq!(resp.matched, 50);
         assert!(resp.truncated);
         assert_eq!(resp.offset, 0);
+    }
+
+    /// #271: `limit: 100000` returned 24 M characters.
+    #[test]
+    #[serial_test::serial]
+    fn out_of_range_limit_is_bad_args() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        for limit in [0, 1001, 100_000] {
+            let r = run(Params {
+                session: "deadbeef".into(),
+                limit: Some(limit),
+                ..Default::default()
+            });
+            assert!(
+                matches!(&r, Err(ToolError::BadArgs(m)) if m.contains("1000")),
+                "limit {limit}: {r:?}"
+            );
+        }
     }
 
     #[test]
