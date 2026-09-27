@@ -326,7 +326,23 @@ fn a_killed_record_client_still_records_the_child_and_removes_its_rings() {
         .args(["record", harness.to_str().unwrap()])
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(1000));
+    // Kill only once the session exists: before that, the command has not
+    // started (record's exec gate) and there is nothing to keep recording.
+    let sessions = home.join("sessions");
+    let started = std::time::Instant::now();
+    while !std::fs::read_dir(&sessions).is_ok_and(|d| {
+        d.filter_map(|e| e.ok()).any(|e| {
+            smeltr_core::reader::read_metadata(&e.path())
+                .is_ok_and(|m| matches!(m.kind, smeltr_core::session::SessionKind::Scoped { .. }))
+        })
+    }) {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "no scoped session"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
     record.kill().unwrap();
     record.wait().unwrap();
     std::thread::sleep(Duration::from_millis(3500));

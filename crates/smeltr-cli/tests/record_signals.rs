@@ -19,6 +19,29 @@ fn scoped_metadata(home: &std::path::Path) -> smeltr_core::session::SessionMetad
         .expect("scoped session")
 }
 
+/// The command starts only once its session exists (record's exec gate):
+/// signalling before that tests nothing. CI machines are slow to get there.
+fn wait_for_scoped_session(home: &std::path::Path) {
+    let started = std::time::Instant::now();
+    loop {
+        let found = std::fs::read_dir(home.join("sessions")).is_ok_and(|d| {
+            d.filter_map(|e| e.ok()).any(|e| {
+                smeltr_core::reader::read_metadata(&e.path()).is_ok_and(|m| {
+                    matches!(m.kind, smeltr_core::session::SessionKind::Scoped { .. })
+                })
+            })
+        });
+        if found {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "no scoped session"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 #[serial_test::serial]
 fn ctrl_c_keeps_the_childs_exit_status() {
@@ -41,7 +64,8 @@ fn ctrl_c_keeps_the_childs_exit_status() {
         .process_group(0)
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
+    wait_for_scoped_session(home.path());
+    std::thread::sleep(Duration::from_millis(500));
     // Ctrl-C: SIGINT to the whole foreground process group.
     unsafe { libc::killpg(record.id() as i32, libc::SIGINT) };
     let status = record.wait().unwrap();
@@ -73,7 +97,8 @@ fn a_killed_record_client_keeps_the_session_until_the_child_exits() {
         .args(["record", "--no-hook", "--", "/bin/sleep", "3"])
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(1000));
+    wait_for_scoped_session(home.path());
+    std::thread::sleep(Duration::from_millis(300));
     record.kill().unwrap(); // SIGKILL: no handler can run
     record.wait().unwrap();
     std::thread::sleep(Duration::from_millis(700));
@@ -137,7 +162,8 @@ fn losing_the_daemon_mid_run_is_reported() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(800));
+    wait_for_scoped_session(home.path());
+    std::thread::sleep(Duration::from_millis(300));
     daemon.stop();
     let out = record.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
