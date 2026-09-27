@@ -298,19 +298,20 @@ mod tests {
         let h = temp_home();
         let root = h.path().join("sessions");
         // Two hand-built orphan sessions; "aaa-*" sorts first and its
-        // metadata.toml is made read-only so write_metadata fails on it.
+        // directory is made read-only so write_metadata fails on it (the
+        // metadata is replaced by rename, so the file's own mode no longer
+        // matters — the directory's does).
         for name in ["aaa-orphan", "bbb-orphan"] {
             let dir = root.join(name);
             std::fs::create_dir_all(&dir).unwrap();
             let meta = SessionMetadata::now_starting(SessionId::new());
             smeltr_core::session::write_metadata(&dir, &meta).unwrap();
         }
-        let locked = root.join("aaa-orphan").join("metadata.toml");
-        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
-        perms.set_mode(0o444);
-        std::fs::set_permissions(&locked, perms).unwrap();
+        let locked = root.join("aaa-orphan");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let n = recover_orphaned_sessions().unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(n, 1, "the writable orphan must still be recovered");
         let m = read_metadata(&root.join("bbb-orphan")).unwrap();
         assert_eq!(m.end_reason.as_deref(), Some("recovered-after-crash"));

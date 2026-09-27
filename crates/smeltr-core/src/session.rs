@@ -232,7 +232,15 @@ pub fn metadata_path(dir: &Path) -> PathBuf {
 pub fn write_metadata(dir: &Path, meta: &SessionMetadata) -> std::io::Result<()> {
     let text = toml::to_string(meta)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    std::fs::write(metadata_path(dir), text)
+    // Write a sibling then rename over: a plain write truncates first, so a
+    // full disk or a crash mid-write left an empty metadata.toml and a
+    // session nothing could open (#268). The rename is atomic.
+    let tmp = dir.join(format!(".metadata.toml.{}.tmp", std::process::id()));
+    let res = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, metadata_path(dir)));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 pub fn events_path(dir: &Path) -> PathBuf {

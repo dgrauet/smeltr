@@ -162,6 +162,26 @@ fn run_enospc_then_free(chunked: bool) {
     assert_eq!(got, acked, "same events, same order");
 }
 
+/// `write_metadata` on a full disk must leave the previous metadata intact:
+/// a plain `fs::write` truncates first, and the session then had no
+/// readable metadata at all.
+#[test]
+#[serial_test::serial]
+fn metadata_survives_a_failed_rewrite_on_a_full_disk() {
+    let Some(vol) = TinyVolume::new() else { return };
+    std::env::set_var("SMELTR_HOME", vol.path());
+    let meta = SessionMetadata::now_starting(SessionId::new());
+    let w = SessionWriter::create(meta.clone()).unwrap();
+    let dir = w.dir().to_path_buf();
+    drop(w);
+    let _filler = vol.fill();
+    let mut bigger = meta.clone();
+    bigger.argv = vec!["x".repeat(64 * 1024)];
+    assert!(smeltr_core::session::write_metadata(&dir, &bigger).is_err());
+    let read = smeltr_core::reader::read_metadata(&dir).expect("old metadata still readable");
+    assert_eq!(read.session_id, meta.session_id);
+}
+
 #[test]
 #[serial_test::serial]
 fn legacy_writer_survives_enospc_then_free() {

@@ -601,6 +601,89 @@ mod tests {
         assert_eq!(crate::reader::read_events(&dir).unwrap().len(), 3);
     }
 
+    /// #268: one huge event makes a chunk over the old 512 KiB scan bound.
+    /// The recovery scan (no footer: daemon killed) dropped that chunk and
+    /// every chunk after it. Writer and scanner must agree on the bound.
+    #[test]
+    #[serial]
+    fn huge_event_chunk_is_recovered_by_the_scan() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let mut w = SessionWriter::create_with_format(meta, true).unwrap();
+        let dir = w.dir().to_path_buf();
+        // ~1.5 MB of hex from a xorshift: compresses to ~750 KB at best.
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let big: String = (0..96 * 1024)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                format!("{x:016x}")
+            })
+            .collect();
+        w.write_event(&ev(0, Source::Mark)).unwrap();
+        let mut huge = ev(1, Source::Mark);
+        huge.payload = crate::event::Payload::Mark {
+            label: big,
+            fields: Default::default(),
+        };
+        w.write_event(&huge).unwrap();
+        w.flush().unwrap();
+        for i in 2..5u64 {
+            w.write_event(&ev(i, Source::Mark)).unwrap();
+        }
+        w.flush().unwrap();
+        drop(w); // no footer: the scan path
+        let seqs: Vec<u64> = crate::reader::read_events(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// Even with a configured byte threshold far above it, no chunk exceeds
+    /// what the scan accepts.
+    #[test]
+    #[serial]
+    fn chunks_never_exceed_the_scan_bound() {
+        let _home = temp_home();
+        let meta = SessionMetadata::now_starting(SessionId::new());
+        let cfg = crate::chunked::ChunkConfig {
+            max_events: 1_000_000,
+            max_bytes: 1 << 40,
+            flush_min_bytes: 0,
+        };
+        let mut w = SessionWriter::create_with_chunk_config(meta, Some(cfg)).unwrap();
+        let dir = w.dir().to_path_buf();
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for i in 0..24u64 {
+            // 1 MiB of printable noise: barely compressible.
+            let label: String = (0..1 << 20)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    char::from(b' ' + (x % 95) as u8)
+                })
+                .collect();
+            let mut e = ev(i, Source::Mark);
+            e.payload = crate::event::Payload::Mark {
+                label,
+                fields: Default::default(),
+            };
+            w.write_event(&e).unwrap();
+        }
+        w.finalize(Some(0), "end".into()).unwrap();
+        let mut f = std::fs::File::open(crate::session::events_path_zst(&dir)).unwrap();
+        let entries = crate::chunked::read_footer(&mut f).unwrap().unwrap();
+        assert!(entries.len() >= 2);
+        for e in &entries {
+            assert!(u64::from(e.comp_len) <= crate::chunked::MAX_CHUNK_BYTES);
+        }
+        assert_eq!(crate::reader::read_events(&dir).unwrap().len(), 24);
+    }
+
     #[test]
     #[serial]
     fn chunked_flush_seals_so_reader_sees_events_before_finalize() {

@@ -50,7 +50,13 @@ pub const CHUNK_BYTES: u64 = 256 * 1024;
 /// lost every event of a short chunked run (#268). The cost is at most two
 /// small chunks per second on a quiet session.
 pub const FLUSH_MIN_BYTES: u64 = 0;
-pub const MAX_CHUNK_BYTES: u64 = 512 * 1024; // scan sanity bound
+/// Largest compressed chunk the writer produces, and so the largest the
+/// recovery scan accepts. The writer seals before an event would push a
+/// chunk past `min(max_bytes, MAX_FRAME_BYTES)` uncompressed, so a chunk is
+/// at most one maximal frame (16 MiB + 4); zstd's worst case adds < 0.5 %.
+/// It was 512 KiB while one large event could make a bigger chunk, and the
+/// scan then dropped that chunk and every later one (#268).
+pub const MAX_CHUNK_BYTES: u64 = 17 * 1024 * 1024;
 pub const MAX_CHUNKS: usize = 1_048_576;
 
 /// Seal thresholds (injectable so tests can use tiny values).
