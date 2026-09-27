@@ -186,9 +186,10 @@ rationale behind PSO-signature naming and stage-boundary timing.
 #### MCP equivalents
 
 - `get_inference_breakdown` — returns the `ModuleBreakdown` tree
-  including ops. Accepts `max_depth` (default 6), `top_n` (children per
-  node, default 20), `min_gpu_ns`, `include_ops`, `top_ops_per_leaf`
-  (default 5); `elided_nodes` counts what the bounds cut.
+  including ops. Accepts `max_depth` (default 6), `top_n` (nodes kept over
+  the whole tree, heaviest first, like `smeltr breakdown --top`; default
+  20), `min_gpu_ns`, `include_ops`, `top_ops_per_leaf` (default 5);
+  `elided_nodes` counts what the bounds cut.
 - `get_op_summary` — flat list of kernel signatures with GPU time and
   percentage, aggregated across all module leaves.
 

@@ -1,9 +1,9 @@
 //! `get_op_summary` MCP tool: flat cross-module aggregation of GPU ops.
 
+use crate::session_cache::events as read_events;
 use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::compute_breakdown;
-use smeltr_core::reader::read_events;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct Params {
@@ -56,8 +56,8 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let events = read_events(&dir)?;
     let degraded =
         smeltr_analyzer::degraded_advice(smeltr_analyzer::diff::sampling_disable_episodes(&events));
-    let root =
-        compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
+    let root = compute_breakdown(events.iter().cloned())
+        .map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
     let rows = smeltr_analyzer::aggregate_ops_flat(&root, group_by);
     let total: u64 = rows.iter().map(|r| r.gpu_ns).sum::<u64>().max(1);

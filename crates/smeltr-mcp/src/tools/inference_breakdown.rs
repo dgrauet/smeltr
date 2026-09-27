@@ -1,5 +1,6 @@
 //! `get_inference_breakdown` MCP tool.
 
+use crate::session_cache::events as read_events;
 use crate::types::{bounded_count, resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::{
@@ -7,8 +8,7 @@ use smeltr_analyzer::{
     OpGroupBy,
 };
 use smeltr_core::event::FieldValue;
-use smeltr_core::reader::read_events;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {
@@ -16,7 +16,9 @@ pub struct Params {
     /// Tree depth kept below the root (default 6, like `smeltr breakdown`;
     /// 1..=64).
     pub max_depth: Option<u16>,
-    /// Children kept per node, largest GPU time first (default 20; 1..=200).
+    /// Nodes kept in the whole tree, largest GPU time first, like the rows
+    /// of `smeltr breakdown --top` (default 20; 1..=200). A kept node's
+    /// ancestors are always kept.
     pub top_n: Option<u32>,
     pub min_gpu_ns: Option<u64>,
     #[serde(default = "default_include_ops")]
@@ -118,8 +120,8 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         .as_ref()
         .map(|g| g.advice().to_string());
     let degraded = notices.degraded_advice();
-    let mut root =
-        compute_breakdown(events).map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
+    let mut root = compute_breakdown(events.iter().cloned())
+        .map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
     if let Some(raw_filter) = params.field_filter.as_ref() {
         if !raw_filter.is_empty() {
@@ -140,7 +142,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     }
 
     let min_gpu_ns = params.min_gpu_ns.unwrap_or(0);
-    let elided_nodes = prune(&mut root, 0, max_depth, top_n, min_gpu_ns);
+    let elided_nodes = prune(&mut root, max_depth, top_n, min_gpu_ns);
 
     apply_op_group_by(&mut root, group_by);
 
@@ -170,35 +172,59 @@ fn subtree_size(n: &ModuleBreakdown) -> u64 {
     1 + n.children.iter().map(subtree_size).sum::<u64>()
 }
 
-/// Keeps `top_n` children per node (largest `gpu_ns_subtree` first, at or
-/// above `min_gpu_ns`) down to `max_depth`; returns how many nodes it cut.
-fn prune(
-    n: &mut ModuleBreakdown,
-    depth: u16,
-    max_depth: u16,
-    top_n: usize,
-    min_gpu_ns: u64,
-) -> u64 {
-    let mut elided = 0;
-    if depth >= max_depth {
-        elided += n.children.iter().map(subtree_size).sum::<u64>();
-        n.children.clear();
-        return elided;
+/// Candidate nodes as (GPU time desc, depth, preorder id).
+type Ranked = Vec<(std::cmp::Reverse<u64>, u16, usize)>;
+
+/// Keeps the `top_n` nodes of the whole tree with the largest
+/// `gpu_ns_subtree` (at most `max_depth` below the root, at or above
+/// `min_gpu_ns`), like the rows of `smeltr breakdown --top`; children end up
+/// sorted by GPU time. Returns how many nodes it cut.
+///
+/// Ranked by (GPU time desc, depth asc), a node always comes after its
+/// ancestors — their subtree holds its time — so what is kept stays a tree.
+/// `top_n` used to apply per node: its default of 20 still let a real
+/// session's tree reach 392k characters at depth 6 (#271).
+fn prune(root: &mut ModuleBreakdown, max_depth: u16, top_n: usize, min_gpu_ns: u64) -> u64 {
+    fn sort(n: &mut ModuleBreakdown) {
+        n.children
+            .sort_by_key(|c| std::cmp::Reverse(c.gpu_ns_subtree));
+        n.children.iter_mut().for_each(sort);
     }
-    n.children
-        .sort_by_key(|c| std::cmp::Reverse(c.gpu_ns_subtree));
-    let keep = n
-        .children
-        .iter()
-        .take(top_n)
-        .take_while(|c| c.gpu_ns_subtree >= min_gpu_ns)
-        .count();
-    elided += n.children[keep..].iter().map(subtree_size).sum::<u64>();
-    n.children.truncate(keep);
-    for c in &mut n.children {
-        elided += prune(c, depth + 1, max_depth, top_n, min_gpu_ns);
+    fn rank(
+        n: &ModuleBreakdown,
+        depth: u16,
+        limits: (u16, u64),
+        next: &mut usize,
+        out: &mut Ranked,
+    ) {
+        for c in &n.children {
+            let id = *next;
+            *next += 1;
+            if depth < limits.0 && c.gpu_ns_subtree >= limits.1 {
+                out.push((std::cmp::Reverse(c.gpu_ns_subtree), depth + 1, id));
+            }
+            rank(c, depth + 1, limits, next, out);
+        }
     }
-    elided
+    fn retain(n: &mut ModuleBreakdown, next: &mut usize, keep: &HashSet<usize>) {
+        for mut c in std::mem::take(&mut n.children) {
+            if keep.contains(next) {
+                *next += 1;
+                retain(&mut c, next, keep);
+                n.children.push(c);
+            } else {
+                *next += subtree_size(&c) as usize;
+            }
+        }
+    }
+    sort(root);
+    let mut ranked = Ranked::new();
+    rank(root, 0, (max_depth, min_gpu_ns), &mut 0, &mut ranked);
+    ranked.sort_unstable();
+    let keep: HashSet<usize> = ranked.iter().take(top_n).map(|r| r.2).collect();
+    let total = subtree_size(root) - 1;
+    retain(root, &mut 0, &keep);
+    total - keep.len() as u64
 }
 
 #[cfg(test)]
@@ -261,6 +287,66 @@ mod tests {
         }
         w.finalize(Some(0), "x".into()).unwrap();
         id
+    }
+
+    fn node(name: &str, gpu: u64, children: Vec<ModuleBreakdown>) -> ModuleBreakdown {
+        ModuleBreakdown {
+            qualname: name.into(),
+            class_name: name.into(),
+            calls: 1,
+            gpu_ns_self: 0,
+            gpu_ns_subtree: gpu,
+            eval_count: 0,
+            cb_count: 0,
+            children,
+            ops: vec![],
+            diagnostics: None,
+            fields: Default::default(),
+        }
+    }
+
+    fn names(n: &ModuleBreakdown) -> Vec<String> {
+        let mut out = vec![];
+        for c in &n.children {
+            out.push(c.qualname.clone());
+            out.extend(names(c));
+        }
+        out
+    }
+
+    /// #271: `top_n` counts nodes over the whole tree, the largest GPU
+    /// time first, like the rows of `smeltr breakdown --top`: per node, the
+    /// default (20) still let a real session's tree reach 392k characters
+    /// at depth 6. A kept node's ancestors are always kept.
+    #[test]
+    fn top_n_keeps_the_heaviest_nodes_of_the_whole_tree() {
+        let mut root = node(
+            "<root>",
+            200,
+            vec![
+                node("b", 50, vec![node("b1", 49, vec![])]),
+                node(
+                    "a",
+                    150,
+                    vec![
+                        node("a2", 40, vec![]),
+                        node("a1", 100, vec![node("a11", 90, vec![])]),
+                    ],
+                ),
+                node("c", 10, vec![]),
+            ],
+        );
+        let elided = prune(&mut root, 6, 4, 0);
+        assert_eq!(names(&root), ["a", "a1", "a11", "b"]);
+        assert_eq!(elided, 3, "a2, b1 and c");
+
+        // Depth and min_gpu_ns cut before the ranking.
+        let mut shallow = root.clone();
+        assert_eq!(prune(&mut shallow, 1, 200, 0), 2);
+        assert_eq!(names(&shallow), ["a", "b"]);
+        let mut heavy = root.clone();
+        prune(&mut heavy, 6, 200, 95);
+        assert_eq!(names(&heavy), ["a", "a1"]);
     }
 
     fn tree_depth(n: &ModuleBreakdown) -> usize {

@@ -172,7 +172,7 @@ pub fn read_session_resource(uri: &str) -> Result<serde_json::Value, ToolError> 
     match view {
         None => {
             let metadata = smeltr_core::reader::read_metadata(&dir).ok();
-            let events = smeltr_core::reader::read_events(&dir)?;
+            let events = crate::session_cache::events(&dir)?;
             Ok(json!({ "metadata": metadata, "events": events }))
         }
         Some("metadata") => {

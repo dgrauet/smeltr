@@ -2,6 +2,7 @@
 
 pub mod budget;
 pub mod server;
+pub mod session_cache;
 pub mod tools;
 pub mod types;
 

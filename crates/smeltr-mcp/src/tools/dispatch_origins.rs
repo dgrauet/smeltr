@@ -1,9 +1,9 @@
 //! `get_dispatch_origins` MCP tool: per-(kind, file:line) GPU time attribution.
 
+use crate::session_cache::events as read_events;
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::dispatch_origins::{compute_dispatch_origins, DispatchOrigin};
-use smeltr_core::reader::read_events;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {

@@ -91,9 +91,11 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     })
 }
 
-fn stats(arg: &str) -> Result<(SessionStats, Vec<Event>, std::path::PathBuf), ToolError> {
+type Loaded = (SessionStats, std::sync::Arc<Vec<Event>>, std::path::PathBuf);
+
+fn stats(arg: &str) -> Result<Loaded, ToolError> {
     let dir = resolve_session(arg)?;
-    let events = smeltr_core::reader::read_events(&dir)?;
+    let events = crate::session_cache::events(&dir)?;
     let stats = stats_from_events(&dir, &events);
     Ok((stats, events, dir))
 }

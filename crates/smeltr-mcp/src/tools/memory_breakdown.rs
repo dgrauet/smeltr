@@ -1,9 +1,9 @@
 //! `get_memory_breakdown` MCP tool: per-scope device + heap memory.
 
+use crate::session_cache::events as read_events;
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::memory::{HeapMemory, ScopeMemory};
-use smeltr_core::reader::read_events;
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Params {

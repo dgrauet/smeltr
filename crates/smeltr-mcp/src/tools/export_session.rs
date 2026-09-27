@@ -1,9 +1,10 @@
 //! `export_session` MCP tool: write a session export to disk and return the path.
 
+use crate::session_cache::events as read_events;
 use crate::types::{resolve_session, ToolError};
 use serde::{Deserialize, Serialize};
 use smeltr_analyzer::export::{to_chrome_trace, to_json_raw};
-use smeltr_core::reader::{read_events, read_metadata};
+use smeltr_core::reader::read_metadata;
 use smeltr_core::session::sessions_root;
 use std::io::Write;
 use std::path::{Path, PathBuf};
