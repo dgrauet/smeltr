@@ -258,8 +258,15 @@ async fn handle_msg(
             source,
             pid,
             scope_token,
+            at_uptime_raw_ns,
             payload,
-        } => match router.append(source, pid, scope_token.as_deref(), payload) {
+        } => match router.append_stamped(
+            source,
+            pid,
+            scope_token.as_deref(),
+            at_uptime_raw_ns,
+            payload,
+        ) {
             Ok(()) => DaemonToClient::Ack,
             Err(e) => DaemonToClient::Error {
                 message: e.to_string(),
@@ -615,6 +622,77 @@ mod tests {
         assert_eq!(reply(anon), ambient.id().short());
     }
 
+    /// #266: the Python sidecar queues its events and sends them from a
+    /// background thread, so they reach the daemon after they happened. An
+    /// Emit carrying the client's `CLOCK_UPTIME_RAW` stamp is dated from
+    /// it, and still routed by its scope token.
+    #[tokio::test]
+    #[serial]
+    async fn emit_with_a_client_stamp_is_dated_when_it_happened() {
+        let _home = temp_env();
+        let ambient = Arc::new(ActiveSession::open_new().unwrap());
+        let bus = Bus::new();
+        let mut rx = bus.subscribe();
+        let router = Arc::new(SessionRouter::new(ambient, None, Some(bus.clone())));
+        let sink = Arc::new(DaemonSink {
+            router: router.clone(),
+        });
+        let probe_runtime = Arc::new(ProbeRuntime::start_global(sink));
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let scoped = router
+            .attach_scoped(
+                4242,
+                vec!["x".into()],
+                Some("tok".into()),
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+        let emit = |label: &str, at_uptime_raw_ns: Option<u64>| ClientToDaemon::Emit {
+            source: Source::PythonSidecar,
+            // Not the scoped pid: only the token can route it there.
+            pid: Some(1),
+            scope_token: Some("tok".into()),
+            at_uptime_raw_ns,
+            payload: Payload::Mark {
+                label: label.into(),
+                fields: Default::default(),
+            },
+        };
+        let stamp = smeltr_core::clock::uptime_raw_ns() - 20_000_000;
+        let a = handle_msg(
+            emit("stamped", Some(stamp)),
+            &router,
+            &bus,
+            &probe_runtime,
+            &tx,
+        )
+        .await;
+        let b = handle_msg(emit("unstamped", None), &router, &bus, &probe_runtime, &tx).await;
+        assert!(matches!(a, DaemonToClient::Ack), "{a:?}");
+        assert!(matches!(b, DaemonToClient::Ack), "{b:?}");
+
+        let mut marks = std::collections::HashMap::new();
+        while marks.len() < 2 {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("both marks published by the scoped session")
+                .unwrap();
+            if let Payload::Mark { label, .. } = &ev.payload {
+                assert_eq!(ev.session_id, scoped.0, "routed by scope token");
+                marks.insert(label.clone(), ev.ts_mono_ns);
+            }
+        }
+        let lag = marks["unstamped"] - marks["stamped"];
+        assert!((20_000_000..30_000_000).contains(&lag), "lag {lag}");
+
+        let _ = tx.send(true);
+        probe_runtime.shutdown().await;
+    }
+
     #[tokio::test]
     #[serial]
     async fn attach_reports_a_session_that_failed_to_open() {
@@ -730,6 +808,7 @@ mod tests {
                 source: Source::Mark,
                 pid: None,
                 scope_token: None,
+                at_uptime_raw_ns: None,
                 payload: Payload::Mark {
                     label: "from-test".into(),
                     fields: Default::default(),

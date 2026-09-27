@@ -9,7 +9,8 @@ from smeltr._client import ClientError
 def test_attach_sends_hello_payload(fake_daemon):
     smeltr.attach(poll_hz=0)
     try:
-        assert fake_daemon.received, "no events received"
+        # Sent by the background sender: delivery trails attach().
+        assert fake_daemon.wait_for(lambda ms: len(ms) > 0), "no events received"
         first = fake_daemon.received[0]
         p = first["payload"]
         assert p["kind"] == "PythonSidecarHello"
@@ -102,3 +103,31 @@ def test_mark_survives_a_daemon_error(fake_daemon):
         smeltr.mark("after the daemon went away")
     finally:
         smeltr.detach()
+
+
+def test_session_without_attach_is_a_no_op_like_scope_and_mark():
+    """#266: session() raised RuntimeError when not attached while scope()
+    and mark() are no-ops; the same program must run with or without
+    `smeltr record`."""
+    import smeltr._api as api
+
+    assert api._client is None
+    ran = []
+    with smeltr.session("outside record"):
+        ran.append(True)
+    assert ran == [True]
+
+
+def test_unprintable_field_value_never_raises():
+    class Unprintable:
+        def __str__(self):
+            raise RuntimeError("no str for you")
+
+    from smeltr._modules import _coerce_fields
+
+    out = _coerce_fields({"ok": 1, "bad": Unprintable()})
+    assert out["ok"] == 1
+    assert out["bad"] == "<unprintable Unprintable>"
+    smeltr.mark("outside record", bad=Unprintable())
+    with smeltr.scope("s", bad=Unprintable()):
+        pass

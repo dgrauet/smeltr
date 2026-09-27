@@ -39,3 +39,28 @@ def test_capture_caps_at_requested_depth():
 @patch.dict(os.environ, {"SMELTR_STACK_CAPTURE": "0"})
 def test_capture_disabled_when_env_is_not_one():
     assert _capture_stack() == []
+
+
+@patch.dict(os.environ, {"SMELTR_STACK_CAPTURE": "1"})
+def test_capture_resolves_each_filename_once():
+    """os.path.realpath per frame per eval cost ~50-70 µs per mx.eval
+    (#266): a code object's file does not move, resolve it once."""
+    import smeltr._mlx as m
+
+    real = os.path.realpath
+    calls: list[str] = []
+
+    def counting(path, *a, **k):
+        calls.append(path)
+        return real(path, *a, **k)
+
+    def helper():
+        return _capture_stack(depth=3)
+
+    with patch.object(m.os.path, "realpath", counting):
+        first = helper()
+        n_first = len(calls)
+        for _ in range(50):
+            again = helper()
+    assert [f["funcname"] for f in again] == [f["funcname"] for f in first]
+    assert len(calls) == n_first, f"realpath re-run on every capture: {len(calls)} calls"

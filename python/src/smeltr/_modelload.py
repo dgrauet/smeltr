@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import time
 import weakref
@@ -30,6 +29,8 @@ class _WeakRefableDict(dict):  # type: ignore[type-arg]
 
 
 def _compute_sha8(canonical_path: str) -> str:
+    import hashlib  # ~6 ms to import: only when a model loads
+
     return hashlib.sha256(canonical_path.encode()).hexdigest()[:8]
 
 

@@ -13,6 +13,7 @@ pub async fn run(label: String, session: Option<&str>) -> anyhow::Result<()> {
             source: Source::Mark,
             pid: Some(std::process::id()),
             scope_token,
+            at_uptime_raw_ns: None,
             payload: Payload::Mark {
                 label,
                 fields: Default::default(),

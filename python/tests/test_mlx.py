@@ -23,6 +23,9 @@ def test_track_emits_array_alive(fake_daemon):
     try:
         a = _FakeArray(64, "float32", (4, 4))
         _mlx.track(a, stream="gpu")
+        assert fake_daemon.wait_for(
+            lambda ms: any(m["payload"]["kind"] == "MlxArrayAlive" for m in ms)
+        )
         alives = [m for m in fake_daemon.received if m["payload"]["kind"] == "MlxArrayAlive"]
         assert len(alives) == 1
         p = alives[0]["payload"]
@@ -41,6 +44,9 @@ def test_array_freed_on_gc(fake_daemon):
         _mlx.track(a, stream="gpu")
         del a
         gc.collect()
+        assert fake_daemon.wait_for(
+            lambda ms: any(m["payload"]["kind"] == "MlxArrayFreed" for m in ms)
+        )
         time.sleep(0.05)
         freed = [m for m in fake_daemon.received if m["payload"]["kind"] == "MlxArrayFreed"]
         assert len(freed) == 1
@@ -336,26 +342,27 @@ def test_snapshot_streams_falls_back_to_observed_when_mlx_missing(fake_daemon, m
     assert "gpu" in streams
 
 
-def test_detect_mlx_version_uses_importlib_metadata(monkeypatch):
-    """MLX 0.30+ removed __version__; we must use importlib.metadata."""
-    import importlib.metadata as _md
+def test_detect_mlx_version_reads_the_dist_info(monkeypatch, tmp_path):
+    """MLX 0.30+ removed __version__. importlib.metadata costs ~40 ms and
+    importing mlx loads Metal, in every process autoload attaches to (#266):
+    read the installed package's METADATA instead."""
     import sys as _sys
-    import types
 
-    # Build a minimal mlx module with NO __version__.
-    fake_root = types.ModuleType("mlx")
-    fake_root.__file__ = "/fake/mlx/__init__.py"
-    monkeypatch.setitem(_sys.modules, "mlx", fake_root)
-
-    monkeypatch.setattr(
-        _md,
-        "version",
-        lambda name: "0.31.2" if name == "mlx" else "?",
-    )
+    dist = tmp_path / "mlx-0.31.2.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: mlx\nVersion: 0.31.2\n\nbody\n")
+    # A look-alike package must not be mistaken for mlx.
+    other = tmp_path / "mlx-lm-9.9.9.dist-info"
+    other.mkdir()
+    (other / "METADATA").write_text("Metadata-Version: 2.1\nName: mlx-lm\nVersion: 9.9.9\n")
+    monkeypatch.delitem(_sys.modules, "mlx.core", raising=False)
+    monkeypatch.setattr(_sys, "path", [str(tmp_path)])
 
     from smeltr._api import _detect_mlx_version
 
     assert _detect_mlx_version() == "0.31.2"
+    monkeypatch.setattr(_sys, "path", [str(tmp_path / "nowhere")])
+    assert _detect_mlx_version() is None
 
 
 def test_memory_poll_prefers_modern_mlx_api(fake_daemon, monkeypatch):

@@ -5,18 +5,19 @@ that the mx.eval hook can snapshot into MlxEvalEntered.module_stack.
 
 from __future__ import annotations
 
-import logging
+import functools
+import itertools
 import os
 import threading
 from typing import Any
 
 from smeltr._api import _emit as _api_emit
-
-_log = logging.getLogger("smeltr.modules")
+from smeltr._log import warning
 
 _tls = threading.local()
-_call_counter = 0
-_call_counter_lock = threading.Lock()
+# itertools.count: next() is atomic under the GIL, so ids need no lock — a
+# lock another thread holds at fork() stays held in the child forever (#266).
+_call_counter = itertools.count(1)
 _installed = False
 _install_lock = threading.Lock()
 
@@ -25,9 +26,6 @@ _wrapped_classes: list[type] = []
 # Dedicated lock for _wrapped_classes mutations (avoids reentrant deadlock with
 # _install_lock, which is held for the full duration of install()).
 _wrapped_classes_lock = threading.RLock()
-
-# Saved at _install_base_sentinel() time; used as fallback in base_sentinel.
-_original_module_call: Any = None
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -40,10 +38,7 @@ def _emit(payload: dict[str, Any]) -> None:
 
 
 def _next_call_id() -> int:
-    global _call_counter
-    with _call_counter_lock:
-        _call_counter += 1
-        return _call_counter
+    return next(_call_counter)
 
 
 def _stack() -> list[dict[str, Any]]:
@@ -100,8 +95,11 @@ def _coerce_fields(fields: dict[str, Any]) -> dict[str, Any]:
     for k, v in fields.items():
         if isinstance(v, (bool, int, float, str)):
             out[k] = v
-        else:
+            continue
+        try:
             out[k] = str(v)
+        except Exception:
+            out[k] = f"<unprintable {type(v).__name__}>"
     return out
 
 
@@ -123,8 +121,41 @@ def _pop(expected_cid: int) -> None:
 
 def _qualname_for(module: Any) -> str:
     cls = type(module).__name__
-    label = getattr(module, "name", None) or cls
-    return cls if label == cls else f"{cls}:{label}"
+    # Only a non-empty str names the instance: `name` is a user attribute
+    # like any other and may hold an mx.array, whose bool() raises (#266).
+    label = getattr(module, "name", None)
+    if isinstance(label, str) and label and label != cls:
+        return f"{cls}:{label}"
+    return cls
+
+
+def _enter_module(module: Any) -> int | None:
+    """Push a frame for a module call. Returns its call id, or None when
+    nothing was pushed. Never raises: this runs inside the user's forward.
+
+    A `super().__call__(...)` from a wrapped subclass reaches the parent's
+    wrapper with the same instance already on top of the stack: that is one
+    call, not two, so it is not pushed again.
+    """
+    try:
+        stack = _stack()
+        obj_id = id(module)
+        if stack and stack[-1].get("obj_id") == obj_id:
+            return None
+        cid = _push(_qualname_for(module), type(module).__name__, id_of=obj_id)
+        stack[-1]["obj_id"] = obj_id
+        return cid
+    except Exception:
+        return None
+
+
+def _exit_module(cid: int | None) -> None:
+    if cid is None:
+        return
+    try:
+        _pop(cid)
+    except Exception:
+        pass
 
 
 def _wrap_class(cls: type) -> None:
@@ -135,16 +166,16 @@ def _wrap_class(cls: type) -> None:
     if getattr(original, "_smeltr_wrapped", False):
         return
 
+    # functools.wraps keeps the name, docstring and `__wrapped__`, so
+    # `inspect.signature(model.__call__)` still reports the user's
+    # parameters: mlx_lm probes it to decide which inputs a model takes.
+    @functools.wraps(original)
     def wrapped(self, *args, **kwargs):
-        cid = _push(
-            _qualname_for(self),
-            type(self).__name__,
-            id_of=id(self),
-        )
+        cid = _enter_module(self)
         try:
             return original(self, *args, **kwargs)
         finally:
-            _pop(cid)
+            _exit_module(cid)
 
     wrapped._smeltr_wrapped = True  # type: ignore[attr-defined]
     wrapped._smeltr_original = original  # type: ignore[attr-defined]
@@ -174,7 +205,7 @@ def install() -> None:
         try:
             import mlx.nn as nn
         except ImportError:
-            _log.warning("mlx.nn not importable - module tracking disabled")
+            warning("smeltr.modules", "mlx.nn not importable - module tracking disabled")
             return
 
         # Wrap all currently known subclasses.
@@ -183,63 +214,12 @@ def install() -> None:
         # Install __init_subclass__ hook so future subclasses are wrapped too.
         _install_subclass_hook(nn.Module)
 
-        # Install a sentinel __call__ on the base class so that:
-        #   (a) getattr(nn.Module.__call__, "_smeltr_wrapped", False) is True, and
-        #   (b) classes with no own __call__ are still intercepted.
-        _install_base_sentinel(nn.Module)
+        # nn.Module itself defines no __call__: a subclass without one must
+        # stay non-callable, and one inheriting a wrapped __call__ is already
+        # tracked through it. Wrap it only if a future MLX adds one.
+        _wrap_class(nn.Module)
 
         _installed = True
-
-
-def _install_base_sentinel(base: type) -> None:
-    """Install a Python __call__ on the base Module class as a sentinel.
-
-    This serves two purposes:
-    1. Makes ``getattr(nn.Module.__call__, "_smeltr_wrapped", False)`` return True
-       (required by the idempotency test).
-    2. Intercepts calls on subclasses that do NOT define their own __call__.
-    """
-    global _original_module_call
-    # Save the original __call__ from the base class dict (the C method-wrapper)
-    # before we overwrite it.  Used as a fallback in base_sentinel when no
-    # Python __call__ is found in the MRO.
-    _original_module_call = base.__dict__.get("__call__")
-
-    # There is no Python __call__ on nn.Module itself (it's a C method-wrapper
-    # from dict/object), so we define one.  Subclasses with their own __call__
-    # already have been wrapped by _wrap_all_existing; this covers the rest.
-    def base_sentinel(self, *args, **kwargs):  # pragma: no cover
-        cid = _push(
-            _qualname_for(self),
-            type(self).__name__,
-            id_of=id(self),
-        )
-        try:
-            # Walk the MRO to find a real __call__.  Skip nn.Module itself
-            # (that's us), skip any class that only has base_sentinel or a
-            # smeltr-wrapped shim (to avoid infinite recursion).
-            for cls in type(self).__mro__:
-                if cls is base:
-                    continue
-                call = cls.__dict__.get("__call__")
-                if call is None:
-                    continue
-                if call is base_sentinel:
-                    continue
-                # A smeltr-wrapped __call__ has already been handled by
-                # _wrap_class; call it directly so it can do its own tracking.
-                return call(self, *args, **kwargs)
-            # Fallback: call the original C-level __call__ saved at install time.
-            if _original_module_call is not None:
-                return _original_module_call(self, *args, **kwargs)
-            raise AttributeError(f"{type(self).__name__}: no __call__ found in MRO")
-        finally:
-            _pop(cid)
-
-    base_sentinel._smeltr_wrapped = True  # type: ignore[attr-defined]
-    base.__call__ = base_sentinel  # type: ignore[assignment]
-    with _wrapped_classes_lock:
-        _wrapped_classes.append(base)
 
 
 def _install_subclass_hook(base: type) -> None:
@@ -260,7 +240,7 @@ def _install_subclass_hook(base: type) -> None:
 
 def uninstall() -> None:
     """Restore the original mlx.nn.Module.__call__. Safe if not installed."""
-    global _installed, _wrapped_classes, _original_module_call
+    global _installed, _wrapped_classes
     with _install_lock:
         if not _installed:
             return
@@ -289,8 +269,6 @@ def uninstall() -> None:
                     except AttributeError:
                         pass
 
-        _original_module_call = None
-
         # Remove __init_subclass__ hook.
         isc = nn.Module.__dict__.get("__init_subclass__")
         if isc is not None and hasattr(isc, "_smeltr_original_isc"):
@@ -310,6 +288,16 @@ def _reset_for_tests() -> None:
     """Reset all module-level state. For tests only."""
     global _call_counter
     uninstall()
-    with _call_counter_lock:
-        _call_counter = 0
+    _call_counter = itertools.count(1)
     _tls.stack = []
+
+
+def _after_fork_in_child() -> None:
+    # A lock held by another thread at fork() would stay held in the child.
+    global _install_lock, _wrapped_classes_lock
+    _install_lock = threading.Lock()
+    _wrapped_classes_lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)

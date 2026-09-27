@@ -1,1 +1,1 @@
-import smeltr._autoload
+import os; os.environ.get("SMELTR_AUTOLOAD") == "1" and __import__("smeltr._autoload")

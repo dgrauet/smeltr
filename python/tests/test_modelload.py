@@ -15,6 +15,10 @@ import smeltr
 from smeltr import _modelload
 
 
+def _count(msgs, kind: str) -> int:
+    return sum(1 for m in msgs if m["payload"]["kind"] == kind)
+
+
 @pytest.fixture(autouse=True)
 def _reset_modelload():
     _modelload._undecorate_for_tests()
@@ -255,6 +259,7 @@ def test_mx_load_emits_unload_when_result_dropped(monkeypatch, fake_daemon, tmp_
         _modelload.decorate_model_loads()
         result = mx_core_mod.load(str(model_file))
         # Verify ModelLoad was emitted.
+        assert fake_daemon.wait_for(lambda ms: _count(ms, "ModelLoad") >= 1)
         loads = [m for m in fake_daemon.received if m["payload"]["kind"] == "ModelLoad"]
         assert len(loads) == 1
 
@@ -262,6 +267,7 @@ def test_mx_load_emits_unload_when_result_dropped(monkeypatch, fake_daemon, tmp_
         del result
         gc.collect()
 
+        assert fake_daemon.wait_for(lambda ms: _count(ms, "ModelUnload") >= 1)
         unloads = [m for m in fake_daemon.received if m["payload"]["kind"] == "ModelUnload"]
         assert len(unloads) == 1, f"expected 1 ModelUnload, got {len(unloads)}"
         p = unloads[0]["payload"]
@@ -297,12 +303,14 @@ def test_safetensors_safe_open_emits_unload_after_exit(monkeypatch, fake_daemon,
     try:
         _modelload.decorate_model_loads()
         result = st_mod.safe_open(str(model_file), framework="pt")
+        assert fake_daemon.wait_for(lambda ms: _count(ms, "ModelLoad") >= 1)
         loads = [m for m in fake_daemon.received if m["payload"]["kind"] == "ModelLoad"]
         assert len(loads) == 1
 
         del result
         gc.collect()
 
+        assert fake_daemon.wait_for(lambda ms: _count(ms, "ModelUnload") >= 1)
         unloads = [m for m in fake_daemon.received if m["payload"]["kind"] == "ModelUnload"]
         assert len(unloads) == 1, f"expected 1 ModelUnload, got {len(unloads)}"
         p = unloads[0]["payload"]

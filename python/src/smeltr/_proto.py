@@ -17,6 +17,7 @@ def emit_msg(
     payload: dict[str, Any],
     *,
     scope_token: str | None = None,
+    at_uptime_raw_ns: int | None = None,
 ) -> dict[str, Any]:
     msg: dict[str, Any] = {
         "op": "Emit",
@@ -26,6 +27,10 @@ def emit_msg(
     }
     if scope_token is not None:
         msg["scope_token"] = scope_token
+    if at_uptime_raw_ns is not None:
+        # When the event happened, on the daemon's MonoClock raw clock
+        # (CLOCK_UPTIME_RAW): events are queued and sent later (#266).
+        msg["at_uptime_raw_ns"] = at_uptime_raw_ns
     return msg
 
 

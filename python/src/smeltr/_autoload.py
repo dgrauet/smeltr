@@ -1,6 +1,6 @@
 """Auto-attach hook triggered by site.py via smeltr-autoload.pth.
 
-Active only when SMELTR_AUTOLOAD=1 is in the environment. The `smeltr record`
+Imported only when SMELTR_AUTOLOAD=1 is in the environment. The `smeltr record`
 CLI command sets this variable in the child process it spawns, so user code
 under `smeltr record python script.py` is observed without any modification.
 
@@ -11,10 +11,9 @@ nothing — preserving the rule that observability must never break user code.
 
 from __future__ import annotations
 
-import logging
 import os
 
-_log = logging.getLogger("smeltr.autoload")
+from smeltr._log import warning
 
 
 def _activate() -> None:
@@ -22,15 +21,14 @@ def _activate() -> None:
         return
     try:
         from smeltr._api import attach
-        from smeltr._mlx import decorate_eval
-        from smeltr._modelload import decorate_model_loads
 
-        attach()
-        decorate_eval()
-        decorate_model_loads()
+        # mlx and safetensors are instrumented when the program imports
+        # them: importing them here would load the Metal backend (and torch)
+        # into launchers and helpers that never use them (#266).
+        attach(_autoload=True)
     except Exception as exc:
         # Observability must never break user code.
-        _log.warning("smeltr autoload failed: %s", exc)
+        warning("smeltr.autoload", "smeltr autoload failed: %s", exc)
 
 
 _activate()

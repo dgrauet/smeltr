@@ -74,6 +74,7 @@ fn subscribe_receives_emitted_events() {
                 source: Source::Mark,
                 pid: None,
                 scope_token: None,
+                at_uptime_raw_ns: None,
                 payload: Payload::Mark {
                     label: format!("e-{i}"),
                     fields: Default::default(),

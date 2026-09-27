@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 import threading
@@ -27,6 +28,20 @@ _STACK_CAPTURE_DEPTH = 3  # top N non-smeltr frames
 _SMELTR_PKG_DIR = os.path.realpath(os.path.dirname(os.path.abspath(__file__))) + os.sep
 
 
+# filename -> "is inside the smeltr package". A code object's file does not
+# move while the process runs, and realpath on every frame of every eval
+# cost ~50 Âµs per mx.eval (#266). Bounded by the number of source files.
+_smeltr_file_cache: dict[str, bool] = {}
+
+
+def _is_smeltr_file(filename: str) -> bool:
+    hit = _smeltr_file_cache.get(filename)
+    if hit is None:
+        hit = os.path.realpath(filename).startswith(_SMELTR_PKG_DIR)
+        _smeltr_file_cache[filename] = hit
+    return hit
+
+
 def _stack_capture_enabled() -> bool:
     return os.environ.get("SMELTR_STACK_CAPTURE") == "1"
 
@@ -49,7 +64,7 @@ def _capture_stack(depth: int = _STACK_CAPTURE_DEPTH) -> list[dict]:
         return out
     while frame is not None and len(out) < depth:
         filename = frame.f_code.co_filename
-        if not os.path.realpath(filename).startswith(_SMELTR_PKG_DIR):
+        if not _is_smeltr_file(filename):
             out.append(
                 {
                     "filename": filename,
@@ -142,6 +157,16 @@ def snapshot() -> None:
         pass
 
 
+def _loaded_mlx_core() -> Any | None:
+    """mlx.core if the program imported it, else None.
+
+    Reads never import it: `import mlx.core` loads the Metal backend, and a
+    process that does not use MLX (a launcher under `smeltr record`) must
+    not become a Metal process because of the sidecar (#266).
+    """
+    return sys.modules.get("mlx.core")
+
+
 def _introspect_mlx_streams() -> set[str]:
     """Returns the names of MLX streams discoverable via mlx.core factories.
 
@@ -151,12 +176,11 @@ def _introspect_mlx_streams() -> set[str]:
     per-stream queue depth, so this is purely an enumeration of which
     streams exist.
 
-    Returns an empty set if mlx is not importable or none of the factories
-    exist.
+    Returns an empty set if the program has not imported mlx.core or none
+    of the factories exist.
     """
-    try:
-        import mlx.core as mx_core
-    except ImportError:
+    mx_core = _loaded_mlx_core()
+    if mx_core is None:
         return set()
     out: set[str] = set()
     for factory_name in ("default_stream", "cpu_stream", "gpu_stream"):
@@ -192,11 +216,11 @@ def _get_mlx_memory_api() -> Any | None:
     accessors (kept reachable via `_get_mx_metal` for back-compat with
     existing tests).
 
-    Returns None if mlx is not importable or has no memory accessors.
+    Returns None if the program has not imported mlx.core or it has no
+    memory accessors.
     """
-    try:
-        import mlx.core as mx_core
-    except ImportError:
+    mx_core = _loaded_mlx_core()
+    if mx_core is None:
         return None
     if hasattr(mx_core, "get_active_memory"):
         return mx_core
@@ -209,9 +233,8 @@ def _get_mx_metal() -> Any | None:
     Kept for backward compatibility with existing tests that monkeypatch
     this function. New code should prefer `_get_mlx_memory_api`.
     """
-    try:
-        import mlx.core as mx_core
-    except ImportError:
+    mx_core = _loaded_mlx_core()
+    if mx_core is None:
         return None
     legacy = getattr(mx_core, "metal", None)
     if legacy is not None and hasattr(legacy, "get_active_memory"):
@@ -321,15 +344,12 @@ def stop_polling() -> None:
 # ---- mx.core.eval decoration ----
 
 _eval_decorated = False
-_eval_call_counter = 0
-_eval_call_counter_lock = threading.Lock()
+# Lock-free ids: see smeltr._modules._call_counter.
+_eval_call_counter = itertools.count(1)
 
 
 def _next_call_id() -> int:
-    global _eval_call_counter
-    with _eval_call_counter_lock:
-        _eval_call_counter += 1
-        return _eval_call_counter
+    return next(_eval_call_counter)
 
 
 def decorate_eval() -> None:
@@ -410,3 +430,15 @@ def _undecorate_eval_for_tests() -> None:
     current = getattr(mx_core, "eval", None)
     if current is not None and getattr(current, "_smeltr_wrapped", False):
         mx_core.eval = current._smeltr_original
+
+
+def _after_fork_in_child() -> None:
+    # A lock held by another thread at fork() would stay held in the child
+    # (#266). The poller thread does not survive fork() either.
+    global _tracked_lock, _poll_thread
+    _tracked_lock = threading.RLock()
+    _poll_thread = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)

@@ -27,6 +27,13 @@ pub enum ClientToDaemon {
         pid: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope_token: Option<String>,
+        /// When the event happened, on the `uptime_raw_ns` clock
+        /// (`CLOCK_UPTIME_RAW`). Sent by clients that queue their events and
+        /// deliver them later — the Python sidecar since #266; the event is
+        /// then dated from it rather than on arrival. Additive: older
+        /// clients do not send it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_uptime_raw_ns: Option<u64>,
         payload: smeltr_core::event::Payload,
     },
     /// Request a list of session directory names (basename only).
@@ -228,7 +235,14 @@ mod tests {
         };
         let decoded: ClientToDaemon = ciborium::de::from_reader(&legacy_cbor[..]).unwrap();
         match decoded {
-            ClientToDaemon::Emit { scope_token, .. } => assert!(scope_token.is_none()),
+            ClientToDaemon::Emit {
+                scope_token,
+                at_uptime_raw_ns,
+                ..
+            } => {
+                assert!(scope_token.is_none());
+                assert!(at_uptime_raw_ns.is_none());
+            }
             other => panic!("expected Emit, got {other:?}"),
         }
     }
@@ -239,6 +253,7 @@ mod tests {
             source: smeltr_core::event::Source::Mark,
             pid: Some(7),
             scope_token: Some("tok-abc".into()),
+            at_uptime_raw_ns: Some(123),
             payload: smeltr_core::event::Payload::Mark {
                 label: "y".into(),
                 fields: Default::default(),
