@@ -26,18 +26,25 @@ pub fn list_sessions() -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// Finds a session's directory by id: by the short-id suffix every writer
+/// puts in the name, else by the id in each directory's metadata — a
+/// renamed or hand-built directory has no such suffix (#268).
 pub fn find_session_dir(id: SessionId) -> std::io::Result<Option<PathBuf>> {
     let short = id.short();
-    for dir in list_sessions()? {
+    let dirs = list_sessions()?;
+    for dir in &dirs {
         if dir
             .file_name()
             .map(|n| n.to_string_lossy().ends_with(&short))
             .unwrap_or(false)
+            && read_metadata(dir).map_or(true, |m| m.session_id == id)
         {
-            return Ok(Some(dir));
+            return Ok(Some(dir.clone()));
         }
     }
-    Ok(None)
+    Ok(dirs
+        .into_iter()
+        .find(|dir| read_metadata(dir).is_ok_and(|m| m.session_id == id)))
 }
 
 pub fn read_metadata(dir: &Path) -> std::io::Result<SessionMetadata> {
@@ -374,6 +381,24 @@ mod tests {
 
         let sessions = list_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
+    }
+
+    /// #268: a session directory whose name does not end with the short id
+    /// (renamed, copied, hand-built) must still be found by its id —
+    /// `smeltr sessions show <dir>` resolved the dir to an id, then failed to
+    /// find the dir back from it.
+    #[test]
+    #[serial]
+    fn find_session_dir_falls_back_to_metadata() {
+        let home = temp_home();
+        let id = SessionId::new();
+        let w = SessionWriter::create(SessionMetadata::now_starting(id)).unwrap();
+        let dir = w.dir().to_path_buf();
+        w.finalize(Some(0), "x".into()).unwrap();
+        let renamed = home.path().join("sessions").join("my-run");
+        std::fs::rename(&dir, &renamed).unwrap();
+        assert_eq!(find_session_dir(id).unwrap(), Some(renamed));
+        assert_eq!(find_session_dir(SessionId::new()).unwrap(), None);
     }
 
     #[test]
