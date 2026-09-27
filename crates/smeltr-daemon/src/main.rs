@@ -13,6 +13,11 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        // A failed log write (full disk under launchd's smeltrd.log) was
+        // reported with eprintln!, which panics when stderr fails too: the
+        // panic hook then aborted on every log line and launchd relaunched
+        // the daemon in a loop. Losing a log line is the right failure.
+        .log_internal_errors(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
@@ -61,11 +66,6 @@ async fn main() -> anyhow::Result<()> {
             "recovered orphaned session(s) after unclean shutdown"
         ),
         Err(e) => tracing::warn!(error = %e, "session recovery failed"),
-    }
-
-    let rings = smeltr_daemon::recovery::reap_orphan_rings();
-    if rings > 0 {
-        tracing::info!(count = rings, "removed rings left by dead recordings");
     }
 
     let flight_recorder = Arc::new(smeltr_daemon::flight_recorder::FlightRecorder::new(

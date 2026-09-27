@@ -968,7 +968,7 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
 
     // Build C arrays for smeltr_write_cb_ops.
     uint32_t n = (uint32_t)agg.count;
-    enum { kOpNameCap = 48 };
+    enum { kOpNameCap = 64 };
     char **names_buf  = (char **)malloc(sizeof(char *) * n);
     char *names_block = (char *)malloc((size_t)kOpNameCap * n);
     const char **symbols_buf = (const char **)malloc(sizeof(char *) * n);
@@ -990,8 +990,10 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
             uint64_t addr = pso & 0x00FFFFFFFFFFFFFFULL;
             snprintf(name, kOpNameCap, "K_MLNet_%llx", (unsigned long long)addr);
         } else {
-            uint16_t pso_short = (uint16_t)(pso & 0xFFFF);
-            snprintf(name, kOpNameCap, "K_%04x_%lux%lux%lu", pso_short, w, h, depth);
+            // The whole address (#265): 16 bits of a 256-byte-aligned
+            // pointer left ~256 names, and different kernels shared them.
+            snprintf(name, kOpNameCap, "K_%llx_%lux%lux%lu",
+                     (unsigned long long)pso, w, h, depth);
         }
         names_buf[i]   = name;
         symbols_buf[i] = smeltr_pso_map_lookup((uintptr_t)pso);  // borrowed; may be NULL
@@ -1008,6 +1010,21 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
     free(symbols_buf);
     free(gpu_ns_arr);
     free(counts);
+}
+
+/// Name `pso` and every pipeline state it wraps (#265). Under a Metal
+/// wrapper layer (MTL_CAPTURE_ENABLED, the debug layer) the device whose
+/// creation method is swizzled hands out a CaptureMTLComputePipelineState,
+/// while MLX's dispatches reach the AGX encoder with the inner pipeline
+/// state: keyed on the wrapper alone, every kernel lost its symbol.
+static void smeltr_pso_map_insert_wrapped(id pso, const char *name) {
+    SEL base_sel = sel_registerName("baseObject");
+    id obj = pso;
+    for (int depth = 0; obj && depth < 8; depth++) {
+        smeltr_pso_map_insert((uintptr_t)(__bridge void *)obj, name);
+        if (![obj respondsToSelector:base_sel]) break;
+        obj = ((id (*)(id, SEL))objc_msgSend)(obj, base_sel);
+    }
 }
 
 /* ============ Category: replacement methods ============ */
@@ -1268,7 +1285,7 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
     if (pso != nil && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
         NSString *fname = [function name];
         if (fname != nil) {
-            smeltr_pso_map_insert((uintptr_t)pso, [fname UTF8String]);
+            smeltr_pso_map_insert_wrapped(pso, [fname UTF8String]);
         }
     }
     return pso;
@@ -1286,7 +1303,7 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
     if (pso != nil && atomic_load_explicit(&g_enabled, memory_order_relaxed)) {
         NSString *fname = [function name];
         if (fname != nil) {
-            smeltr_pso_map_insert((uintptr_t)pso, [fname UTF8String]);
+            smeltr_pso_map_insert_wrapped(pso, [fname UTF8String]);
         }
     }
     return pso;

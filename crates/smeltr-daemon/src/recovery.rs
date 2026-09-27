@@ -120,22 +120,6 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
-/// Remove every file in `<SMELTR_HOME>/rings`. Called at boot, when no
-/// recording is attached: a ring still there belongs to a recording whose
-/// client died before removing it (#269). A hook still writing to one keeps
-/// its mapping; the new daemon would not drain it anyway. Returns the count.
-pub fn reap_orphan_rings() -> usize {
-    let dir = smeltr_core::session::smeltr_home().join("rings");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return 0;
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter(|e| std::fs::remove_file(e.path()).is_ok())
-        .count()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,24 +340,5 @@ mod tests {
         assert_eq!(live_pid_named(&p, me), None);
         std::fs::remove_file(&p).unwrap();
         assert_eq!(live_pid_named(&p, me), None);
-    }
-
-    /// #269: rings of recordings whose client died were never removed (8
-    /// orphans, 128 MB, some months old, in a real ~/.smeltr/rings). At boot
-    /// no recording is attached, so every ring left there is an orphan.
-    #[test]
-    #[serial_test::serial]
-    fn boot_removes_leftover_rings() {
-        let home = tempfile::tempdir().unwrap();
-        std::env::set_var("SMELTR_HOME", home.path());
-        let rings = home.path().join("rings");
-        std::fs::create_dir_all(&rings).unwrap();
-        for name in ["a.ring", "a.ring.123", "b.ring.9.tmp"] {
-            std::fs::write(rings.join(name), b"x").unwrap();
-        }
-        std::fs::write(home.path().join("keep.txt"), b"x").unwrap();
-        assert_eq!(reap_orphan_rings(), 3);
-        assert_eq!(std::fs::read_dir(&rings).unwrap().count(), 0);
-        assert!(home.path().join("keep.txt").exists());
     }
 }

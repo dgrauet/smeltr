@@ -198,14 +198,6 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Internal: the process `record` spawns. Waits until the daemon has
-    /// accepted the session, then execs the command in place (same pid).
-    #[command(name = "__exec-gate", hide = true)]
-    ExecGate {
-        cmd: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -214,15 +206,17 @@ fn main() -> anyhow::Result<()> {
     // pipe. The default writer is stdout, so a reader warning about an open
     // session used to land between MCP frames.
     tracing_subscriber::fmt()
+        // A failed log write (full disk under launchd's smeltrd.log) was
+        // reported with eprintln!, which panics when stderr fails too: the
+        // panic hook then aborted on every log line and launchd relaunched
+        // the daemon in a loop. Losing a log line is the right failure.
+        .log_internal_errors(false)
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
     let args = Args::parse();
-    if let Cmd::ExecGate { cmd, args } = &args.cmd {
-        commands::record::exec_gate(cmd, args);
-    }
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         match args.cmd {
@@ -286,7 +280,6 @@ fn main() -> anyhow::Result<()> {
                 commands::origins::run(session.as_deref(), last, top)
             }
             Cmd::Tail { session } => commands::tail::run(session).await,
-            Cmd::ExecGate { .. } => unreachable!("handled before the runtime starts"),
             Cmd::Record {
                 cmd,
                 args,

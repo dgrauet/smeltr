@@ -17,6 +17,8 @@ pub struct Params {
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OpSummary {
+    /// The op's identity: kernel symbol when resolved, else the hook's
+    /// `K_<pso>_<grid>` name (#265: `K_` names used to collide).
     pub name: String,
     pub gpu_ns: u64,
     pub count: u64,
@@ -499,7 +501,7 @@ mod tests {
         let row = resp
             .ops
             .iter()
-            .find(|r| r.name == "K_attn_1")
+            .find(|r| r.name == "sdpa_vector_2pass_1_float16_64")
             .expect("row present");
         assert_eq!(
             row.symbol.as_deref(),
