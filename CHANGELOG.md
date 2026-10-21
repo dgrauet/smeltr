@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.16](https://github.com/dgrauet/smeltr/compare/v0.28.15...v0.28.16) (2026-10-21)
+
+
+### Bug Fixes
+
+* **deps:** bump async-trait to 0.1.92 for clippy double_must_use ([#294](https://github.com/dgrauet/smeltr/issues/294)) ([cc01fda](https://github.com/dgrauet/smeltr/commit/cc01fdac212c2db50338509e2ad3506d1acc67ec))
+
 ## [0.28.15](https://github.com/dgrauet/smeltr/compare/v0.28.14...v0.28.15) (2026-09-27)
 
 
