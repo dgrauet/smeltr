@@ -1,13 +1,14 @@
 #[cfg(target_os = "macos")]
 fn main() {
-    use metal::*;
+    use objc2_foundation::NSString;
+    use objc2_metal::*;
     // SMELTR_HARNESS_LAUNCHER=1: behave like a Python launcher under
     // `smeltr record` (the sidecar autoload imports mlx, which allocates a
     // Metal heap): allocate one buffer, then run this same harness as a
     // child (which inherits the hook and the ring) and wait for it.
     if std::env::var("SMELTR_HARNESS_LAUNCHER").as_deref() == Ok("1") {
-        let device = Device::system_default().expect("no Metal device");
-        let _held = device.new_buffer(4096, MTLResourceOptions::StorageModeShared);
+        let device = MTLCreateSystemDefaultDevice().expect("no Metal device");
+        let _held = device.newBufferWithLength_options(4096, MTLResourceOptions::StorageModeShared);
         let exe = std::env::current_exe().expect("current exe");
         let status = std::process::Command::new(exe)
             .env_remove("SMELTR_HARNESS_LAUNCHER")
@@ -16,7 +17,7 @@ fn main() {
         std::process::exit(status.code().unwrap_or(1));
     }
 
-    let device = Device::system_default().expect("no Metal device");
+    let device = MTLCreateSystemDefaultDevice().expect("no Metal device");
 
     // SMELTR_HARNESS_RACE_THREADS=<n>: n threads make the process's first
     // buffer allocations at the same instant, then exit. The hook installs
@@ -34,7 +35,10 @@ fn main() {
                 std::thread::spawn(move || {
                     gate.wait();
                     for _ in 0..4 {
-                        drop(device.new_buffer(4096, MTLResourceOptions::StorageModeShared));
+                        drop(device.newBufferWithLength_options(
+                            4096,
+                            MTLResourceOptions::StorageModeShared,
+                        ));
                     }
                 })
             })
@@ -46,19 +50,23 @@ fn main() {
         return;
     }
 
-    let queue = device.new_command_queue();
+    let queue = device.newCommandQueue().expect("command queue");
 
     // Buffer alloc — should produce a BufferAlloc event.
-    let buf = device.new_buffer(4096, MTLResourceOptions::StorageModeShared);
-    buf.set_label("smeltr-harness-buffer");
+    let buf = device
+        .newBufferWithLength_options(4096, MTLResourceOptions::StorageModeShared)
+        .expect("buffer alloc");
+    buf.setLabel(Some(&NSString::from_str("smeltr-harness-buffer")));
 
     // Alloc + release probe: the drop below MUST reach the buffer's dealloc
     // (BufferFree frame). Guards against the hook retaining app buffers —
     // an ARC method-family mismatch in the new* swizzles once added one
     // phantom retain per buffer, keeping every MLX-released buffer alive.
     {
-        let free_probe = device.new_buffer(8192, MTLResourceOptions::StorageModeShared);
-        free_probe.set_label("smeltr-harness-free-probe");
+        let free_probe = device
+            .newBufferWithLength_options(8192, MTLResourceOptions::StorageModeShared)
+            .expect("buffer alloc");
+        free_probe.setLabel(Some(&NSString::from_str("smeltr-harness-free-probe")));
     }
 
     // SMELTR_HARNESS_LABEL=<text>: label the no-op command buffer with an
@@ -69,12 +77,12 @@ fn main() {
 
     // No-op command buffer with a blit encoder.
     {
-        let cb = queue.new_command_buffer();
-        cb.set_label(&noop_label);
-        let encoder = cb.new_blit_command_encoder();
-        encoder.end_encoding();
+        let cb = queue.commandBuffer().expect("command buffer");
+        cb.setLabel(Some(&NSString::from_str(&noop_label)));
+        let encoder = cb.blitCommandEncoder().expect("blit encoder");
+        encoder.endEncoding();
         cb.commit();
-        cb.wait_until_completed();
+        cb.waitUntilCompleted();
     }
 
     // Compile a tiny compute kernel literally named `gemm_test_kernel`, build a
@@ -91,27 +99,33 @@ fn main() {
         }
     "#;
     let library = device
-        .new_library_with_source(msl_source, &CompileOptions::new())
+        .newLibraryWithSource_options_error(
+            &NSString::from_str(msl_source),
+            Some(&MTLCompileOptions::new()),
+        )
         .expect("library compile failed");
     let function = library
-        .get_function("gemm_test_kernel", None)
+        .newFunctionWithName(&NSString::from_str("gemm_test_kernel"))
         .expect("missing function");
     let pso = device
-        .new_compute_pipeline_state_with_function(&function)
+        .newComputePipelineStateWithFunction_error(&function)
         .expect("PSO creation failed");
 
-    let out_buf = device.new_buffer(4096, MTLResourceOptions::StorageModeShared);
-    out_buf.set_label("smeltr-harness-gemm-out");
+    let out_buf = device
+        .newBufferWithLength_options(4096, MTLResourceOptions::StorageModeShared)
+        .expect("buffer alloc");
+    out_buf.setLabel(Some(&NSString::from_str("smeltr-harness-gemm-out")));
 
-    let cb = queue.new_command_buffer();
-    cb.set_label("smeltr-harness-gemm");
-    let encoder = cb.new_compute_command_encoder();
-    encoder.set_compute_pipeline_state(&pso);
-    encoder.set_buffer(0, Some(&out_buf), 0);
-    encoder.dispatch_threads(MTLSize::new(16, 1, 1), MTLSize::new(16, 1, 1));
-    encoder.end_encoding();
+    let cb = queue.commandBuffer().expect("command buffer");
+    cb.setLabel(Some(&NSString::from_str("smeltr-harness-gemm")));
+    let encoder = cb.computeCommandEncoder().expect("compute encoder");
+    encoder.setComputePipelineState(&pso);
+    // SAFETY: out_buf is a live 4096-byte buffer; the kernel writes 16 floats.
+    unsafe { encoder.setBuffer_offset_atIndex(Some(&out_buf), 0, 0) };
+    encoder.dispatchThreads_threadsPerThreadgroup(size(16), size(16));
+    encoder.endEncoding();
     cb.commit();
-    cb.wait_until_completed();
+    cb.waitUntilCompleted();
 
     // Optional loop mode for e2e tests that need many encoders spread over
     // time (e.g. the stage-sampling backoff-retry test). Each iteration goes
@@ -145,43 +159,60 @@ fn main() {
             }
         "#;
         let lib = device
-            .new_library_with_source(busy_src, &CompileOptions::new())
+            .newLibraryWithSource_options_error(
+                &NSString::from_str(busy_src),
+                Some(&MTLCompileOptions::new()),
+            )
             .expect("busy kernel compile failed");
         let f = lib
-            .get_function("busy_kernel", None)
+            .newFunctionWithName(&NSString::from_str("busy_kernel"))
             .expect("missing busy_kernel");
         device
-            .new_compute_pipeline_state_with_function(&f)
+            .newComputePipelineStateWithFunction_error(&f)
             .expect("busy PSO creation failed")
     } else {
         pso.clone()
     };
     let mut last_cb = None;
     for _ in 0..iters {
-        let cb = queue.new_command_buffer();
-        let encoder = cb.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
-        encoder.set_compute_pipeline_state(&loop_pso);
-        encoder.set_buffer(0, Some(&out_buf), 0);
+        let cb = queue.commandBuffer().expect("command buffer");
+        let encoder = cb
+            .computeCommandEncoderWithDispatchType(MTLDispatchType::Serial)
+            .expect("compute encoder");
+        encoder.setComputePipelineState(&loop_pso);
+        // SAFETY: out_buf is a live 4096-byte buffer; busy_kernel writes
+        // index gid % 1024, the light kernel 16 floats.
+        unsafe { encoder.setBuffer_offset_atIndex(Some(&out_buf), 0, 0) };
         let threads = if heavy { 32768 } else { 16 };
-        encoder.dispatch_threads(MTLSize::new(threads, 1, 1), MTLSize::new(16, 1, 1));
-        encoder.end_encoding();
+        encoder.dispatchThreads_threadsPerThreadgroup(size(threads), size(16));
+        encoder.endEncoding();
         cb.commit();
         if no_wait {
-            last_cb = Some(cb.to_owned());
+            last_cb = Some(cb);
         } else {
-            cb.wait_until_completed();
+            cb.waitUntilCompleted();
         }
         if sleep_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
         }
     }
     if let Some(cb) = last_cb {
-        cb.wait_until_completed();
+        cb.waitUntilCompleted();
     }
 
     // Let the hook flush completion handlers before exit.
     std::thread::sleep(std::time::Duration::from_millis(750));
     println!("harness done");
+}
+
+/// A 1-D grid / threadgroup size.
+#[cfg(target_os = "macos")]
+fn size(width: usize) -> objc2_metal::MTLSize {
+    objc2_metal::MTLSize {
+        width,
+        height: 1,
+        depth: 1,
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
