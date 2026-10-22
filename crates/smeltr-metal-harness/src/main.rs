@@ -1,3 +1,11 @@
+// A command-line tool must link CoreGraphics for `MTLCreateSystemDefaultDevice`
+// to return a device: without it the call returns nil on some machines,
+// the paravirtualized GPU of the CI runners among them. metal-rs linked it
+// implicitly; objc2-metal does not.
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {}
+
 #[cfg(target_os = "macos")]
 fn main() {
     use objc2_foundation::NSString;
