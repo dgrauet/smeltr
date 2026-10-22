@@ -579,7 +579,8 @@ static void smeltr_attach_dispatch_sample_buffer(id enc, id<MTLCommandBuffer> cb
     if (!g_dispatch_sampling_enabled) {
         if (!smeltr_sampling_retry_due(&g_dispatch_retry_at_ns)) return;
         atomic_store(&g_disp_alloc_failures, 0);
-        atomic_store(&g_disp_alloc_logged, false);
+        // g_disp_alloc_logged is deliberately NOT reset: the failure line is
+        // printed once per process, not once per backoff episode (#298).
         g_dispatch_sampling_enabled = YES;
         smeltr_emit_metal_hook_skipped("dispatch sampling re-enabled (backoff retry)");
     }
@@ -595,7 +596,8 @@ static void smeltr_attach_dispatch_sample_buffer(id enc, id<MTLCommandBuffer> cb
         int n = atomic_fetch_add(&g_disp_alloc_failures, 1) + 1;
         if (!atomic_exchange(&g_disp_alloc_logged, true)) {
             smeltr_log("dispatch sample buffer alloc failed: %s "
-                       "(further failures silenced)",
+                       "(further failures silenced; stage-boundary fallback, "
+                       "retried periodically)",
                        err ? [[err localizedDescription] UTF8String] : "(no error)");
         }
         if (n >= 16) {
@@ -1369,7 +1371,8 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
     if (g_op_capture_enabled && !g_stage_sampling_enabled
         && smeltr_sampling_retry_due(&g_stage_retry_at_ns)) {
         atomic_store(&g_stage_alloc_failures, 0);
-        atomic_store(&g_stage_alloc_logged, false);
+        // g_stage_alloc_logged is deliberately NOT reset: the failure line is
+        // printed once per process, not once per backoff episode (#298).
         g_stage_sampling_enabled = YES;
         smeltr_emit_metal_hook_skipped("stage sampling re-enabled (backoff retry)");
     }
@@ -1411,7 +1414,8 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
             // Phase 2.5a per-CB pro-rata attribution.
             int n = atomic_fetch_add(&g_stage_alloc_failures, 1) + 1;
             if (!atomic_exchange(&g_stage_alloc_logged, true)) {
-                smeltr_log("stage sample buffer alloc failed: %s (further failures silenced)",
+                smeltr_log("stage sample buffer alloc failed: %s (further failures "
+                           "silenced; per-CB pro-rata timing, retried periodically)",
                            err ? [[err localizedDescription] UTF8String] : "(no error)");
             }
             if (n >= 16) {
