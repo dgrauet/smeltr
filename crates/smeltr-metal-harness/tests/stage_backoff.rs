@@ -83,3 +83,67 @@ fn stage_sampling_reenables_after_backoff() {
         "re-enable must come after the disable; SKIPPED events: {skips:?}"
     );
 }
+
+/// #298: the "alloc failed" line must reach the target's stderr once per
+/// process, not once per disable/re-enable episode — the retry used to reset
+/// the "already logged" flag, so a long run printed it again every 30 s,
+/// interleaved with the program's own output.
+#[test]
+fn alloc_failure_is_logged_once_across_backoff_episodes() {
+    let dylib = workspace_root().join("metal-hook/build/libmetal_hook.dylib");
+    assert!(
+        dylib.exists(),
+        "metal-hook dylib not built at {dylib:?}. Run `make -C metal-hook all` first.",
+    );
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_smeltr-metal-harness"));
+
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let ring_path = tmpdir.path().join("ring.bin");
+    drop(create_ring(&ring_path, 1 << 22).expect("create ring"));
+
+    // 40 forced failures = two disables (16 consecutive failures each)
+    // separated by a re-enable, then a re-enable that sticks.
+    let output = Command::new(&bin)
+        .env("DYLD_INSERT_LIBRARIES", &dylib)
+        .env("SMELTR_RING_PATH", &ring_path)
+        .env("SMELTR_HOOK_TEST_STAGE_ALLOC_FAIL_N", "40")
+        .env("SMELTR_HOOK_SAMPLING_RETRY_MS", "200")
+        .env("SMELTR_HARNESS_ENCODERS", "100")
+        .env("SMELTR_HARNESS_SLEEP_MS", "25")
+        .output()
+        .expect("failed to spawn harness");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "harness failed: {stderr}");
+
+    let mut disables = 0;
+    let mut reader = open_for_read(&ring_path).expect("open ring");
+    loop {
+        match reader.next() {
+            Ok(Some(ev)) => {
+                if let DecodedFrame::Skipped { reason } = ev.frame {
+                    if reason.contains("stage sampling disabled after sustained alloc failures") {
+                        disables += 1;
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(e) => panic!("ring decode error: {e}"),
+        }
+    }
+    if disables == 0 {
+        eprintln!("skipping: stage sampling unsupported on this device");
+        return;
+    }
+    assert!(
+        disables >= 2,
+        "the test needs two disable episodes to mean anything, got {disables}"
+    );
+    let logged = stderr
+        .lines()
+        .filter(|l| l.contains("stage sample buffer alloc failed"))
+        .count();
+    assert_eq!(
+        logged, 1,
+        "expected one alloc-failure line, stderr:\n{stderr}"
+    );
+}

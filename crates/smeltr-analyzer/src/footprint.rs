@@ -34,12 +34,15 @@ pub fn compute_footprint_summary(events: &[Event]) -> Vec<ProcFootprintSummary> 
         };
         let entry = by_pid.entry(*pid).or_insert_with(|| ProcFootprintSummary {
             pid: *pid,
-            name: name.clone(),
+            name: String::new(),
             peak_bytes: 0,
             lifetime_max_bytes: 0,
             is_traced_root: *is_traced_root,
             sample_count: 0,
         });
+        // Latest sample wins: a sample taken between fork and exec still
+        // carries the parent's name (`smeltr` for the traced root, #299).
+        entry.name.clone_from(name);
         entry.peak_bytes = entry.peak_bytes.max(*phys_footprint_bytes);
         entry.lifetime_max_bytes = entry
             .lifetime_max_bytes
@@ -101,6 +104,19 @@ mod tests {
         let s = compute_footprint_summary(&events);
         let pids: Vec<u32> = s.iter().map(|x| x.pid).collect();
         assert_eq!(pids, vec![200, 300, 100]);
+    }
+
+    #[test]
+    fn row_is_named_after_the_latest_sample_not_the_pre_exec_one() {
+        // The probe can tick between fork and exec: the first sample of the
+        // traced root then carries the parent's comm, `smeltr` (#299).
+        let events = vec![
+            ev(1, 100, "smeltr", 1_000, true),
+            ev(2, 100, "Python", 9_000, true),
+            ev(3, 100, "Python", 7_000, true),
+        ];
+        let s = compute_footprint_summary(&events);
+        assert_eq!(s[0].name, "Python");
     }
 
     #[test]
