@@ -4,8 +4,8 @@ use crate::session_resolver::resolve_arg;
 use anyhow::Context;
 use smeltr_analyzer::footprint::ProcFootprintSummary;
 use smeltr_analyzer::memory::{
-    compute_memory_timeline, memory_report, HeapMemory, MemTimeline, MemoryReport, MlxAllocator,
-    ScopeMemory,
+    compute_memory_timeline, heaps_are_uniform, memory_report, HeapMemory, MemTimeline,
+    MemoryReport, MlxAllocator, ScopeMemory,
 };
 use smeltr_core::fmt::{binary_bytes, truncate};
 use smeltr_core::reader::read_events;
@@ -151,16 +151,17 @@ fn render_allocator(out: &mut String, a: &MlxAllocator) {
 
 fn render_scopes(out: &mut String, rows: &[ScopeMemory], top: usize) {
     out.push_str(&format!(
-        "{:<48} {:>12} {:>12} {:>12} {:>10}\n",
-        "SCOPE PEAK MEMORY", "PEAK", "AVG", "END", "SAMPLES"
+        "{:<48} {:>12} {:>12} {:>12} {:>12} {:>10}\n",
+        "SCOPE PEAK MEMORY", "PEAK", "AVG", "END", "GROWTH", "SAMPLES"
     ));
     for r in rows.iter().take(top) {
         out.push_str(&format!(
-            "{:<48} {:>12} {:>12} {:>12} {:>10}\n",
+            "{:<48} {:>12} {:>12} {:>12} {:>12} {:>10}\n",
             truncate(&r.qualname, 48),
             binary_bytes(r.peak_bytes),
             binary_bytes(r.avg_bytes),
             binary_bytes(r.end_bytes),
+            binary_bytes(r.growth_bytes),
             r.sample_count
         ));
     }
@@ -177,6 +178,16 @@ fn render_heaps(out: &mut String, rows: &[HeapMemory], top: usize) {
         "{:<48} {:>10} {:>16}\n",
         "HEAP PEAK", "COUNT", "BYTES"
     ));
+    // #300: one row per scope repeating the same figures says nothing.
+    if heaps_are_uniform(rows) {
+        out.push_str(&format!(
+            "{:<48} {:>10} {:>16}\n",
+            truncate(&format!("(same for all {} scopes)", rows.len()), 48),
+            rows[0].peak_heap_count,
+            binary_bytes(rows[0].peak_heap_bytes)
+        ));
+        return;
+    }
     for r in rows.iter().take(top) {
         out.push_str(&format!(
             "{:<48} {:>10} {:>16}\n",
@@ -214,6 +225,7 @@ mod tests {
             peak_bytes: 8 * 1024 * 1024 * 1024,
             avg_bytes: 4 * 1024 * 1024,
             end_bytes: 1024,
+            growth_bytes: 0,
             sample_count: 100,
         }];
         let s = render(
@@ -236,6 +248,7 @@ mod tests {
                 peak_bytes: 1000 + i as u64,
                 avg_bytes: 500,
                 end_bytes: 800,
+                growth_bytes: 0,
                 sample_count: 5,
             })
             .collect();
@@ -290,6 +303,48 @@ mod report_sections_tests {
         assert!(s.contains("MLX ALLOCATOR"), "{s}");
         assert!(s.contains("1.00 GiB") && s.contains("512.0 MiB"), "{s}");
         assert!(s.contains("no Python sidecar: install it"), "{s}");
+    }
+
+    /// #300: GROWTH is rendered from the analyzer's growth_bytes.
+    #[test]
+    fn render_shows_scope_growth() {
+        let report = MemoryReport {
+            scope_memory: vec![ScopeMemory {
+                qualname: "denoise".into(),
+                peak_bytes: 12 * 1024 * 1024 * 1024,
+                avg_bytes: 10 * 1024 * 1024 * 1024,
+                end_bytes: 9 * 1024 * 1024 * 1024,
+                growth_bytes: 4 * 1024 * 1024 * 1024,
+                sample_count: 4,
+            }],
+            ..Default::default()
+        };
+        let s = render(&report, 20);
+        assert!(s.contains("GROWTH"), "{s}");
+        let row = s.lines().find(|l| l.starts_with("denoise")).unwrap();
+        assert!(row.contains("4.00 GiB"), "{row}");
+    }
+
+    /// #300: identical heap rows collapse into one line instead of a table
+    /// that repeats `1 / 1.0 MiB` for every scope.
+    #[test]
+    fn uniform_heap_rows_collapse() {
+        let heap = |q: &str| HeapMemory {
+            qualname: q.into(),
+            peak_heap_count: 1,
+            peak_heap_bytes: 1024 * 1024,
+        };
+        let report = MemoryReport {
+            heap_memory: vec![heap("a"), heap("b"), heap("c")],
+            ..Default::default()
+        };
+        let s = render(&report, 20);
+        assert!(s.contains("HEAP PEAK"), "{s}");
+        assert!(
+            !s.lines().any(|l| l.starts_with("b ")),
+            "uniform heap rows must not be listed:\n{s}"
+        );
+        assert!(s.contains("same for all 3 scopes"), "{s}");
     }
 }
 

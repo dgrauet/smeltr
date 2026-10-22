@@ -381,12 +381,27 @@ Two sections:
 
 - **SCOPE PEAK MEMORY** — `MTLDevice.currentAllocatedSize` sampled at
   CB Committed and CB Completed for every kernel dispatch.
-  Aggregated per scope as peak / avg / end / sample count.
+  Aggregated per scope as peak / avg / end / growth / sample count.
+  PEAK, AVG and END are process-wide readings taken while the scope was
+  active (including the async-grace tail below), so they say how much
+  memory was in use, not how much the scope allocated. **GROWTH**
+  (`growth_bytes`) is the per-scope figure: the rise above the scope's
+  first sample while it ran, grace tail excluded, largest across calls.
+  For an explicit `smeltr.scope` the first sample is its synchronous
+  `scope_enter` reading.
 - **HEAP PEAK** — for each scope, the maximum number of live
   `MTLHeap` objects (and their total `size_bytes`) seen during the
-  scope window. Derived from `MetalHeapAlloc/Free` events.
+  scope window. Derived from `MetalHeapAlloc/Free` events. When every
+  scope saw the same heaps (typical for MLX, which allocates plain
+  buffers), the table collapses to one line.
 
-The MCP `get_memory_breakdown` tool returns the same two arrays.
+The MCP `get_memory_breakdown` tool returns the same two arrays. Both
+surfaces add notes when the tables cannot answer "which scope used the
+memory": most scopes sharing one peak (auto-wrapped modules under lazy
+evaluation only build the graph; memory moves at `mx.eval`, so wrap
+pipeline stages in `smeltr.scope(...)`), uniform heap rows, or MLX
+loaded but idle while another framework (e.g. PyTorch MPS) drove Metal,
+in which case the MLX ALLOCATOR row is replaced by that note.
 
 **Async-grace window:** because MLX schedules GPU work asynchronously
 (`mx.eval` returns before the CB completes), the analyzer holds each
