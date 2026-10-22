@@ -15,6 +15,13 @@ pub struct ScopeMemory {
     pub peak_bytes: u64,
     pub avg_bytes: u64,
     pub end_bytes: u64,
+    /// How far memory rose above the scope's first sample while the scope
+    /// ran (largest across calls), excluding the async grace tail that
+    /// `peak_bytes` includes: back-to-back scopes otherwise inherit the next
+    /// stage's allocations (#300). For an explicit `smeltr.scope` the first
+    /// sample is its synchronous `scope_enter` reading.
+    #[serde(default)]
+    pub growth_bytes: u64,
     pub sample_count: u64,
 }
 
@@ -43,6 +50,7 @@ pub struct MemoryReport {
 pub fn memory_report(events: &[Event]) -> MemoryReport {
     let scope_memory = compute_memory_breakdown(events);
     let heap_memory = compute_heap_breakdown(events);
+    let mut mlx_allocator = compute_mlx_allocator(events);
     let mut notes = Vec::new();
     if scope_memory.is_empty() && heap_memory.is_empty() {
         use crate::rules::sidecar_absent::{detect, detect_nothing_instrumented};
@@ -52,13 +60,98 @@ pub fn memory_report(events: &[Event]) -> MemoryReport {
             notes.push(absent.advice());
         }
     }
+    if let Some(note) = shared_peak_note(&scope_memory) {
+        notes.push(note);
+    }
+    if heaps_are_uniform(&heap_memory) {
+        let h = &heap_memory[0];
+        notes.push(format!(
+            "every scope saw the same live heaps ({} heap(s), {}): the heap \
+             table carries no per-scope information. MLX allocates plain \
+             buffers, so its heap count rarely moves.",
+            h.peak_heap_count,
+            smeltr_core::fmt::binary_bytes(h.peak_heap_bytes)
+        ));
+    }
+    if let Some(note) = idle_mlx_note(events, mlx_allocator.as_ref()) {
+        notes.push(note);
+        mlx_allocator = None;
+    }
     MemoryReport {
         scope_memory,
         heap_memory,
         process_footprint: crate::footprint::compute_footprint_summary(events),
-        mlx_allocator: compute_mlx_allocator(events),
+        mlx_allocator,
         notes,
     }
+}
+
+/// #300: when most scopes share the top peak, the rows reflect the
+/// process-wide samples their windows overlap, not what each scope did —
+/// the shape auto-wrapped module scopes take under lazy evaluation.
+/// "Share" means within 1 %: the modules of one model overlap neighbouring
+/// samples, so their peaks differ by a few MiB, never by a whole stage.
+fn shared_peak_note(rows: &[ScopeMemory]) -> Option<String> {
+    let top = rows.first()?.peak_bytes;
+    let floor = top - top / 100;
+    let sharing = rows.iter().filter(|r| r.peak_bytes >= floor).count();
+    if rows.len() < 3 || sharing < 3 || sharing * 2 < rows.len() {
+        return None;
+    }
+    Some(format!(
+        "{sharing} of {} scopes share the same peak (~{}): these are \
+         process-wide device samples taken while each scope was active, not \
+         memory each scope allocated (each window also keeps a 500 ms tail \
+         for in-flight GPU work, so back-to-back scopes see the next one's \
+         samples). GROWTH, the rise above the scope's starting memory while \
+         it ran, is the per-scope figure. Under MLX's lazy evaluation a \
+         module's forward only builds the graph and the memory moves at \
+         mx.eval, usually outside any module: wrap pipeline stages in \
+         smeltr.scope(\"...\") to attribute it.",
+        rows.len(),
+        smeltr_core::fmt::binary_bytes(top)
+    ))
+}
+
+/// #300: at least two heap rows, all identical — one set of heaps alive
+/// through every scope, so the table attributes nothing.
+pub fn heaps_are_uniform(rows: &[HeapMemory]) -> bool {
+    match rows.first() {
+        Some(first) if rows.len() >= 2 => rows.iter().all(|r| {
+            r.peak_heap_count == first.peak_heap_count && r.peak_heap_bytes == first.peak_heap_bytes
+        }),
+        _ => false,
+    }
+}
+
+/// Below this the MLX allocator held nothing a workload would need.
+const IDLE_MLX_BYTES: u64 = 1 << 20;
+
+/// #301: the sidecar polls MLX whenever `mlx` is imported, so a torch/MPS run
+/// that merely imports it reports an MLX allocator at a few bytes next to
+/// real Metal work. Name the situation instead.
+fn idle_mlx_note(events: &[Event], alloc: Option<&MlxAllocator>) -> Option<String> {
+    let alloc = alloc?;
+    if alloc.peak_active_bytes >= IDLE_MLX_BYTES || alloc.peak_cache_bytes >= IDLE_MLX_BYTES {
+        return None;
+    }
+    let mut command_buffers = 0usize;
+    for e in events {
+        match e.payload {
+            Payload::MlxEvalEntered { .. } => return None,
+            Payload::MetalCbCommitted { .. } => command_buffers += 1,
+            _ => {}
+        }
+    }
+    (command_buffers > 0).then(|| {
+        format!(
+            "MLX was loaded but idle (peak active {}, no mx.eval): the \
+             {command_buffers} Metal command buffer(s) in this session came from \
+             another framework, e.g. PyTorch MPS. Per-scope memory needs the \
+             work to run through MLX or explicit smeltr.scope(...) calls.",
+            smeltr_core::fmt::binary_bytes(alloc.peak_active_bytes)
+        )
+    })
 }
 
 /// Compute per-scope device memory stats from `MetalDeviceMemSample`
@@ -86,7 +179,10 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
         peak: u64,
         sum: u128,
         count: u64,
+        first: u64,
         last: u64,
+        /// Peak over the samples taken before the scope returned.
+        running_peak: u64,
     }
     struct OpenScope {
         call_id: u64,
@@ -114,13 +210,16 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
             peak_bytes: accum.peak,
             avg_bytes: avg,
             end_bytes: accum.last,
+            growth_bytes: accum.running_peak.saturating_sub(accum.first),
             sample_count: accum.count,
         };
         map.entry(qualname)
             .and_modify(|existing| {
+                let growth = existing.growth_bytes.max(sm.growth_bytes);
                 if sm.peak_bytes > existing.peak_bytes {
                     *existing = sm.clone();
                 }
+                existing.growth_bytes = growth;
             })
             .or_insert(sm);
     };
@@ -167,6 +266,10 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
                 allocated_bytes, ..
             } => {
                 for OpenScope { accum, .. } in stack.iter_mut() {
+                    if accum.count == 0 {
+                        accum.first = *allocated_bytes;
+                    }
+                    accum.running_peak = accum.running_peak.max(*allocated_bytes);
                     if *allocated_bytes > accum.peak {
                         accum.peak = *allocated_bytes;
                     }
@@ -179,6 +282,9 @@ pub fn compute_memory_breakdown(events: &[Event]) -> Vec<ScopeMemory> {
                 } in draining.iter_mut()
                 {
                     if ev.ts_mono_ns <= *deadline_ns {
+                        if accum.count == 0 {
+                            accum.first = *allocated_bytes;
+                        }
                         if *allocated_bytes > accum.peak {
                             accum.peak = *allocated_bytes;
                         }
@@ -1256,5 +1362,296 @@ mod timeline_tests {
         let t = compute_memory_timeline(&[], 10);
         assert!(t.buckets.is_empty());
         assert!(t.windows.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod report_notes_tests {
+    use super::*;
+    use smeltr_core::event::Source;
+    use uuid::Uuid;
+
+    fn ev(seq: u64, ts: u64, payload: Payload) -> Event {
+        Event {
+            ts_mono_ns: ts,
+            ts_wall_ns: ts,
+            session_id: Uuid::nil(),
+            source: Source::PythonSidecar,
+            pid: None,
+            seq,
+            payload,
+        }
+    }
+
+    fn enter(seq: u64, ts: u64, call_id: u64, qualname: &str, class_name: &str) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::ModuleEntered {
+                module_call_id: call_id,
+                module_def_id: 0,
+                qualname: qualname.into(),
+                class_name: class_name.into(),
+                parent_call_id: None,
+                depth: 0,
+                fields: Default::default(),
+            },
+        )
+    }
+
+    fn ret(seq: u64, ts: u64, call_id: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::ModuleReturned {
+                module_call_id: call_id,
+            },
+        )
+    }
+
+    fn sample(seq: u64, ts: u64, allocated: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::MetalDeviceMemSample {
+                allocated_bytes: allocated,
+                recommended_max_bytes: 26_800_000_000,
+                at_event: "cb_committed".into(),
+            },
+        )
+    }
+
+    fn heap_alloc(seq: u64, ts: u64, heap_id: u64, size: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::MetalHeapAlloc {
+                heap_id,
+                size_bytes: size,
+                label: None,
+            },
+        )
+    }
+
+    fn poll(seq: u64, ts: u64, active: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::MlxMemoryPoll {
+                active_bytes: active,
+                peak_bytes: active,
+                cache_bytes: 0,
+            },
+        )
+    }
+
+    fn cb_committed(seq: u64, ts: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::MetalCbCommitted {
+                cb_id: seq,
+                queue_id: 1,
+                queue_depth: 1,
+                label: None,
+            },
+        )
+    }
+
+    fn eval_entered(seq: u64, ts: u64) -> Event {
+        ev(
+            seq,
+            ts,
+            Payload::MlxEvalEntered {
+                call_id: seq,
+                array_count: 1,
+                stream: "gpu".into(),
+                module_stack: vec![],
+                stack_frames: vec![],
+            },
+        )
+    }
+
+    const S: u64 = 1_000_000_000;
+
+    /// #300: growth is the rise above the scope's first sample while the
+    /// scope runs. The 500 ms grace tail must not count: a real run with
+    /// three back-to-back scopes credited an idle one with the 1.5 GiB the
+    /// next two allocated.
+    #[test]
+    fn growth_is_measured_while_the_scope_runs_not_in_its_grace_tail() {
+        let events = vec![
+            enter(1, S, 1, "denoise", "Scope"),
+            sample(2, S + 1, 10_000),
+            sample(3, S + 2, 50_000),
+            sample(4, S + 3, 30_000),
+            ret(5, S + 4, 1),
+            // Grace tail: the next stage allocating.
+            sample(6, S + 1_000, 90_000),
+        ];
+        let rows = compute_memory_breakdown(&events);
+        assert_eq!(rows[0].growth_bytes, 40_000);
+        assert_eq!(rows[0].peak_bytes, 90_000, "PEAK keeps the grace tail");
+    }
+
+    #[test]
+    fn growth_is_the_largest_across_calls() {
+        let events = vec![
+            enter(1, S, 1, "step", "Scope"),
+            sample(2, S + 1, 1_000),
+            sample(3, S + 2, 9_000),
+            ret(4, S + 3, 1),
+            enter(5, 10 * S, 2, "step", "Scope"),
+            sample(6, 10 * S + 1, 20_000),
+            sample(7, 10 * S + 2, 21_000),
+            ret(8, 10 * S + 3, 2),
+        ];
+        let rows = compute_memory_breakdown(&events);
+        assert_eq!(rows[0].peak_bytes, 21_000);
+        assert_eq!(rows[0].growth_bytes, 8_000);
+    }
+
+    /// #300: module forwards under lazy eval all overlap the same eval-time
+    /// samples, so every row carries the same peak. Say so.
+    #[test]
+    fn identical_peaks_across_scopes_get_a_note() {
+        let mut events = Vec::new();
+        for (i, name) in ["Linear", "GELU", "Embedding", "T5Block"]
+            .iter()
+            .enumerate()
+        {
+            let i = i as u64;
+            events.push(enter(10 * i, S + 10 * i, i, name, "Linear"));
+            events.push(ret(10 * i + 1, S + 10 * i + 1, i));
+        }
+        events.push(sample(100, S + 100, 12_000_000_000));
+        let report = memory_report(&events);
+        assert_eq!(report.scope_memory.len(), 4);
+        assert!(
+            report.notes.iter().any(|n| n.contains("same peak")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// The modules of one model overlap neighbouring samples, not one
+    /// sample: their peaks differ by a few MiB on ~24 GiB (mg4-gates-variants:
+    /// 22 of 37 rows printed as 23.71 GiB, none byte-identical).
+    #[test]
+    fn near_identical_peaks_also_get_the_note() {
+        let mut events = Vec::new();
+        for (i, name) in ["Linear", "Conv2d", "AttentionBlock", "RMS_norm"]
+            .iter()
+            .enumerate()
+        {
+            let i = i as u64;
+            events.push(enter(10 * i, 10 * i * S, i, name, "Linear"));
+            events.push(sample(
+                10 * i + 1,
+                10 * i * S + 1,
+                25_460_000_000 + i * 3_000_000,
+            ));
+            events.push(ret(10 * i + 2, 10 * i * S + 2, i));
+        }
+        let report = memory_report(&events);
+        assert!(
+            report.notes.iter().any(|n| n.contains("same peak")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn distinct_peaks_get_no_lazy_eval_note() {
+        let events = vec![
+            enter(1, S, 1, "encode", "Scope"),
+            sample(2, S + 1, 1_000),
+            ret(3, S + 2, 1),
+            enter(4, 10 * S, 2, "denoise", "Scope"),
+            sample(5, 10 * S + 1, 9_000),
+            ret(6, 10 * S + 2, 2),
+            enter(7, 20 * S, 3, "decode", "Scope"),
+            sample(8, 20 * S + 1, 5_000),
+            ret(9, 20 * S + 2, 3),
+        ];
+        let report = memory_report(&events);
+        assert!(
+            !report.notes.iter().any(|n| n.contains("same peak")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// #300: one 1 MiB heap alive all session makes every HEAP PEAK row
+    /// `1 / 1.0 MiB` — true, and no information about any scope.
+    #[test]
+    fn uniform_heap_rows_are_flagged() {
+        let events = vec![
+            heap_alloc(1, S, 0xa, 1 << 20),
+            enter(2, 2 * S, 1, "a", "Scope"),
+            ret(3, 2 * S + 1, 1),
+            enter(4, 3 * S, 2, "b", "Scope"),
+            ret(5, 3 * S + 1, 2),
+        ];
+        let report = memory_report(&events);
+        assert!(heaps_are_uniform(&report.heap_memory));
+        assert!(
+            report.notes.iter().any(|n| n.contains("heap")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn heap_rows_that_differ_are_not_uniform() {
+        let rows = vec![
+            HeapMemory {
+                qualname: "a".into(),
+                peak_heap_count: 1,
+                peak_heap_bytes: 1 << 20,
+            },
+            HeapMemory {
+                qualname: "b".into(),
+                peak_heap_count: 2,
+                peak_heap_bytes: 3 << 20,
+            },
+        ];
+        assert!(!heaps_are_uniform(&rows));
+    }
+
+    /// #301: mlx imported but idle while torch/MPS did the Metal work — an
+    /// "8 B" MLX ALLOCATOR row reads like a measurement of the workload.
+    #[test]
+    fn idle_mlx_next_to_foreign_metal_work_is_explained() {
+        let events = vec![
+            poll(1, S, 8),
+            cb_committed(2, S + 1),
+            cb_committed(3, S + 2),
+            poll(4, 2 * S, 8),
+        ];
+        let report = memory_report(&events);
+        assert!(report.mlx_allocator.is_none());
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("MLX was loaded but idle")
+                    && n.contains("2 Metal command buffer")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn small_mlx_workload_that_evaluated_keeps_its_row() {
+        let events = vec![
+            poll(1, S, 8),
+            eval_entered(2, S + 1),
+            cb_committed(3, S + 2),
+            poll(4, 2 * S, 8),
+        ];
+        let report = memory_report(&events);
+        assert!(report.mlx_allocator.is_some());
+        assert!(!report.notes.iter().any(|n| n.contains("idle")));
     }
 }

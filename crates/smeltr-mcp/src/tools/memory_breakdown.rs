@@ -28,8 +28,10 @@ pub struct Response {
     /// Present when `include_timeline` was requested (#182).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<smeltr_analyzer::memory::MemTimeline>,
-    /// Why the breakdowns are empty, when they are. Absent from the JSON as
-    /// soon as there is anything to break down.
+    /// Caveats on reading the breakdowns: why they are empty, why every
+    /// scope shows the same peak (lazy evaluation, #300), why the heap rows
+    /// carry no per-scope information, or that MLX was idle while another
+    /// framework drove Metal (#301). Absent from the JSON when there is none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
     /// Per-process memory footprint over the traced tree — the metric jetsam
@@ -40,7 +42,8 @@ pub struct Response {
     /// The MLX allocator's view — active, peak, and above all the cache:
     /// buffers MLX retains after they were freed. Indistinguishable from
     /// working memory when seen from Metal, hence their presence next to the
-    /// MTLDevice figures. Absent when the sidecar emitted nothing.
+    /// MTLDevice figures. Absent when the sidecar emitted nothing, or when
+    /// MLX was loaded but idle (a note then says so, #301).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mlx_allocator: Option<smeltr_analyzer::memory::MlxAllocator>,
 }
