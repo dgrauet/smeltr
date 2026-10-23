@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0](https://github.com/dgrauet/smeltr/compare/v0.28.16...v0.29.0) (2026-10-22)
+
+
+### Features
+
+* **memory:** per-scope GROWTH and notes when the tables cannot attribute memory ([#303](https://github.com/dgrauet/smeltr/issues/303)) ([2d2ab87](https://github.com/dgrauet/smeltr/commit/2d2ab87a6acbd7b785756f098e01475c5f3444c6)), closes [#300](https://github.com/dgrauet/smeltr/issues/300) [#301](https://github.com/dgrauet/smeltr/issues/301)
+
+
+### Bug Fixes
+
+* hook alloc-failure log once per process; footprint rows named after the post-exec image ([#302](https://github.com/dgrauet/smeltr/issues/302)) ([711e830](https://github.com/dgrauet/smeltr/commit/711e830fe95647ae7ea4b8180a048caf653475c5))
+
 ## [0.28.16](https://github.com/dgrauet/smeltr/compare/v0.28.15...v0.28.16) (2026-10-21)
 
 
