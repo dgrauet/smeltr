@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0](https://github.com/dgrauet/smeltr/compare/v0.29.0...v0.30.0) (2026-10-28)
+
+
+### Features
+
+* **model-loads:** report tensors loaded from a weights file but never read ([#309](https://github.com/dgrauet/smeltr/issues/309)) ([e56b3b3](https://github.com/dgrauet/smeltr/commit/e56b3b311086a6cbaa192d78459c8b2b2db9ddfc)), closes [#308](https://github.com/dgrauet/smeltr/issues/308)
+
+
+### Bug Fixes
+
+* **deps:** bump tokio, zstd and chacha20 for new RustSec advisories ([#306](https://github.com/dgrauet/smeltr/issues/306)) ([52a1249](https://github.com/dgrauet/smeltr/commit/52a1249b08c4abe015d554be875e0f1a03be0106))
+
 ## [0.29.0](https://github.com/dgrauet/smeltr/compare/v0.28.16...v0.29.0) (2026-10-22)
 
 
