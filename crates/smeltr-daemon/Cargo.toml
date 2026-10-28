@@ -33,7 +33,7 @@ time.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-zstd = "0.13"
+zstd = "0.14"
 libc = "0.2"
 
 [dev-dependencies]
