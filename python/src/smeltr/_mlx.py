@@ -393,6 +393,12 @@ def decorate_eval() -> None:
             )
         except Exception:
             pass
+        try:
+            from smeltr._modelload import mark_read_in_place
+
+            mark_read_in_place(args)
+        except Exception:
+            pass
         start = _time.monotonic_ns()
         try:
             return original(*args, **kwargs)

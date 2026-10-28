@@ -98,6 +98,10 @@ mod tests {
                 path: path.into(),
                 t_ns: ts,
                 sha8: None,
+                tensor_count: None,
+                unread_count: None,
+                unread_keys: Vec::new(),
+                requested_path: None,
             },
         )
     }

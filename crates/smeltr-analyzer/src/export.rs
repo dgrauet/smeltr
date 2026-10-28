@@ -318,11 +318,7 @@ pub fn to_chrome_trace(events: &[Event], meta: &SessionMetadata) -> String {
                     framework.clone(),
                 ));
             }
-            Payload::ModelUnload {
-                path,
-                t_ns: _,
-                sha8,
-            } => {
+            Payload::ModelUnload { path, sha8, .. } => {
                 model_unloads.push((path.clone(), ev.ts_mono_ns, sha8.clone()));
             }
             Payload::MetalDeviceMemSample {
@@ -1097,6 +1093,10 @@ mod tests {
                     path: "/models/llama/weights.safetensors".into(),
                     t_ns: uptime_base + 8_000_000,
                     sha8: Some("ab12cd34".into()),
+                    tensor_count: None,
+                    unread_count: None,
+                    unread_keys: Vec::new(),
+                    requested_path: None,
                 },
             ),
         ];
@@ -1339,6 +1339,10 @@ mod tests {
                     path: "/models/llama/weights.safetensors".into(),
                     t_ns: 5_000_000,
                     sha8: Some("ab12cd34".into()),
+                    tensor_count: None,
+                    unread_count: None,
+                    unread_keys: Vec::new(),
+                    requested_path: None,
                 },
             ),
         ];
