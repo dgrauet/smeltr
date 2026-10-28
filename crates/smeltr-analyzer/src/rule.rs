@@ -18,6 +18,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(crate::rules::memory_pressure::MemoryPressureRule),
         Box::new(crate::rules::system_pressure::SystemPressureRule),
         Box::new(crate::rules::duplicate_model_load::DuplicateModelLoadRule),
+        Box::new(crate::rules::unread_model_tensors::UnreadModelTensorsRule),
         Box::new(crate::rules::hook_degradation::HookDegradationRule),
         Box::new(crate::rules::lazy_eval_attribution::LazyEvalAttributionRule),
         Box::new(crate::rules::sidecar_absent::SidecarAbsentRule),

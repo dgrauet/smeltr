@@ -27,6 +27,22 @@ pub struct ModelLoadInfo {
     /// Monotonic ns when the matching ModelUnload fired. None if still loaded (or unload not seen).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unloaded_at_ns: Option<u64>,
+    /// Tensors the load returned, reported on unload when the sidecar tracked
+    /// the returned dict (`mx.load`, `safetensors.torch.load_file`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tensor_count: Option<u64>,
+    /// Tensors whose value the program never read: a loader that skipped
+    /// part of the file, or weights that are legitimately unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_count: Option<u64>,
+    /// Keys of those tensors, capped by the sidecar (`unread_count` is the full count).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_keys: Vec<String>,
+    /// The path as the program passed it, when its file name differs from
+    /// `path`'s (the Hugging Face cache resolves to hash-named blobs).
+    /// Reported on unload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -83,11 +99,27 @@ pub fn compute_model_loads(events: &[Event]) -> Vec<ModelLoadInfo> {
                     framework: framework.clone(),
                     duplicate_of,
                     unloaded_at_ns: None,
+                    tensor_count: None,
+                    unread_count: None,
+                    unread_keys: Vec::new(),
+                    requested_path: None,
                 });
             }
-            Payload::ModelUnload { path, .. } => {
+            Payload::ModelUnload {
+                path,
+                tensor_count,
+                unread_count,
+                unread_keys,
+                requested_path,
+                ..
+            } => {
                 if let Some(&idx) = current_load_idx.get(path.as_str()) {
-                    loads[idx].unloaded_at_ns = Some(ev.ts_mono_ns);
+                    let load = &mut loads[idx];
+                    load.unloaded_at_ns = Some(ev.ts_mono_ns);
+                    load.tensor_count = *tensor_count;
+                    load.unread_count = *unread_count;
+                    load.unread_keys.clone_from(unread_keys);
+                    load.requested_path.clone_from(requested_path);
                     current_load_idx.remove(path.as_str());
                 }
             }
@@ -161,8 +193,45 @@ mod tests {
                 path: path.to_string(),
                 t_ns: seq * 1000,
                 sha8: None,
+                tensor_count: None,
+                unread_count: None,
+                unread_keys: Vec::new(),
+                requested_path: None,
             },
         )
+    }
+
+    #[test]
+    fn unload_carries_unread_tensors_onto_its_load() {
+        let mut unload = model_unload_ev(2, "/loras/lora.safetensors");
+        if let Payload::ModelUnload {
+            tensor_count,
+            unread_count,
+            unread_keys,
+            requested_path,
+            ..
+        } = &mut unload.payload
+        {
+            *requested_path = Some("/hf/snapshots/abc/lora.safetensors".into());
+            *tensor_count = Some(4);
+            *unread_count = Some(2);
+            *unread_keys = vec![
+                "proj_in.lora_A.weight".into(),
+                "proj_in.lora_B.weight".into(),
+            ];
+        }
+        let evs = vec![model_load_ev(1, "/loras/lora.safetensors", 64), unload];
+        let result = compute_model_loads(&evs);
+        assert_eq!(
+            result[0].requested_path.as_deref(),
+            Some("/hf/snapshots/abc/lora.safetensors")
+        );
+        assert_eq!(result[0].tensor_count, Some(4));
+        assert_eq!(result[0].unread_count, Some(2));
+        assert_eq!(
+            result[0].unread_keys,
+            vec!["proj_in.lora_A.weight", "proj_in.lora_B.weight"]
+        );
     }
 
     #[test]
@@ -212,6 +281,10 @@ mod tests {
                     path: "/models/weights.safetensors".to_string(),
                     t_ns: uptime + 8_000_000,
                     sha8: None,
+                    tensor_count: None,
+                    unread_count: None,
+                    unread_keys: Vec::new(),
+                    requested_path: None,
                 },
             ),
         ];

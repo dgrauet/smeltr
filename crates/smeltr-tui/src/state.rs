@@ -334,7 +334,9 @@ impl UiState {
                     self.model_loads.remove(0);
                 }
             }
-            Payload::ModelUnload { path, t_ns, sha8 } => {
+            Payload::ModelUnload {
+                path, t_ns, sha8, ..
+            } => {
                 self.model_unloads.push(ModelUnloadSample {
                     path: path.clone(),
                     t_ns: *t_ns,
@@ -708,6 +710,10 @@ mod tests {
                 path: "/models/gemma-2b/model.safetensors".into(),
                 t_ns: 2_000_000_000,
                 sha8: Some("deadbeef".into()),
+                tensor_count: None,
+                unread_count: None,
+                unread_keys: Vec::new(),
+                requested_path: None,
             },
         ));
         assert_eq!(s.model_unloads.len(), 1);
@@ -724,6 +730,10 @@ mod tests {
                 path: "/models/other/model.safetensors".into(),
                 t_ns: 3_000_000_000,
                 sha8: None,
+                tensor_count: None,
+                unread_count: None,
+                unread_keys: Vec::new(),
+                requested_path: None,
             },
         ));
         assert_eq!(s.model_unloads.len(), 2);

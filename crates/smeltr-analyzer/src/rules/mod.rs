@@ -9,6 +9,7 @@ pub mod queue_depth;
 pub mod queue_pressure;
 pub mod sidecar_absent;
 pub mod system_pressure;
+pub mod unread_model_tensors;
 
 #[cfg(test)]
 mod test_helpers {

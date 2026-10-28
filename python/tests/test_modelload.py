@@ -318,3 +318,213 @@ def test_safetensors_safe_open_emits_unload_after_exit(monkeypatch, fake_daemon,
         assert p["sha8"] == expected_sha8
     finally:
         smeltr.detach()
+
+
+# ---------------------------------------------------------------------------
+# Tensors loaded but never read (#308)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_mx_load(monkeypatch, tmp_path):
+    """A stub mlx.core.load returning `weights` (a plain dict), plus the file path."""
+    model_file = tmp_path / "lora.safetensors"
+    model_file.write_bytes(b"l" * 128)
+    state: dict[str, Any] = {"weights": {}}
+
+    mx_core_mod = types.ModuleType("mlx.core")
+    mx_core_mod.load = lambda file, *a, **k: dict(state["weights"])  # type: ignore[attr-defined]
+    mlx_mod = types.ModuleType("mlx")
+    mlx_mod.core = mx_core_mod  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx", mlx_mod)
+    monkeypatch.setitem(sys.modules, "mlx.core", mx_core_mod)
+
+    def load(weights: dict[str, Any]) -> Any:
+        state["weights"] = weights
+        return mx_core_mod.load(str(model_file))
+
+    return load
+
+
+def _unload_after(fake_daemon, drop) -> dict:
+    """Run `drop` (which must release the loaded dict), return the ModelUnload payload."""
+    drop()
+    gc.collect()
+    assert fake_daemon.wait_for(lambda ms: _count(ms, "ModelUnload") >= 1)
+    unloads = [m for m in fake_daemon.received if m["payload"]["kind"] == "ModelUnload"]
+    assert len(unloads) == 1
+    return unloads[0]["payload"]
+
+
+LORA = {
+    "blocks.0.attn.to_q.lora_A.weight": 1,
+    "blocks.0.attn.to_q.lora_B.weight": 2,
+    "proj_in.lora_A.weight": 3,
+    "proj_in.lora_B.weight": 4,
+}
+
+
+def test_unload_lists_keys_whose_value_was_never_read(fake_daemon, fake_mx_load):
+    """ltx-2-mlx #235: every key iterated, only the block keys' values read."""
+    smeltr.attach(poll_hz=0)
+    try:
+        _modelload.decorate_model_loads()
+        holder = {"d": fake_mx_load(LORA)}
+        for key in holder["d"]:
+            if key.startswith("blocks."):
+                _ = holder["d"][key]
+        p = _unload_after(fake_daemon, holder.clear)
+        assert p["tensor_count"] == 4
+        assert p["unread_count"] == 2
+        assert sorted(p["unread_keys"]) == ["proj_in.lora_A.weight", "proj_in.lora_B.weight"]
+    finally:
+        smeltr.detach()
+
+
+def test_keys_len_and_membership_are_not_reads(fake_daemon, fake_mx_load):
+    smeltr.attach(poll_hz=0)
+    try:
+        _modelload.decorate_model_loads()
+        holder = {"d": fake_mx_load(LORA)}
+        d = holder["d"]
+        _ = len(d), list(d.keys()), "proj_in.lora_A.weight" in d, sorted(d)
+        del d
+        p = _unload_after(fake_daemon, holder.clear)
+        assert p["unread_count"] == 4
+    finally:
+        smeltr.detach()
+
+
+def test_get_and_pop_are_reads(fake_daemon, fake_mx_load):
+    smeltr.attach(poll_hz=0)
+    try:
+        _modelload.decorate_model_loads()
+        holder = {"d": fake_mx_load(LORA)}
+        d = holder["d"]
+        d.get("blocks.0.attn.to_q.lora_A.weight")
+        d.pop("blocks.0.attn.to_q.lora_B.weight")
+        d.setdefault("proj_in.lora_A.weight")
+        del d
+        p = _unload_after(fake_daemon, holder.clear)
+        assert p["unread_keys"] == ["proj_in.lora_B.weight"]
+    finally:
+        smeltr.detach()
+
+
+@pytest.mark.parametrize(
+    "consume",
+    [
+        lambda d: list(d.items()),
+        lambda d: list(d.values()),
+        lambda d: d.copy(),
+        lambda d: dict(d),
+        lambda d: {**d},
+        lambda d: {}.update(d),
+        lambda d: d.popitem() and list(d.values()),
+    ],
+    ids=["items", "values", "copy", "dict", "unpack", "update", "popitem"],
+)
+def test_bulk_access_counts_every_value_as_read(fake_daemon, fake_mx_load, consume):
+    """When the value may have escaped, report nothing rather than a false positive."""
+    smeltr.attach(poll_hz=0)
+    try:
+        _modelload.decorate_model_loads()
+        holder = {"d": fake_mx_load(LORA)}
+        consume(holder["d"])
+        p = _unload_after(fake_daemon, holder.clear)
+        assert p["tensor_count"] == 4
+        assert p["unread_count"] == 0
+        assert p.get("unread_keys", []) == []
+    finally:
+        smeltr.detach()
+
+
+def test_unread_keys_are_capped_but_counted(fake_daemon, fake_mx_load):
+    smeltr.attach(poll_hz=0)
+    try:
+        _modelload.decorate_model_loads()
+        many = {f"layer.{i}.weight": i for i in range(1000)}
+        holder = {"d": fake_mx_load(many)}
+        p = _unload_after(fake_daemon, holder.clear)
+        assert p["tensor_count"] == 1000
+        assert p["unread_count"] == 1000
+        assert len(p["unread_keys"]) == _modelload.UNREAD_KEYS_CAP
+    finally:
+        smeltr.detach()
+
+
+def test_loaded_dict_still_behaves_like_the_original(fake_mx_load, fake_daemon):
+    smeltr.attach(poll_hz=0)
+    try:
+        _modelload.decorate_model_loads()
+        d = fake_mx_load(LORA)
+        assert isinstance(d, dict)
+        assert d == LORA
+        assert list(d) == list(LORA)
+        assert d["proj_in.lora_A.weight"] == 3
+        assert d.get("missing", "x") == "x"
+        with pytest.raises(KeyError):
+            d["missing"]
+        d["new"] = 5
+        assert d.pop("new") == 5
+    finally:
+        smeltr.detach()
+
+
+def test_mx_eval_of_the_loaded_dict_counts_as_reading_it():
+    """mx.eval walks a dict in C (PyDict_Next), past the read-tracking accessors."""
+    mx = pytest.importorskip("mlx.core")
+    from smeltr import _mlx
+
+    _mlx.decorate_eval()
+    try:
+        direct = _modelload._WeakRefableDict({"w": mx.zeros((2,)), "b": mx.zeros((2,))})
+        mx.eval(direct)
+        assert direct._smeltr_reads.unread() == []
+
+        nested = _modelload._WeakRefableDict({"w": mx.zeros((2,))})
+        mx.eval([nested])
+        assert nested._smeltr_reads.unread() == []
+
+        untouched = _modelload._WeakRefableDict({"w": mx.zeros((2,))})
+        mx.eval(mx.zeros((1,)))
+        assert untouched._smeltr_reads.unread() == ["w"]
+    finally:
+        _mlx._undecorate_eval_for_tests()
+
+
+def test_unload_names_the_path_the_program_passed(monkeypatch, fake_daemon, tmp_path):
+    """HF cache paths are symlinks to hash-named blobs: keep the readable name."""
+    blob = tmp_path / "blobs" / "2943ab994f3c9d88"
+    blob.parent.mkdir()
+    blob.write_bytes(b"b" * 64)
+    link = tmp_path / "distilled-lora.safetensors"
+    link.symlink_to(blob)
+
+    mx_core_mod = types.ModuleType("mlx.core")
+    mx_core_mod.load = lambda file, *a, **k: {"w": 1}  # type: ignore[attr-defined]
+    mlx_mod = types.ModuleType("mlx")
+    mlx_mod.core = mx_core_mod  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx", mlx_mod)
+    monkeypatch.setitem(sys.modules, "mlx.core", mx_core_mod)
+
+    smeltr.attach(poll_hz=0)
+    try:
+        _modelload.decorate_model_loads()
+        holder = {"d": mx_core_mod.load(str(link))}
+        p = _unload_after(fake_daemon, holder.clear)
+        assert p["path"] == os.path.realpath(str(blob))
+        assert p["requested_path"] == str(link)
+    finally:
+        smeltr.detach()
+
+
+def test_unload_omits_requested_path_when_it_is_already_canonical(fake_daemon, fake_mx_load):
+    smeltr.attach(poll_hz=0)
+    try:
+        _modelload.decorate_model_loads()
+        holder = {"d": fake_mx_load(LORA)}
+        p = _unload_after(fake_daemon, holder.clear)
+        assert "requested_path" not in p
+    finally:
+        smeltr.detach()

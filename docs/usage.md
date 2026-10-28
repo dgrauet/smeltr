@@ -469,6 +469,55 @@ workloads this isn't a concern — every weight load goes through one
 of the three wrapped entrypoints. For exotic stacks, you'd need an
 additional mmap hook (not implemented).
 
+#### Tensors loaded but never read
+
+A loader that silently drops part of a weights file leaves no error
+and no timing or memory anomaly. In ltx-2-mlx #235, the block-streaming
+LoRA source iterated every key of the distilled LoRA but only read the
+transformer-block ones, so 56 projection and AdaLN factors were never
+applied.
+
+For `mlx.core.load` and `safetensors.torch.load_file`, the sidecar
+records which keys of the returned dict had their **value** read. When
+the dict is released (or at exit), `ModelUnload` carries `tensor_count`,
+`unread_count` and up to 256 `unread_keys`. The `unread-model-tensors`
+rule turns that into a warning listing the unread keys by pattern, with
+numeric path segments collapsed to `*`, so a missing family of layers
+reads as one line:
+
+```
+[Warning] ltx-2.3-22b-distilled-lora-384.safetensors: 56 of 3320 loaded tensor(s) were never read
+  ...
+  Unread keys by pattern:
+    diffusion_model.adaln_single.*  ×6
+    diffusion_model.audio_adaln_single.*  ×6
+    ... (6 more AdaLN modules)
+    diffusion_model.patchify_proj.*  ×2
+    diffusion_model.proj_out.*  ×2
+    ...
+```
+
+When the full keys do not fit in 12 lines, the patterns are cut to the
+deepest prefix that does. In the real run above, every other file
+(transformer, Gemma, VAE, upscaler) was fully read and raised nothing.
+After the ltx-2-mlx fix, the same run reports 0 unread tensors.
+
+For files from the Hugging Face cache, `ModelUnload` also carries
+`requested_path`: the path the program passed. The canonical `path` is a
+hash-named blob, so `requested_path` is the only readable name.
+
+`get_model_loads` reports the same fields per load.
+
+What counts as a read: `d[k]`, `get`, `pop`, `setdefault`, `popitem`.
+Iterating keys, `len` and `in` do not. Anything that may let values
+escape unseen counts every value as read, so the rule stays silent
+rather than raise a false alarm: `items()`, `values()`, `copy()`,
+`dict(d)`, `{**d}`, `update(d)` and `mx.eval(d)`. As a result, a loader
+that reads everything with `items()` and filters afterwards is not
+caught. `safetensors.safe_open` returns a handle, not a dict, and is not
+tracked. Keys that are legitimately unused, such as another component's
+weights in a shared file, also show up in the warning.
+
 ### Dispatch origins
 
 Map kernel dispatches back to the Python source file:line that
@@ -650,7 +699,7 @@ page the call.
 | `get_dispatch_origins` | Per-(kind, file:line) attribution | requires `SMELTR_STACK_CAPTURE=1` at record time |
 | `compare_sessions` | A/B regression analysis | `scope_deltas`, `op_deltas`, `memory_deltas`, `origin_deltas`, scopes-only-in-A/B |
 | `export_session` | Dump for external viewer | writes chrome-trace JSON (or raw JSON) to `output_path` |
-| `get_model_loads` | Inspect safetensors / `mlx.load` calls + flag duplicates | `loads[].{path,size_bytes,duration_ns,sha8,duplicate_of}`, `duplicate_count` |
+| `get_model_loads` | Inspect safetensors / `mlx.load` calls + flag duplicates and tensors never read | `loads[].{path,size_bytes,duration_ns,sha8,duplicate_of,tensor_count,unread_count,unread_keys}`, `duplicate_count` |
 | `subscribe_live` | Poll a running session for a delta summary since a cursor (live tail; turn-based, not a push stream) | `cursor`, `new_events`, `by_payload`, `gpu`, `top_ops`, `memory`, `model_loads`; pass `cursor`+`session_id` back next poll |
 
 ### Typical agent workflow

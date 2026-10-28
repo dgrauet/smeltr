@@ -323,6 +323,21 @@ pub enum Payload {
         /// Join key with ModelLoad (sha256(canonical_path)[:8]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sha8: Option<String>,
+        /// Tensors the load returned. Only set when the sidecar tracked the
+        /// returned dict (`mx.load`, `safetensors.torch.load_file`), #308.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tensor_count: Option<u64>,
+        /// Tensors whose value was never read before the dict was released.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unread_count: Option<u64>,
+        /// Keys of those tensors, capped by the sidecar (`unread_count` is
+        /// the full count).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unread_keys: Vec<String>,
+        /// The path as the program passed it, when its file name differs from
+        /// `path`'s: the Hugging Face cache resolves to hash-named blobs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_path: Option<String>,
     },
 }
 
@@ -1205,6 +1220,10 @@ mod tests {
                 path: "/models/gemma-2b/model.safetensors".into(),
                 t_ns: 2_000_000_000,
                 sha8: Some("deadbeef".into()),
+                tensor_count: None,
+                unread_count: None,
+                unread_keys: Vec::new(),
+                requested_path: None,
             },
             Source::PythonSidecar,
         );
@@ -1217,9 +1236,60 @@ mod tests {
                 path: "/models/model.safetensors".into(),
                 t_ns: 3_500_000_000,
                 sha8: None,
+                tensor_count: None,
+                unread_count: None,
+                unread_keys: Vec::new(),
+                requested_path: None,
             },
             Source::PythonSidecar,
         );
+    }
+
+    #[test]
+    fn cbor_round_trip_model_unload_with_unread_tensors() {
+        round_trip(
+            Payload::ModelUnload {
+                path: "/loras/distilled.safetensors".into(),
+                t_ns: 4_000_000_000,
+                sha8: Some("cafebabe".into()),
+                tensor_count: Some(4),
+                unread_count: Some(2),
+                unread_keys: vec![
+                    "proj_in.lora_A.weight".into(),
+                    "proj_in.lora_B.weight".into(),
+                ],
+                requested_path: Some("/hf/snapshots/abc/distilled.safetensors".into()),
+            },
+            Source::PythonSidecar,
+        );
+    }
+
+    #[test]
+    fn cbor_model_unload_omits_read_tracking_when_absent() {
+        let p = Payload::ModelUnload {
+            path: "/tmp/x.safetensors".into(),
+            t_ns: 1,
+            sha8: None,
+            tensor_count: None,
+            unread_count: None,
+            unread_keys: Vec::new(),
+            requested_path: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&p, &mut buf).unwrap();
+        let v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let map = v.as_map().expect("must serialize as CBOR map");
+        for key in [
+            "tensor_count",
+            "unread_count",
+            "unread_keys",
+            "requested_path",
+        ] {
+            assert!(
+                !map.iter().any(|(k, _)| k.as_text() == Some(key)),
+                "{key} must not be serialized when absent"
+            );
+        }
     }
 
     #[test]
@@ -1243,7 +1313,19 @@ mod tests {
         ciborium::into_writer(&legacy, &mut buf).unwrap();
         let decoded: Payload = ciborium::from_reader(&buf[..]).unwrap();
         match decoded {
-            Payload::ModelUnload { sha8, path, t_ns } => {
+            Payload::ModelUnload {
+                sha8,
+                path,
+                t_ns,
+                tensor_count,
+                unread_count,
+                unread_keys,
+                requested_path,
+            } => {
+                assert_eq!(requested_path, None);
+                assert_eq!(tensor_count, None);
+                assert_eq!(unread_count, None);
+                assert!(unread_keys.is_empty());
                 assert_eq!(sha8, None);
                 assert_eq!(path, "/models/old.safetensors");
                 assert_eq!(t_ns, 9_000_000_000);
