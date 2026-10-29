@@ -116,6 +116,14 @@ pub fn op_key(op: &OpSample) -> String {
     op.symbol.clone().unwrap_or_else(|| op.name.clone())
 }
 
+/// Heaviest first, ties by name. The ops come out of a `HashMap`, so without
+/// the tie-break equal times (common: encoder time is split pro rata) kept
+/// that map's per-process order, and `--top-ops` kept a different op from
+/// one run to the next (#310).
+fn sort_ops(ops: &mut [OpAttribution]) {
+    ops.sort_by(|a, b| b.gpu_ns.cmp(&a.gpu_ns).then_with(|| a.name.cmp(&b.name)));
+}
+
 pub fn completed_command_buffers(events: &[Event]) -> CompletedCbs {
     pair_command_buffers(events, None)
 }
@@ -413,7 +421,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 }
             })
             .collect();
-        ops.sort_by_key(|o| std::cmp::Reverse(o.gpu_ns));
+        sort_ops(&mut ops);
         Some(ModuleBreakdown {
             qualname: n.qualname.clone(),
             class_name: n.class_name.clone(),
@@ -432,11 +440,15 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     // A node whose parent never entered (lost `ModuleEntered`: ring drop,
     // sidecar attached mid-run) is a root too — otherwise its time is
     // counted as attributed yet shown nowhere (#243).
-    let roots: Vec<u64> = calls
+    // In call order (the sidecar allocates call ids from a counter), so the
+    // stable sort below keeps tied roots chronological rather than in the
+    // map's per-process order (#310).
+    let mut roots: Vec<u64> = calls
         .iter()
         .filter(|(_, n)| n.parent.is_none_or(|p| !calls.contains_key(&p)))
         .map(|(k, _)| *k)
         .collect();
+    roots.sort_unstable();
     let mut root_children: Vec<ModuleBreakdown> =
         roots.iter().filter_map(|r| build(*r, &calls)).collect();
     let total_subtree: u64 = root_children.iter().map(|c| c.gpu_ns_subtree).sum();
@@ -458,7 +470,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 }
             })
             .collect();
-        unscoped_ops_vec.sort_by_key(|o| std::cmp::Reverse(o.gpu_ns));
+        sort_ops(&mut unscoped_ops_vec);
         root_children.push(ModuleBreakdown {
             qualname: UNSCOPED.into(),
             class_name: String::new(),
@@ -2089,6 +2101,94 @@ mod tests {
         let u = find_child(&r, UNSCOPED);
         assert_eq!(u.ops.len(), 2);
         assert_eq!(u.ops[0].name, "Matmul");
+    }
+
+    /// Names deliberately out of alphabetical order, all at the same time:
+    /// encoder time split pro rata gives exact ties on real runs (#310).
+    const TIED_OPS: [&str; 8] = ["Hh", "Cc", "Ff", "Aa", "Gg", "Bb", "Ee", "Dd"];
+
+    fn cb_with_ops(seq: u64, ts: u64, cb_id: u64, ops: Vec<OpSample>) -> Vec<Event> {
+        let mut evs = cb_lifecycle(seq, ts, cb_id, "unused", 0);
+        evs[1] = ev(
+            seq + 1,
+            ts + 5,
+            Payload::MetalCbCompleted {
+                cb_id,
+                queue_id: 1,
+                status: 4,
+                error_code: None,
+                error_domain: None,
+                in_flight_ns: 1_000_000,
+            },
+            Source::MetalHook,
+        );
+        evs[2] = ev(
+            seq + 2,
+            ts + 6,
+            Payload::MetalCbOps { cb_id, ops },
+            Source::MetalHook,
+        );
+        evs
+    }
+
+    fn tied_ops() -> Vec<OpSample> {
+        let mut ops = vec![op_sample("Big", 500, 1)];
+        ops.extend(TIED_OPS.iter().map(|n| op_sample(n, 100, 1)));
+        ops
+    }
+
+    fn op_names(ops: &[OpAttribution]) -> Vec<&str> {
+        ops.iter().map(|o| o.name.as_str()).collect()
+    }
+
+    const TIED_OPS_SORTED: [&str; 9] = ["Big", "Aa", "Bb", "Cc", "Dd", "Ee", "Ff", "Gg", "Hh"];
+
+    /// #310: ops come out of a HashMap; sorting by time alone left tied ops
+    /// in that map's per-process order, so the table, and which op survived
+    /// `--top-ops`, changed from run to run.
+    #[test]
+    fn tied_module_ops_sort_by_name() {
+        let mut events = vec![module_entered(1, 10, 1, "Linear", None)];
+        events.extend(eval_pair(2, 100, 105, 7, 1));
+        events.extend(cb_with_ops(10, 101, 0xa, tied_ops()));
+        let root = compute(events).unwrap();
+        let lin = find_child(&root, "Linear");
+        assert_eq!(op_names(&lin.ops), TIED_OPS_SORTED);
+    }
+
+    #[test]
+    fn tied_unscoped_ops_sort_by_name() {
+        let events = cb_with_ops(10, 101, 0xa, tied_ops());
+        let root = compute(events).unwrap();
+        let u = find_child(&root, UNSCOPED);
+        assert_eq!(op_names(&u.ops), TIED_OPS_SORTED);
+    }
+
+    /// #310: roots were collected by iterating the call map. Repeated
+    /// top-level calls with the same GPU time (one per denoise step) must
+    /// stay in the order they ran.
+    #[test]
+    fn tied_roots_keep_call_order() {
+        let mut events = Vec::new();
+        for i in 0..8u64 {
+            let t = 1_000 + i * 2_000_000;
+            events.push(module_entered(
+                10 * i + 1,
+                t,
+                i + 1,
+                &format!("step{i}"),
+                None,
+            ));
+            events.extend(eval_pair(10 * i + 2, t + 10, t + 15, 100 + i, i + 1));
+            events.extend(cb_lifecycle(10 * i + 4, t + 11, 0xa0 + i, "Op", 50));
+        }
+        let root = compute(events).unwrap();
+        let names: Vec<&str> = root.children.iter().map(|c| c.qualname.as_str()).collect();
+        assert_eq!(
+            names,
+            (0..8).map(|i| format!("step{i}")).collect::<Vec<_>>(),
+            "tree: {root:#?}"
+        );
     }
 
     #[test]
