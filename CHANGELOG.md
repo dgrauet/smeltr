@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.1](https://github.com/dgrauet/smeltr/compare/v0.30.0...v0.30.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **breakdown:** break ties so tied rows keep a stable order ([#311](https://github.com/dgrauet/smeltr/issues/311)) ([6387805](https://github.com/dgrauet/smeltr/commit/6387805040849d5495c20da7a82e276ca30523eb)), closes [#310](https://github.com/dgrauet/smeltr/issues/310)
+
 ## [0.30.0](https://github.com/dgrauet/smeltr/compare/v0.29.0...v0.30.0) (2026-10-28)
 
 
