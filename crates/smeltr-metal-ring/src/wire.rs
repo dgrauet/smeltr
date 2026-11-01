@@ -1,7 +1,7 @@
 //! Wire format mirroring metal-hook/include/smeltr_ring.h.
 
 pub const RING_MAGIC: u32 = 0x534D_4C52; // "SMLR"
-pub const RING_VERSION: u32 = 3;
+pub const RING_VERSION: u32 = 4;
 
 /// Sentinel value for the per-op `symbol_len` field in CB_OPS frames,
 /// meaning "no symbol present" (no bytes follow). Chosen because the

@@ -50,6 +50,10 @@ pub struct SessionStats {
     /// wording as `get_inference_breakdown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Set when this side's op times were mostly split between kernels by
+    /// dispatch count (#314): its op-kind deltas can be artefacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_times_estimated: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +125,7 @@ fn stats_from_events(dir: &std::path::Path, events: &[Event]) -> SessionStats {
         degraded: smeltr_analyzer::degraded_advice(
             smeltr_analyzer::diff::sampling_disable_episodes(events),
         ),
+        op_times_estimated: smeltr_analyzer::apportioned_advice(events),
     }
 }
 
@@ -264,6 +269,7 @@ mod tests {
                         symbol: Some("gemm_t_n_bf16_64".into()),
                         gpu_ns: op_gpu_ns,
                         count: 1,
+                        apportioned_ns: None,
                     }],
                 },
             ),
@@ -519,6 +525,7 @@ mod tests {
                             symbol: Some("gemm_bf16".into()),
                             gpu_ns: gpu,
                             count: 1,
+                            apportioned_ns: None,
                         }],
                     },
                 ),
@@ -622,5 +629,26 @@ mod tests {
         .unwrap();
         assert_eq!(resp.a.degraded, None);
         crate::test_util::assert_degraded(resp.b.degraded);
+    }
+
+    /// #314: op-kind deltas between estimated splits can be artefacts.
+    #[test]
+    #[serial_test::serial]
+    fn apportioned_side_is_flagged() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let estimated = crate::test_util::apportioned_session();
+        let clean = SessionId::new();
+        SessionWriter::create(SessionMetadata::now_starting(clean))
+            .unwrap()
+            .finalize(Some(0), "ok".into())
+            .unwrap();
+        let resp = run(Params {
+            session_a: clean.short(),
+            session_b: estimated,
+        })
+        .unwrap();
+        assert_eq!(resp.a.op_times_estimated, None);
+        crate::test_util::assert_apportioned(resp.b.op_times_estimated);
     }
 }

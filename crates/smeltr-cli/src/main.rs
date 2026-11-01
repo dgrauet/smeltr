@@ -201,6 +201,16 @@ enum Cmd {
         /// surfaces it. Overrides any inherited SMELTR_SESSION_NAME.
         #[arg(long)]
         name: Option<String>,
+        /// Measure per-kernel GPU time instead of estimating it (MLX only).
+        /// Most GPUs timestamp an encoder, not each dispatch, and MLX puts
+        /// dozens of kernels in one encoder, so by default their time is
+        /// split by dispatch count: a GEMM and an elementwise kernel get the
+        /// same share. This sets MLX_MAX_OPS_PER_BUFFER=1, one op per command
+        /// buffer, so each encoder times one kernel. More command buffers:
+        /// the run is slower, and scope totals are not comparable with a
+        /// run recorded without it.
+        #[arg(long)]
+        exact_ops: bool,
     },
     /// Internal: the process `record` spawns. Waits until the daemon has
     /// accepted the session, then execs the command in place (same pid).
@@ -304,6 +314,7 @@ fn main() -> anyhow::Result<()> {
                 gputrace,
                 gputrace_scope,
                 name,
+                exact_ops,
             } => {
                 let code = commands::record::run(
                     &cmd,
@@ -312,6 +323,7 @@ fn main() -> anyhow::Result<()> {
                     name.as_deref(),
                     gputrace,
                     gputrace_scope.as_deref(),
+                    exact_ops,
                 )
                 .await?;
                 std::process::exit(code);

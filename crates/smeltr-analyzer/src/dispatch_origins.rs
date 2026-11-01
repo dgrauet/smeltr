@@ -169,6 +169,7 @@ mod tests {
                     symbol: Some(symbol.into()),
                     gpu_ns,
                     count: 1,
+                    apportioned_ns: None,
                 }],
             },
         )

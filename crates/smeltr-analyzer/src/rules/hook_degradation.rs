@@ -5,6 +5,8 @@
 //! MetalHookSkipped event drowned among 333k others. Sampling disables,
 //! ring corruption and writer drops now get a Warning-level finding so
 //! `smeltr analyze` states plainly that op-level numbers are incomplete.
+//! Per-kernel times split between kernels by dispatch count (#314) are
+//! reported here too: they are as untrustworthy, and look exact.
 
 use crate::finding::{Category, EvidenceRef, Finding, Severity};
 use crate::rule::Rule;
@@ -99,6 +101,34 @@ impl Rule for HookDegradationRule {
             );
         }
 
+        // Per-kernel times split by dispatch count rather than measured
+        // (#314): the op tables look exact and are not.
+        if let Some(advice) = crate::breakdown::apportioned_advice(events) {
+            let first = events.iter().find(|ev| {
+                matches!(&ev.payload, Payload::MetalCbOps { ops, .. }
+                    if ops.iter().any(|o| o.apportioned_ns.unwrap_or(0) > 0))
+            });
+            let share = crate::breakdown::ApportionedOps::detect(events)
+                .map(|a| a.share() * 100.0)
+                .unwrap_or_default();
+            let mut finding = Finding::new(
+                Severity::Warning,
+                Category::ContributingFactor,
+                format!(
+                    "GPU op times estimated: {share:.0}% split between kernels by dispatch count"
+                ),
+            )
+            .with_detail(advice);
+            if let Some(first) = first {
+                finding = finding.with_evidence(EvidenceRef {
+                    seq: first.seq,
+                    ts_mono_ns: first.ts_mono_ns,
+                    description: "first MetalCbOps with apportioned op time".to_string(),
+                });
+            }
+            out.push(finding);
+        }
+
         // Writer drops (ring full): aggregate the total.
         let mut total_dropped: u64 = 0;
         let mut first_drop: Option<&Event> = None;
@@ -137,6 +167,49 @@ mod tests {
     use super::*;
     use crate::rules::test_helpers::ev;
     use smeltr_core::event::Source;
+
+    fn cb_ops(ts: u64, ops: &[(&str, u64, u64)]) -> Event {
+        ev(
+            ts,
+            Source::MetalHook,
+            Payload::MetalCbOps {
+                cb_id: 1,
+                ops: ops
+                    .iter()
+                    .map(|(name, gpu_ns, apportioned)| smeltr_core::event::OpSample {
+                        name: (*name).into(),
+                        symbol: None,
+                        gpu_ns: *gpu_ns,
+                        count: 1,
+                        apportioned_ns: Some(*apportioned),
+                    })
+                    .collect(),
+            },
+        )
+    }
+
+    /// #314: `smeltr analyze` and `get_session_summary` must say when the
+    /// per-kernel split is an estimate, not only the op tables.
+    #[test]
+    fn apportioned_op_times_become_a_warning() {
+        let events = vec![
+            cb_ops(10, &[("Gemm", 600, 0)]),
+            cb_ops(20, &[("Gemm", 300, 300), ("Add", 100, 100)]),
+        ];
+        let findings = HookDegradationRule.check(&events);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        let f = &findings[0];
+        assert_eq!(f.severity, Severity::Warning);
+        assert!(f.title.contains("40%"), "{}", f.title);
+        assert!(f.detail.contains("--exact-ops"), "{}", f.detail);
+        assert_eq!(f.evidence[0].ts_mono_ns, 20, "first apportioned CB");
+    }
+
+    #[test]
+    fn measured_op_times_raise_nothing() {
+        let events = vec![cb_ops(10, &[("Gemm", 600, 0), ("Add", 10, 10)])];
+        assert!(HookDegradationRule.check(&events).is_empty());
+    }
 
     #[test]
     fn sampling_disable_becomes_warning_finding() {

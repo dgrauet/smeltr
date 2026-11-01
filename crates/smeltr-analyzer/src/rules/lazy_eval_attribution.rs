@@ -247,6 +247,7 @@ mod tests {
                         symbol: None,
                         gpu_ns,
                         count: 1,
+                        apportioned_ns: None,
                     }],
                 },
             ),

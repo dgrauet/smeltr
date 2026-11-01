@@ -21,6 +21,12 @@ pub struct Response {
     /// wording as the CLI and `get_inference_breakdown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Set when a large share of op time was split between kernels by
+    /// dispatch count rather than measured (#314): per-kernel and per-kind
+    /// shares can then be off by an order of magnitude. Same wording as the
+    /// CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_times_estimated: Option<String>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -36,6 +42,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         degraded: smeltr_analyzer::degraded_advice(
             smeltr_analyzer::diff::sampling_disable_episodes(&events),
         ),
+        op_times_estimated: smeltr_analyzer::apportioned_advice(&events),
     })
 }
 
@@ -122,6 +129,7 @@ mod tests {
                         symbol: Some("gemm_bf16".into()),
                         gpu_ns: 1_000_000,
                         count: 5,
+                        apportioned_ns: None,
                     }],
                 },
             ),
@@ -153,6 +161,17 @@ mod tests {
     }
 
     /// #165 parity (#243): `smeltr origins` warns; the tool did not.
+    /// #314: origins aggregate per-kernel times too.
+    #[test]
+    #[serial_test::serial]
+    fn apportioned_session_is_flagged() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let session = crate::test_util::apportioned_session();
+        let resp = run(Params { session }).unwrap();
+        crate::test_util::assert_apportioned(resp.op_times_estimated);
+    }
+
     #[test]
     #[serial_test::serial]
     fn sampling_disabled_session_surfaces_degraded_notice() {

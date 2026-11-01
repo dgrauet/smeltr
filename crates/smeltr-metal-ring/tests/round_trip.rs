@@ -130,9 +130,9 @@ fn cb_ops_round_trips() {
             1_000,
             0xdead_beef,
             &[
-                ("Matmul", None, 6_200_000u64, 3u32),
-                ("Softmax", None, 1_500_000u64, 1u32),
-                ("RMSNorm", None, 400_000u64, 2u32),
+                ("Matmul", None, 6_200_000u64, 3u32, 0u64),
+                ("Softmax", None, 1_500_000u64, 1u32, 1_500_000u64),
+                ("RMSNorm", None, 400_000u64, 2u32, 123_456u64),
             ],
         )
         .unwrap();
@@ -153,7 +153,8 @@ fn cb_ops_round_trips() {
             name: "Matmul".into(),
             symbol: None,
             gpu_ns: 6_200_000,
-            count: 3
+            count: 3,
+            apportioned_ns: 0,
         }
     );
     assert_eq!(
@@ -162,7 +163,8 @@ fn cb_ops_round_trips() {
             name: "Softmax".into(),
             symbol: None,
             gpu_ns: 1_500_000,
-            count: 1
+            count: 1,
+            apportioned_ns: 1_500_000,
         }
     );
     assert_eq!(
@@ -171,7 +173,8 @@ fn cb_ops_round_trips() {
             name: "RMSNorm".into(),
             symbol: None,
             gpu_ns: 400_000,
-            count: 2
+            count: 2,
+            apportioned_ns: 123_456,
         }
     );
     assert!(r.next().unwrap().is_none());
@@ -200,7 +203,7 @@ fn cb_ops_long_name_round_trips() {
     let long = "A".repeat(200);
     {
         let mut w = create_ring(&path, 1 << 16).unwrap();
-        w.write_cb_ops(7, 42, &[(long.as_str(), None, 99, 1)])
+        w.write_cb_ops(7, 42, &[(long.as_str(), None, 99, 1, 0)])
             .unwrap();
     }
     let mut r = open_for_read(&path).unwrap();
@@ -224,8 +227,8 @@ fn cb_ops_round_trip_with_and_without_symbol() {
             42,
             123,
             &[
-                ("K_a", Some("gemm_t_n_bf16"), 1000u64, 5u32),
-                ("K_b", None, 2000u64, 3u32),
+                ("K_a", Some("gemm_t_n_bf16"), 1000u64, 5u32, 400u64),
+                ("K_b", None, 2000u64, 3u32, 0u64),
             ],
         )
         .unwrap();
@@ -240,10 +243,12 @@ fn cb_ops_round_trip_with_and_without_symbol() {
             assert_eq!(ops[0].symbol.as_deref(), Some("gemm_t_n_bf16"));
             assert_eq!(ops[0].gpu_ns, 1000);
             assert_eq!(ops[0].count, 5);
+            assert_eq!(ops[0].apportioned_ns, 400);
             assert_eq!(ops[1].name, "K_b");
             assert_eq!(ops[1].symbol, None);
             assert_eq!(ops[1].gpu_ns, 2000);
             assert_eq!(ops[1].count, 3);
+            assert_eq!(ops[1].apportioned_ns, 0);
         }
         other => panic!("expected CbOps, got {other:?}"),
     }

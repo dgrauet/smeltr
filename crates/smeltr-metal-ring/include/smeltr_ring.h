@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define SMELTR_RING_MAGIC   0x534D4C52u   /* "SMLR" */
-#define SMELTR_RING_VERSION 3u
+#define SMELTR_RING_VERSION 4u
 
 /* Frame lengths are rounded up to this alignment. MUST be >= the frame
  * header size (16): with 8-byte alignment, head could land 8 bytes before

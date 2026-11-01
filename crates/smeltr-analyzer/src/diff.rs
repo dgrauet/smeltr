@@ -432,6 +432,7 @@ mod tests {
             symbol: Some("gemm_t_n_bf16_64".into()),
             gpu_ns,
             count: 1,
+            apportioned_ns: None,
         }
     }
 
@@ -625,6 +626,7 @@ mod tests {
             symbol: None,
             gpu_ns: 100,
             count: 1,
+            apportioned_ns: None,
         };
         let a = scoped_session("scope", 100, no_sym);
         let d = diff_sessions(&a, &a);
@@ -734,6 +736,7 @@ mod tests {
                             symbol: Some("gemm_bf16".into()),
                             gpu_ns: gpu,
                             count: 1,
+                            apportioned_ns: None,
                         }],
                     },
                 ),

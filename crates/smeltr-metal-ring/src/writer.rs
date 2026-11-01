@@ -282,12 +282,12 @@ impl RingWriter {
         &mut self,
         ts: u64,
         cb_id: u64,
-        ops: &[(&str, Option<&str>, u64, u32)],
+        ops: &[(&str, Option<&str>, u64, u32, u64)],
     ) -> Result<(), RingError> {
         let mut p = Vec::new();
         push_u64(&mut p, cb_id);
         push_u32(&mut p, ops.len() as u32);
-        for (name, symbol, gpu_ns, count) in ops {
+        for (name, symbol, gpu_ns, count, apportioned_ns) in ops {
             push_u32(&mut p, name.len() as u32);
             p.extend_from_slice(name.as_bytes());
             match symbol {
@@ -299,6 +299,7 @@ impl RingWriter {
             }
             push_u64(&mut p, *gpu_ns);
             push_u32(&mut p, *count);
+            push_u64(&mut p, *apportioned_ns);
         }
         self.write_frame(kind::CB_OPS, ts, &p)
     }

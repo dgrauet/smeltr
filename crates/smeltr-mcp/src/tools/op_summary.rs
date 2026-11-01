@@ -27,6 +27,14 @@ pub struct OpSummary {
     pub symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Part of `gpu_ns` split across kernels by dispatch count rather than
+    /// measured (#314). Absent when fully measured or unknown.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub apportioned_ns: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -37,6 +45,12 @@ pub struct Response {
     /// wording as the CLI and `get_inference_breakdown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Set when a large share of op time was split between kernels by
+    /// dispatch count rather than measured (#314): per-kernel and per-kind
+    /// shares can then be off by an order of magnitude. Same wording as the
+    /// CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_times_estimated: Option<String>,
 }
 
 pub fn run(params: Params) -> Result<Response, ToolError> {
@@ -56,6 +70,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
     let events = read_events(&dir)?;
     let degraded =
         smeltr_analyzer::degraded_advice(smeltr_analyzer::diff::sampling_disable_episodes(&events));
+    let op_times_estimated = smeltr_analyzer::apportioned_advice(&events);
     let root = compute_breakdown(events.iter().cloned())
         .map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
@@ -70,10 +85,15 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
             pct: (r.gpu_ns as f64 / total as f64) * 100.0,
             symbol: r.symbol,
             kind: r.kind,
+            apportioned_ns: r.apportioned_ns,
         })
         .collect();
     ops.truncate(top);
-    Ok(Response { ops, degraded })
+    Ok(Response {
+        ops,
+        degraded,
+        op_times_estimated,
+    })
 }
 
 #[cfg(test)]
@@ -170,12 +190,14 @@ mod tests {
                             symbol: None,
                             gpu_ns: 150,
                             count: 1,
+                            apportioned_ns: None,
                         },
                         smeltr_core::event::OpSample {
                             name: "Softmax".into(),
                             symbol: None,
                             gpu_ns: 50,
                             count: 2,
+                            apportioned_ns: None,
                         },
                     ],
                 },
@@ -308,12 +330,14 @@ mod tests {
                             symbol: Some("gemm_nn_batchedstrided_128x128x8_2stage".into()),
                             gpu_ns: 100,
                             count: 1,
+                            apportioned_ns: None,
                         },
                         smeltr_core::event::OpSample {
                             name: "K_gemm_2".into(),
                             symbol: Some("gemm_tn_batchedstrided_128x64x8_2stage".into()),
                             gpu_ns: 80,
                             count: 1,
+                            apportioned_ns: None,
                         },
                     ],
                 },
@@ -480,6 +504,7 @@ mod tests {
                         symbol: Some("sdpa_vector_2pass_1_float16_64".into()),
                         gpu_ns: 200,
                         count: 1,
+                        apportioned_ns: None,
                     }],
                 },
             },
@@ -544,6 +569,26 @@ mod tests {
         crate::test_util::assert_degraded(resp.degraded);
     }
 
+    /// #314: per-kernel times split by dispatch count must say so, per row
+    /// and for the session.
+    #[test]
+    #[serial_test::serial]
+    fn apportioned_session_is_flagged() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let session = crate::test_util::apportioned_session();
+        let resp = run(Params {
+            session,
+            ..Default::default()
+        })
+        .unwrap();
+        crate::test_util::assert_apportioned(resp.op_times_estimated);
+        assert!(resp
+            .ops
+            .iter()
+            .all(|r| r.apportioned_ns == r.gpu_ns && r.gpu_ns > 0));
+    }
+
     /// #243: same default row cap as `smeltr breakdown --ops-flat` (20).
     #[test]
     #[serial_test::serial]
@@ -593,6 +638,7 @@ mod tests {
                 symbol: None,
                 gpu_ns: 100 + i,
                 count: 1,
+                apportioned_ns: None,
             })
             .collect();
         w.write_event(&ev(3, Payload::MetalCbOps { cb_id: 1, ops }))

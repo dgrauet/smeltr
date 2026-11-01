@@ -80,6 +80,13 @@ pub struct OpSample {
     pub symbol: Option<String>,
     pub gpu_ns: u64,
     pub count: u32,
+    /// Part of `gpu_ns` that was split across different kernels by dispatch
+    /// count instead of measured (#314). Stage-boundary sampling timestamps
+    /// an encoder, not each dispatch, so an encoder mixing a large GEMM with
+    /// small elementwise kernels gives each dispatch an equal share. `None`
+    /// for sessions recorded before the hook reported it: unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apportioned_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -885,6 +892,7 @@ mod tests {
             symbol: None,
             gpu_ns: 1_234_567,
             count: 3,
+            apportioned_ns: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&s, &mut buf).unwrap();
@@ -903,18 +911,21 @@ mod tests {
                         symbol: None,
                         gpu_ns: 6_200_000,
                         count: 3,
+                        apportioned_ns: None,
                     },
                     OpSample {
                         name: "Softmax".into(),
                         symbol: None,
                         gpu_ns: 1_500_000,
                         count: 1,
+                        apportioned_ns: None,
                     },
                     OpSample {
                         name: "RMSNorm".into(),
                         symbol: None,
                         gpu_ns: 400_000,
                         count: 2,
+                        apportioned_ns: None,
                     },
                 ],
             },
@@ -940,11 +951,46 @@ mod tests {
             symbol: Some("gemm_t_n_bf16_64_64_32_2_2_8".into()),
             gpu_ns: 12345,
             count: 7,
+            apportioned_ns: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&s, &mut buf).unwrap();
         let decoded: OpSample = ciborium::from_reader(&buf[..]).unwrap();
         assert_eq!(s, decoded);
+    }
+
+    /// #314: the share of `gpu_ns` split across kernels by dispatch count
+    /// rather than measured. `None` (sessions before the field) means
+    /// unknown, which is not the same as `Some(0)`, fully measured.
+    #[test]
+    fn opsample_apportioned_ns_round_trips_and_is_absent_on_legacy() {
+        let s = OpSample {
+            name: "K_f900_64x64x1".into(),
+            symbol: None,
+            gpu_ns: 12345,
+            count: 7,
+            apportioned_ns: Some(10_000),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&s, &mut buf).unwrap();
+        let decoded: OpSample = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(s, decoded);
+
+        let legacy = OpSample {
+            apportioned_ns: None,
+            ..s
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&legacy, &mut buf).unwrap();
+        let v: ciborium::Value = ciborium::from_reader(&buf[..]).unwrap();
+        let has_key = v
+            .as_map()
+            .unwrap()
+            .iter()
+            .any(|(k, _)| k.as_text() == Some("apportioned_ns"));
+        assert!(!has_key, "None must not emit a key");
+        let decoded: OpSample = ciborium::from_reader(&buf[..]).unwrap();
+        assert_eq!(decoded.apportioned_ns, None);
     }
 
     #[test]
@@ -954,6 +1000,7 @@ mod tests {
             symbol: None,
             gpu_ns: 12345,
             count: 7,
+            apportioned_ns: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&s, &mut buf).unwrap();

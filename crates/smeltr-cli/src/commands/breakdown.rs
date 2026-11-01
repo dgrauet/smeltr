@@ -74,11 +74,15 @@ pub fn run(
     }
 
     // Same set the MCP tool surfaces, from the same detector: partial op
-    // numbers (#165), and why the tree is mostly <unscoped> -- a fully-lazy
+    // numbers (#165), estimated ones (#314), and why the tree is mostly
+    // <unscoped> -- a fully-lazy
     // pipeline (#163) or a missing Python sidecar (#178).
     let notices = BreakdownNotices::detect(&events);
     if let Some(notice) = crate::degraded::single_session_notice(notices.sampling_disable_episodes)
     {
+        print!("{notice}");
+    }
+    if let Some(notice) = crate::degraded::apportioned_notice(notices.apportioned) {
         print!("{notice}");
     }
     if let Some(gap) = notices.attribution_gap.as_ref() {

@@ -81,6 +81,18 @@ fn apply_session_name_env(builder: &mut std::process::Command, name: Option<&str
     }
 }
 
+/// `--exact-ops` (#314): MLX commits a command buffer every
+/// `MLX_MAX_OPS_PER_BUFFER` ops, and puts them all in one encoder. The hook
+/// can only timestamp encoders on most GPUs, so the kernels of one encoder
+/// share its time by dispatch count. At 1, a buffer holds one or two ops,
+/// nearly always of one kernel, and per-kernel times are measured. MLX-only;
+/// the flag wins over an inherited value, like `--name`.
+fn apply_exact_ops_env(builder: &mut std::process::Command, exact_ops: bool) {
+    if exact_ops {
+        builder.env("MLX_MAX_OPS_PER_BUFFER", "1");
+    }
+}
+
 /// Refuse a `--name` the daemon would drop or truncate (#267): empty, with
 /// control characters or '/', or longer than 200 bytes.
 fn check_name_flag(flag: Option<&str>) -> anyhow::Result<()> {
@@ -151,6 +163,7 @@ pub async fn run(
     name: Option<&str>,
     gputrace: Option<u32>,
     gputrace_scope: Option<&str>,
+    exact_ops: bool,
 ) -> anyhow::Result<i32> {
     check_name_flag(name)?;
     let mut client = Client::connect().await?;
@@ -260,6 +273,7 @@ pub async fn run(
     builder.env("SMELTR_AUTOLOAD", "1");
 
     apply_session_name_env(&mut builder, name);
+    apply_exact_ops_env(&mut builder, exact_ops);
     let scope_token = stamp_scope_token(&mut builder);
     let resolved_name = resolve_session_name(name);
 
@@ -504,6 +518,24 @@ mod tests {
     fn resolve_session_name_returns_none_when_neither_set() {
         std::env::remove_var("SMELTR_SESSION_NAME");
         assert_eq!(resolve_session_name(None), None);
+    }
+
+    /// #314: `--exact-ops` makes MLX commit one op per command buffer, so
+    /// the hook's per-encoder timestamps time one kernel each.
+    #[test]
+    fn exact_ops_sets_one_op_per_buffer() {
+        let env_of = |cmd: &std::process::Command| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new("MLX_MAX_OPS_PER_BUFFER"))
+                .and_then(|(_, v)| v.map(|s| s.to_string_lossy().into_owned()))
+        };
+        let mut cmd = std::process::Command::new("/bin/true");
+        apply_exact_ops_env(&mut cmd, true);
+        assert_eq!(env_of(&cmd).as_deref(), Some("1"));
+
+        let mut cmd = std::process::Command::new("/bin/true");
+        apply_exact_ops_env(&mut cmd, false);
+        assert_eq!(env_of(&cmd), None);
     }
 
     /// #267: an invalid `--name` used to be stored as given (the daemon now

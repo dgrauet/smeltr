@@ -116,6 +116,7 @@ pub fn apply_op_time_scales(events: &mut [Event], scales: &OpTimeScales) {
             if scales.scales.contains_key(&seq) {
                 for op in ops.iter_mut() {
                     op.gpu_ns = scales.scaled_gpu_ns(seq, op.gpu_ns);
+                    op.apportioned_ns = op.apportioned_ns.map(|a| scales.scaled_gpu_ns(seq, a));
                 }
             }
         }
@@ -173,6 +174,7 @@ mod tests {
                         gpu_ns: *ns,
                         count: 1,
                         symbol: None,
+                        apportioned_ns: None,
                     })
                     .collect(),
             },
@@ -201,6 +203,28 @@ mod tests {
         assert_eq!(scales.clamped_cb_count(), 1);
         apply_op_time_scales(&mut events, &scales);
         assert_eq!(op_sums(&events), vec![vec![75, 25]]);
+    }
+
+    /// #314: the apportioned part is a share of `gpu_ns` and must shrink with
+    /// it, or a clamped CB would report more estimated time than total time.
+    #[test]
+    fn rescaling_keeps_the_apportioned_share() {
+        let mut events = vec![
+            sched(1, 0, 1, 9),
+            done(2, 100, 1, 9),
+            cbops(3, 101, 1, &[300, 100]),
+        ];
+        if let Payload::MetalCbOps { ops, .. } = &mut events[2].payload {
+            ops[0].apportioned_ns = Some(300);
+            ops[1].apportioned_ns = Some(0);
+        }
+        let scales = compute_op_time_scales(&events);
+        apply_op_time_scales(&mut events, &scales);
+        let Payload::MetalCbOps { ops, .. } = &events[2].payload else {
+            unreachable!()
+        };
+        assert_eq!(ops[0].apportioned_ns, Some(75));
+        assert_eq!(ops[1].apportioned_ns, Some(0));
     }
 
     #[test]

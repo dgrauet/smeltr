@@ -286,6 +286,7 @@ mod tests {
             symbol: Some(symbol.into()),
             gpu_ns,
             count,
+            apportioned_ns: None,
         }
     }
 
@@ -657,12 +658,14 @@ mod tests {
                         symbol: Some("totally_unknown_sym_xyz".into()),
                         gpu_ns: 1_000_000,
                         count: 1,
+                        apportioned_ns: None,
                     },
                     smeltr_core::event::OpSample {
                         name: "nosy".into(),
                         symbol: None,
                         gpu_ns: 500_000,
                         count: 2,
+                        apportioned_ns: None,
                     },
                 ],
             },

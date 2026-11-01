@@ -78,6 +78,12 @@ pub struct Response {
     /// has always printed this; the tool used to omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Set when a large share of op time was split between kernels by
+    /// dispatch count rather than measured (#314): per-kernel and per-kind
+    /// shares can then be off by an order of magnitude. Same wording as the
+    /// CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_times_estimated: Option<String>,
     /// Tree nodes (each with its whole subtree) cut by `max_depth`, `top_n`
     /// or `min_gpu_ns`. Raise the bounds, or narrow with `field_filter`,
     /// to see them. Absent when nothing was cut.
@@ -120,6 +126,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         .as_ref()
         .map(|g| g.advice().to_string());
     let degraded = notices.degraded_advice();
+    let op_times_estimated = notices.apportioned_advice();
     let mut root = compute_breakdown(events.iter().cloned())
         .map_err(|e| ToolError::BadArgs(format!("breakdown: {e}")))?;
 
@@ -163,6 +170,7 @@ pub fn run(params: Params) -> Result<Response, ToolError> {
         root,
         attribution_gap,
         degraded,
+        op_times_estimated,
         elided_nodes,
     })
 }
@@ -634,6 +642,7 @@ mod tests {
                         symbol: None,
                         gpu_ns: 50,
                         count: 1,
+                        apportioned_ns: None,
                     }],
                 },
             },
@@ -781,6 +790,7 @@ mod tests {
                         symbol: Some("gemm_t_n_bf16_64_64_32".into()),
                         gpu_ns: 1_000_000,
                         count: 1,
+                        apportioned_ns: None,
                     }],
                 },
             },
@@ -992,12 +1002,14 @@ mod tests {
                             symbol: Some("gemm_nn_f32_64_64_32".into()),
                             gpu_ns: 700_000,
                             count: 1,
+                            apportioned_ns: None,
                         },
                         smeltr_core::event::OpSample {
                             name: "K_gemm_b".into(),
                             symbol: Some("gemm_tt_bf16_64_64_32".into()),
                             gpu_ns: 300_000,
                             count: 2,
+                            apportioned_ns: None,
                         },
                     ],
                 },
@@ -1061,6 +1073,21 @@ mod tests {
     /// #165 parity: the CLI has always warned that per-op numbers are
     /// partial when op-timing sampling auto-disabled. The tool used to stay
     /// silent, leaving an agent no way to know the numbers were incomplete.
+    /// #314.
+    #[test]
+    #[serial_test::serial]
+    fn apportioned_session_is_flagged() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("SMELTR_HOME", home.path());
+        let session = crate::test_util::apportioned_session();
+        let resp = run(Params {
+            session,
+            ..Default::default()
+        })
+        .unwrap();
+        crate::test_util::assert_apportioned(resp.op_times_estimated);
+    }
+
     #[test]
     #[serial_test::serial]
     fn sampling_disabled_session_surfaces_degraded_notice() {

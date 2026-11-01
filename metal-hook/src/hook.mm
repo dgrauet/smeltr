@@ -822,9 +822,12 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
     NSUInteger n_encs = encs.count;
     uint64_t *enc_gpu_ns = (uint64_t *)calloc(n_encs, sizeof(uint64_t));
     BOOL    *enc_is_disp = (BOOL *)calloc(n_encs, sizeof(BOOL));
+    // Encoder time read from its own stage-boundary samples, as opposed to
+    // a share of the CB's leftover in_flight_ns (#314).
+    BOOL    *enc_measured = (BOOL *)calloc(n_encs, sizeof(BOOL));
     NSMutableArray<NSData *> *enc_disp_raw = [NSMutableArray new];
-    if (!enc_gpu_ns || !enc_is_disp) {
-        free(enc_gpu_ns); free(enc_is_disp);
+    if (!enc_gpu_ns || !enc_is_disp || !enc_measured) {
+        free(enc_gpu_ns); free(enc_is_disp); free(enc_measured);
         return;
     }
     NSMutableArray<NSArray *> *enc_dispatches = [NSMutableArray new];
@@ -874,6 +877,7 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
                 uint64_t e = ts[1].timestamp;
                 if (s != MTLCounterErrorValue && e != MTLCounterErrorValue && e > s) {
                     enc_gpu_ns[i] = smeltr_ticks_to_ns(e - s);
+                    enc_measured[i] = YES;
                     continue;
                 }
             }
@@ -907,11 +911,16 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
         }
     }
 
-    // Second pass: aggregate per encoder into global (pso, tg) → (gpu_ns, count).
+    // Second pass: aggregate per encoder into global
+    // (pso, tg) → (gpu_ns, count, apportioned_ns).
     // - Dispatch-sampled encoders: exact per-dispatch ns from the resolved
     //   sample buffer; overflow dispatches (cap exceeded) contribute 0.
     // - Stage-sampled encoders: encoder time distributed pro-rata by dispatch
-    //   count within the encoder (unchanged from Phase 2.5b).
+    //   count within the encoder (unchanged from Phase 2.5b). That split is
+    //   reported as apportioned (#314): one GEMM and thirty elementwise
+    //   dispatches get equal shares, so per-kernel figures can be off by an
+    //   order of magnitude. Only an encoder whose dispatches all share one
+    //   (pso, tg) signature, and whose time was measured, is exact.
     NSMutableDictionary<NSArray *, NSArray *> *agg = [NSMutableDictionary new];
     for (NSUInteger i = 0; i < n_encs; i++) {
         NSArray *list = enc_dispatches[i];
@@ -938,10 +947,11 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
                         }
                     }
                 }
-                NSArray *cur = agg[d] ?: @[@(0ULL), @(0ULL)];
+                NSArray *cur = agg[d] ?: @[@(0ULL), @(0ULL), @(0ULL)];
                 agg[d] = @[
                     @([cur[0] unsignedLongLongValue] + kernel_ns),
                     @([cur[1] unsignedLongLongValue] + 1),
+                    cur[2],
                 ];
             }
             continue;
@@ -953,18 +963,21 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
             NSNumber *cur = enc_buckets[d];
             enc_buckets[d] = @([cur unsignedLongLongValue] + 1);
         }
+        BOOL exact = enc_measured[i] && enc_buckets.count == 1;
         for (NSArray *key in enc_buckets) {
             uint64_t dcount = [enc_buckets[key] unsignedLongLongValue];
             uint64_t kernel_ns = (enc_ns * dcount) / list.count;
-            NSArray *cur = agg[key] ?: @[@(0ULL), @(0ULL)];
+            NSArray *cur = agg[key] ?: @[@(0ULL), @(0ULL), @(0ULL)];
             agg[key] = @[
                 @([cur[0] unsignedLongLongValue] + kernel_ns),
                 @([cur[1] unsignedLongLongValue] + dcount),
+                @([cur[2] unsignedLongLongValue] + (exact ? 0 : kernel_ns)),
             ];
         }
     }
     free(enc_gpu_ns);
     free(enc_is_disp);
+    free(enc_measured);
 
     if (agg.count == 0) return;
 
@@ -976,8 +989,11 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
     const char **symbols_buf = (const char **)malloc(sizeof(char *) * n);
     uint64_t *gpu_ns_arr = (uint64_t *)malloc(sizeof(uint64_t) * n);
     uint32_t *counts  = (uint32_t *)malloc(sizeof(uint32_t) * n);
-    if (!names_buf || !names_block || !symbols_buf || !gpu_ns_arr || !counts) {
+    uint64_t *apportioned_arr = (uint64_t *)malloc(sizeof(uint64_t) * n);
+    if (!names_buf || !names_block || !symbols_buf || !gpu_ns_arr || !counts
+        || !apportioned_arr) {
         free(names_buf); free(names_block); free(symbols_buf); free(gpu_ns_arr); free(counts);
+        free(apportioned_arr);
         return;
     }
     uint32_t i = 0;
@@ -1001,17 +1017,19 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
         symbols_buf[i] = smeltr_pso_map_lookup((uintptr_t)pso);  // borrowed; may be NULL
         gpu_ns_arr[i]  = [agg[key][0] unsignedLongLongValue];
         counts[i]      = (uint32_t)[agg[key][1] unsignedLongLongValue];
+        apportioned_arr[i] = [agg[key][2] unsignedLongLongValue];
         i++;
     }
     smeltr_write_cb_ops(g_ring, smeltr_mono_ns(), cb_id,
                         (const char *const *)names_buf,
                         (const char *const *)symbols_buf,
-                        gpu_ns_arr, counts, n);
+                        gpu_ns_arr, counts, apportioned_arr, n);
     free(names_block);
     free(names_buf);
     free(symbols_buf);
     free(gpu_ns_arr);
     free(counts);
+    free(apportioned_arr);
 }
 
 /// Name `pso` and every pipeline state it wraps (#265). Under a Metal

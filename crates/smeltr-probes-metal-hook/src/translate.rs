@@ -84,6 +84,7 @@ pub fn frame_to_payload(f: DecodedFrame) -> Payload {
                     symbol: o.symbol,
                     gpu_ns: o.gpu_ns,
                     count: o.count,
+                    apportioned_ns: Some(o.apportioned_ns),
                 })
                 .collect(),
         },
@@ -160,12 +161,14 @@ mod tests {
                     symbol: None,
                     gpu_ns: 6_200_000,
                     count: 3,
+                    apportioned_ns: 2_000_000,
                 },
                 DecodedOpSample {
                     name: "Softmax".into(),
                     symbol: None,
                     gpu_ns: 1_500_000,
                     count: 1,
+                    apportioned_ns: 0,
                 },
             ],
         });
@@ -176,6 +179,10 @@ mod tests {
                 assert_eq!(ops[0].name, "Matmul");
                 assert_eq!(ops[0].gpu_ns, 6_200_000);
                 assert_eq!(ops[0].count, 3);
+                // #314: ring v4 always carries the field, so a known 0
+                // (measured) must stay distinct from a legacy unknown.
+                assert_eq!(ops[0].apportioned_ns, Some(2_000_000));
+                assert_eq!(ops[1].apportioned_ns, Some(0));
             }
             other => panic!("expected MetalCbOps, got {other:?}"),
         }
@@ -191,12 +198,14 @@ mod tests {
                     symbol: Some("gemm_t_n_bf16".into()),
                     gpu_ns: 100,
                     count: 1,
+                    apportioned_ns: 0,
                 },
                 DecodedOpSample {
                     name: "K_b".into(),
                     symbol: None,
                     gpu_ns: 200,
                     count: 2,
+                    apportioned_ns: 0,
                 },
             ],
         });
