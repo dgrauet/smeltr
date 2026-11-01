@@ -102,13 +102,16 @@ fn panic_aborts_saves_black_box_and_next_boot_recovers() {
         .env("SMELTR_SOCKET", &sock)
         .spawn()
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    // Recovery runs during startup; poll for it instead of a fixed sleep,
+    // which was too short for a cold daemon launch on a loaded CI runner.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while count_recovered(home.path()) == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let recovered = count_recovered(home.path());
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let _ = child.wait();
-    assert!(
-        count_recovered(home.path()) >= 1,
-        "orphaned session must be recovered"
-    );
+    assert!(recovered >= 1, "orphaned session must be recovered");
 }
 
 /// `smeltrd*.ips` crash reports written after `since`.
