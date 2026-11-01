@@ -149,6 +149,11 @@ CBOR length-prefixed frames over a Unix socket. See
   failures (default 30000; the disable used to be permanent — #113).
   `SMELTR_HOOK_TEST_STAGE_ALLOC_FAIL_N=<n>` (test override) forces the next
   n sample-buffer allocs to fail to exercise that path.
+  Stage-boundary samples live in a pool of shared sample buffers (Metal caps
+  live sample buffers at ~32 per process — one per encoder ran out at MLX's
+  warm-up peak, #315); each encoder takes a slot pair, recycled when its CB
+  completes. `SMELTR_HOOK_TEST_STAGE_POOL_PAIRS=<n>` (test override) shrinks
+  the pool to one buffer of n pairs to exercise recycling and exhaustion.
 - `SMELTR_TEST_PANIC_MS=<n>` — test override: the daemon panics in a spawned
   task after n ms. Exercises the black-box panic hook (post-mortem
   `post-mortem-daemon-panic-*` session + `panic-report.txt` + abort);

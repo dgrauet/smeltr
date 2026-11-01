@@ -46,6 +46,8 @@ impl Rule for HookDegradationRule {
             let Payload::MetalHookSkipped { reason } = &first.payload else {
                 unreachable!()
             };
+            let spans = disabled_spans(events, &disable_marker, &reenable_marker);
+            let share = op_share_in_spans(events, &spans);
             out.push(
                 Finding::new(
                     Severity::Warning,
@@ -56,9 +58,10 @@ impl Rule for HookDegradationRule {
                     ),
                 )
                 .with_detail(format!(
-                    "Per-op GPU attribution (origins/op-summary/breakdown) is incomplete \
-                     during the disabled spans (re-enabled {reenables} time(s) by the \
-                     backoff retry)."
+                    "Sampling was off during {}. {share} of op-level GPU time was recorded in these \
+                     spans: those per-op times are split by dispatch count, not measured \
+                     (re-enabled {reenables} time(s) by the backoff retry).",
+                    format_spans(&spans)
                 ))
                 .with_evidence(EvidenceRef {
                     seq: first.seq,
@@ -162,6 +165,72 @@ impl Rule for HookDegradationRule {
     }
 }
 
+/// `[start, end)` spans (session-relative ns) during which one kind of
+/// sampling was off; `None` = never re-enabled.
+fn disabled_spans(events: &[Event], disable: &str, reenable: &str) -> Vec<(u64, Option<u64>)> {
+    let mut spans = Vec::new();
+    let mut open: Option<u64> = None;
+    for ev in events {
+        if let Payload::MetalHookSkipped { reason } = &ev.payload {
+            if reason.contains(disable) {
+                open.get_or_insert(ev.ts_mono_ns);
+            } else if reason.contains(reenable) {
+                if let Some(start) = open.take() {
+                    spans.push((start, Some(ev.ts_mono_ns)));
+                }
+            }
+        }
+    }
+    if let Some(start) = open {
+        spans.push((start, None));
+    }
+    spans
+}
+
+/// Share of (clamped) op GPU time whose CB completed inside `spans`, as
+/// "N%", or "an unknown share" for a session without op samples.
+fn op_share_in_spans(events: &[Event], spans: &[(u64, Option<u64>)]) -> String {
+    let scales = crate::op_clamp::compute_op_time_scales(events);
+    let (mut inside, mut total) = (0u64, 0u64);
+    for ev in events {
+        if let Payload::MetalCbOps { ops, .. } = &ev.payload {
+            let ns: u64 = ops
+                .iter()
+                .map(|o| scales.scaled_gpu_ns(ev.seq, o.gpu_ns))
+                .sum();
+            total += ns;
+            let t = ev.ts_mono_ns;
+            if spans
+                .iter()
+                .any(|&(s, e)| t >= s && e.is_none_or(|e| t < e))
+            {
+                inside += ns;
+            }
+        }
+    }
+    if total == 0 {
+        return "an unknown share".to_string();
+    }
+    format!("{:.0}%", inside as f64 * 100.0 / total as f64)
+}
+
+fn format_spans(spans: &[(u64, Option<u64>)]) -> String {
+    const SHOWN: usize = 5;
+    let secs = |ns: u64| ns as f64 / 1e9;
+    let mut parts: Vec<String> = spans
+        .iter()
+        .take(SHOWN)
+        .map(|&(s, e)| match e {
+            Some(e) => format!("{:.1}–{:.1} s", secs(s), secs(e)),
+            None => format!("{:.1} s–end", secs(s)),
+        })
+        .collect();
+    if spans.len() > SHOWN {
+        parts.push(format!("and {} more", spans.len() - SHOWN));
+    }
+    parts.join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +295,63 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warning);
         assert!(findings[0].title.contains("GPU op timing degraded"));
+    }
+
+    fn skipped(ts: u64, reason: &str) -> Event {
+        ev(
+            ts,
+            Source::MetalHook,
+            Payload::MetalHookSkipped {
+                reason: reason.to_string(),
+            },
+        )
+    }
+
+    const S: u64 = 1_000_000_000;
+
+    /// #315: "disabled 1 time(s)" did not say whether the op tables were 5 %
+    /// or 60 % estimates. The finding names the disabled spans and the share
+    /// of op GPU time recorded inside them.
+    #[test]
+    fn disabled_spans_and_their_op_share_are_reported() {
+        let events = vec![
+            cb_ops(5 * S, &[("Gemm", 100, 0)]),
+            skipped(
+                10 * S,
+                "stage sampling disabled after sustained alloc failures \
+                 (pro-rata fallback; backoff retry scheduled)",
+            ),
+            cb_ops(20 * S, &[("Gemm", 300, 300)]),
+            skipped(40 * S, "stage sampling re-enabled (backoff retry)"),
+            cb_ops(50 * S, &[("Gemm", 100, 0)]),
+        ];
+        let findings = HookDegradationRule.check(&events);
+        let f = findings
+            .iter()
+            .find(|f| f.title.contains("stage sampling disabled"))
+            .expect("degraded finding");
+        assert!(f.detail.contains("10.0–40.0 s"), "{}", f.detail);
+        assert!(f.detail.contains("60%"), "{}", f.detail);
+    }
+
+    #[test]
+    fn a_span_never_reenabled_runs_to_the_end() {
+        let events = vec![
+            cb_ops(5 * S, &[("Gemm", 100, 0)]),
+            skipped(
+                10 * S,
+                "stage sampling disabled after sustained alloc failures \
+                 (pro-rata fallback; backoff retry scheduled)",
+            ),
+            cb_ops(20 * S, &[("Gemm", 100, 100)]),
+        ];
+        let findings = HookDegradationRule.check(&events);
+        let f = findings
+            .iter()
+            .find(|f| f.title.contains("stage sampling disabled"))
+            .expect("degraded finding");
+        assert!(f.detail.contains("10.0 s–end"), "{}", f.detail);
+        assert!(f.detail.contains("50%"), "{}", f.detail);
     }
 
     /// Backoff cycling (disable → re-enable → disable …) must aggregate into
