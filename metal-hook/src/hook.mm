@@ -24,6 +24,7 @@
 #include <objc/runtime.h>
 #include <objc/message.h>
 #include <stdatomic.h>
+#include <os/lock.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -218,7 +219,8 @@ static void smeltr_recalibration_init(id<MTLDevice> device) {
 static const void *kSmeltrEncodersKey    = &kSmeltrEncodersKey;   // NSMutableArray of encoders per CB
 static const void *kSmeltrEncoderPsoKey  = &kSmeltrEncoderPsoKey; // current PSO on encoder (NSValue wrapping uintptr_t)
 static const void *kSmeltrEncoderDispKey = &kSmeltrEncoderDispKey; // NSMutableArray of dispatch records per encoder
-static const void *kSmeltrEncoderSBKey   = &kSmeltrEncoderSBKey;  // id<MTLCounterSampleBuffer> per encoder (stage or dispatch)
+static const void *kSmeltrEncoderSBKey   = &kSmeltrEncoderSBKey;  // id<MTLCounterSampleBuffer> per encoder (dispatch boundary)
+static const void *kSmeltrEncoderStageSlotKey = &kSmeltrEncoderStageSlotKey; // SmeltrStageSlot per encoder (stage boundary, #315)
 static const void *kSmeltrEncoderSBIdxKey   = &kSmeltrEncoderSBIdxKey;   // NSNumber: next free dispatch-sample slot
 static const void *kSmeltrEncoderDispIdxKey = &kSmeltrEncoderDispIdxKey; // NSMutableArray<NSNumber>: per-dispatch start_idx (-1 if not sampled), parallel to kSmeltrEncoderDispKey
 
@@ -229,6 +231,92 @@ static const void *kSmeltrEncoderDispIdxKey = &kSmeltrEncoderDispIdxKey; // NSMu
 static const NSUInteger kDispatchBoundarySampleCap = 1024;
 
 static const NSUInteger kStageBoundarySampleCount = 2;  // start + end
+
+/* ============ Stage-boundary sample slot pool (#315) ============
+ *
+ * Metal caps the number of live MTLCounterSampleBuffers per process (32 on
+ * an M2 Pro), and an encoder outlives its command buffer's completion until
+ * its autorelease pool drains. One 2-sample buffer per encoder therefore ran
+ * out after 32 encoders on a loop without its own pool, and at MLX's
+ * warm-up peak (~20 s into a run) on real workloads; every op after that was
+ * apportioned by dispatch count until the 30 s backoff retry.
+ *
+ * Instead a few large buffers are allocated lazily and each encoder takes one
+ * (start, end) slot pair. The pair returns to the free list as soon as its
+ * command buffer's results are resolved (smeltr_release_stage_slots), or when
+ * the encoder is deallocated if the completion handler never ran.
+ */
+static const NSUInteger kStagePoolSamples = 4096;   // 32 KiB of timestamps
+static const NSUInteger kStagePoolMaxBuffers = 8;
+static const NSUInteger kStagePoolPairsPerBuffer = kStagePoolSamples / 2;
+// Test-only (SMELTR_HOOK_TEST_STAGE_POOL_PAIRS=<n>): one pool buffer of n
+// slot pairs, so a short run exercises recycling and exhaustion.
+static NSUInteger g_stage_pool_pairs = kStagePoolPairsPerBuffer;
+static NSUInteger g_stage_pool_max_buffers = kStagePoolMaxBuffers;
+static os_unfair_lock g_stage_pool_lock = OS_UNFAIR_LOCK_INIT;
+static id<MTLCounterSampleBuffer> g_stage_pool_sb[kStagePoolMaxBuffers];
+static NSUInteger g_stage_pool_n = 0;
+// Free slot pairs, as buffer_index * kStagePoolPairsPerBuffer + pair_index.
+static uint32_t g_stage_pool_free[kStagePoolMaxBuffers * kStagePoolPairsPerBuffer];
+static NSUInteger g_stage_pool_free_n = 0;
+
+@interface SmeltrStageSlot : NSObject {
+    @public id<MTLCounterSampleBuffer> sb;
+    @public uint32_t token;
+    @public NSUInteger start_index;  // end sample is start_index + 1
+    @public atomic_bool released;
+}
+@end
+
+static void smeltr_stage_slot_release(SmeltrStageSlot *slot) {
+    if (!slot || atomic_exchange(&slot->released, true)) return;
+    os_unfair_lock_lock(&g_stage_pool_lock);
+    g_stage_pool_free[g_stage_pool_free_n++] = slot->token;
+    os_unfair_lock_unlock(&g_stage_pool_lock);
+}
+
+@implementation SmeltrStageSlot
+- (void)dealloc {
+    // Backstop for a command buffer whose completion handler never ran.
+    smeltr_stage_slot_release(self);
+}
+@end
+
+/// Take a free slot pair, allocating another pool buffer when none is left.
+/// Returns nil (and fills *err when Metal refused) once the pool is full.
+static SmeltrStageSlot *smeltr_stage_slot_acquire(id<MTLDevice> device, NSError **err) {
+    os_unfair_lock_lock(&g_stage_pool_lock);
+    if (g_stage_pool_free_n == 0 && g_stage_pool_n < g_stage_pool_max_buffers) {
+        MTLCounterSampleBufferDescriptor *sbd = [MTLCounterSampleBufferDescriptor new];
+        sbd.counterSet = g_timestamp_counter_set;
+        sbd.storageMode = MTLStorageModeShared;
+        sbd.sampleCount = g_stage_pool_pairs * 2;
+        id<MTLCounterSampleBuffer> sb =
+            [device newCounterSampleBufferWithDescriptor:sbd error:err];
+        if (sb) {
+            NSUInteger b = g_stage_pool_n++;
+            g_stage_pool_sb[b] = sb;
+            for (NSUInteger i = g_stage_pool_pairs; i > 0; i--) {
+                g_stage_pool_free[g_stage_pool_free_n++] =
+                    (uint32_t)(b * kStagePoolPairsPerBuffer + i - 1);
+            }
+        }
+    }
+    if (g_stage_pool_free_n == 0) {
+        os_unfair_lock_unlock(&g_stage_pool_lock);
+        return nil;
+    }
+    uint32_t token = g_stage_pool_free[--g_stage_pool_free_n];
+    id<MTLCounterSampleBuffer> sb = g_stage_pool_sb[token / kStagePoolPairsPerBuffer];
+    os_unfair_lock_unlock(&g_stage_pool_lock);
+
+    SmeltrStageSlot *slot = [SmeltrStageSlot new];
+    slot->sb = sb;
+    slot->token = token;
+    slot->start_index = (token % kStagePoolPairsPerBuffer) * 2;
+    atomic_init(&slot->released, false);
+    return slot;
+}
 
 /* Keys for saved original IMPs (stored on the encoder class object). */
 static const void *kSmeltrOrigSetPSO              = &kSmeltrOrigSetPSO;
@@ -807,6 +895,16 @@ static void smeltr_install_ml_encoder_swizzle(void) {
     }
 }
 
+/// Return the stage slot pairs of a completed command buffer's encoders to
+/// the pool (#315). Called after their samples were resolved; the encoders
+/// themselves may live on until an autorelease pool drains.
+static void smeltr_release_stage_slots(id<MTLCommandBuffer> done_cb) {
+    NSArray *encs = objc_getAssociatedObject(done_cb, kSmeltrEncodersKey);
+    for (id enc in encs) {
+        smeltr_stage_slot_release(objc_getAssociatedObject(enc, kSmeltrEncoderStageSlotKey));
+    }
+}
+
 /* ============ CB-completion helper: emit MetalCbOps from PSO+tg buckets ============ */
 
 /// Aggregate dispatch records per CB into (pso, tg) buckets. For each encoder,
@@ -868,8 +966,10 @@ static void smeltr_emit_cb_ops_pso(id<MTLCommandBuffer> done_cb, uint64_t cb_id,
         // Placeholder so enc_disp_raw is index-aligned with encs.
         [enc_disp_raw addObject:(NSData *)[NSData data]];
 
-        if (sb && g_stage_sampling_enabled) {
-            NSData *raw = [sb resolveCounterRange:NSMakeRange(0, kStageBoundarySampleCount)];
+        SmeltrStageSlot *slot = objc_getAssociatedObject(enc, kSmeltrEncoderStageSlotKey);
+        if (slot) {
+            NSData *raw = [slot->sb resolveCounterRange:
+                NSMakeRange(slot->start_index, kStageBoundarySampleCount)];
             if (raw.length >= kStageBoundarySampleCount * sizeof(MTLCounterResultTimestamp)) {
                 const MTLCounterResultTimestamp *ts =
                     (const MTLCounterResultTimestamp *)raw.bytes;
@@ -1239,6 +1339,7 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
                     smeltr_emit_cb_ops_pso(done_cb, captured_cb_id,
                         smeltr_cb_gpu_window(done_cb, [done_cb commandQueue],
                                              done_ts, in_flight));
+                    smeltr_release_stage_slots(done_cb);
                     smeltr_emit_device_mem_sample("cb_completed");
                     if (depth_q) {
                         atomic_fetch_sub_explicit(&queue_depth_of(depth_q)->value, 1,
@@ -1384,7 +1485,7 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
 - (id)smeltr_computeCommandEncoderWithDispatchType:(NSUInteger)dt {
     id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)self;
     id enc;
-    id<MTLCounterSampleBuffer> sb_for_this_encoder = nil;
+    SmeltrStageSlot *slot_for_this_encoder = nil;
 
     if (g_op_capture_enabled && !g_stage_sampling_enabled
         && smeltr_sampling_retry_due(&g_stage_retry_at_ns)) {
@@ -1401,7 +1502,7 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
     // start/end samples via sampleCountersInBuffer:atSampleIndex:withBarrier:.
     if (g_op_capture_enabled && g_dispatch_sampling_enabled) {
         enc = [self smeltr_computeCommandEncoderWithDispatchType:dt]; // original
-        // sb_for_this_encoder stays nil; smeltr_attach_dispatch_sample_buffer
+        // slot_for_this_encoder stays nil; smeltr_attach_dispatch_sample_buffer
         // associates the SB directly on the encoder below.
     } else if (g_op_capture_enabled && g_stage_sampling_enabled) {
         // Substitute WithDispatchType: with WithDescriptor: so we can attach a
@@ -1409,24 +1510,20 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
         MTLComputePassDescriptor *desc = [MTLComputePassDescriptor computePassDescriptor];
         desc.dispatchType = (MTLDispatchType)dt;
 
-        MTLCounterSampleBufferDescriptor *sbd = [MTLCounterSampleBufferDescriptor new];
-        sbd.counterSet = g_timestamp_counter_set;
-        sbd.storageMode = MTLStorageModeShared;
-        sbd.sampleCount = kStageBoundarySampleCount;
         NSError *err = nil;
-        sb_for_this_encoder = smeltr_test_consume_forced_alloc_failure()
+        slot_for_this_encoder = smeltr_test_consume_forced_alloc_failure()
             ? nil
-            : [[cb device] newCounterSampleBufferWithDescriptor:sbd error:&err];
-        if (sb_for_this_encoder) {
+            : smeltr_stage_slot_acquire([cb device], &err);
+        if (slot_for_this_encoder) {
             atomic_store(&g_stage_alloc_failures, 0);
             MTLComputePassSampleBufferAttachmentDescriptor *att =
                 desc.sampleBufferAttachments[0];
-            att.sampleBuffer = sb_for_this_encoder;
-            att.startOfEncoderSampleIndex = 0;
-            att.endOfEncoderSampleIndex   = 1;
+            att.sampleBuffer = slot_for_this_encoder->sb;
+            att.startOfEncoderSampleIndex = slot_for_this_encoder->start_index;
+            att.endOfEncoderSampleIndex   = slot_for_this_encoder->start_index + 1;
         } else {
-            // Stage sample buffer allocation can fail under sustained load
-            // (device has a per-process quota of these). Log the first failure
+            // The slot pool is full or Metal refused a pool buffer (the
+            // device caps live sample buffers per process). Log the first failure
             // and after N consecutive failures disable stage sampling for the
             // rest of the session; from then on the analyzer falls back to
             // Phase 2.5a per-CB pro-rata attribution.
@@ -1457,8 +1554,8 @@ static void smeltr_track_commit(id cb_obj, id queue_obj) {
     }
 
     if (enc && g_op_capture_enabled) {
-        if (sb_for_this_encoder) {
-            objc_setAssociatedObject(enc, kSmeltrEncoderSBKey, sb_for_this_encoder,
+        if (slot_for_this_encoder) {
+            objc_setAssociatedObject(enc, kSmeltrEncoderStageSlotKey, slot_for_this_encoder,
                                       OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         smeltr_install_dispatch_swizzles((id<MTLComputeCommandEncoder>)enc);
@@ -1795,6 +1892,14 @@ static void smeltr_swizzle_device_class(void) {
         } else {
             smeltr_log("SMELTR_HOOK_SAMPLING_RETRY_MS=%s: ignored (out of range 1..3600000)",
                        retry_ms);
+        }
+    }
+    const char *pool_pairs = getenv("SMELTR_HOOK_TEST_STAGE_POOL_PAIRS");
+    if (pool_pairs) {
+        long v = strtol(pool_pairs, NULL, 10);
+        if (v >= 1 && (NSUInteger)v <= kStagePoolPairsPerBuffer) {
+            g_stage_pool_pairs = (NSUInteger)v;
+            g_stage_pool_max_buffers = 1;
         }
     }
     const char *no_class_commit = getenv("SMELTR_HOOK_TEST_NO_CB_CLASS_COMMIT");

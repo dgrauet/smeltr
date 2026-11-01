@@ -157,7 +157,12 @@ fn main() {
     // `gemm_test_kernel` after the loop kernel — two kernels sharing one
     // encoder, whose time the hook can only split by dispatch count (#314).
     let mixed = std::env::var("SMELTR_HARNESS_MIXED").as_deref() == Ok("1");
-    let loop_pso = if heavy {
+    // SMELTR_HARNESS_ALTERNATE=1: even iterations run the compute-bound
+    // `busy_kernel`, odd ones the light kernel, so an encoder that read
+    // another encoder's timestamps shows up as a light kernel with a heavy
+    // duration (#315: sample slots shared in a pool).
+    let alternate = std::env::var("SMELTR_HARNESS_ALTERNATE").as_deref() == Ok("1");
+    let loop_pso = if heavy || alternate {
         let busy_src = r#"
             #include <metal_stdlib>
             using namespace metal;
@@ -186,16 +191,17 @@ fn main() {
         pso.clone()
     };
     let mut last_cb = None;
-    for _ in 0..iters {
+    for i in 0..iters {
         let cb = queue.commandBuffer().expect("command buffer");
         let encoder = cb
             .computeCommandEncoderWithDispatchType(MTLDispatchType::Serial)
             .expect("compute encoder");
-        encoder.setComputePipelineState(&loop_pso);
+        let busy = heavy || (alternate && i % 2 == 0);
+        encoder.setComputePipelineState(if busy { &loop_pso } else { &pso });
         // SAFETY: out_buf is a live 4096-byte buffer; busy_kernel writes
         // index gid % 1024, the light kernel 16 floats.
         unsafe { encoder.setBuffer_offset_atIndex(Some(&out_buf), 0, 0) };
-        let threads = if heavy { 32768 } else { 16 };
+        let threads = if busy { 32768 } else { 16 };
         encoder.dispatchThreads_threadsPerThreadgroup(size(threads), size(16));
         if mixed {
             encoder.setComputePipelineState(&pso);
