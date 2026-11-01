@@ -89,13 +89,16 @@ fn wrapper_layers_record_each_command_buffer_once() {
         "MTL_SHADER_VALIDATION",
     ] {
         let got = counts(dir.path(), Some(layer));
-        // CB_OPS come only from the app's encoders: exact. Buffer counts may
-        // move by one — the paravirtualized CI GPU submits an internal
-        // buffer on the app's queue in some runs and not others — while a
-        // double count doubles them (24 vs 12).
-        let close = |a: usize, b: usize| a.abs_diff(b) <= 1;
+        // CB_OPS come only from the app's encoders: exact. Buffer counts are
+        // not: on the paravirtualized macos-15 runner, shader validation
+        // submits buffers of its own on the app's queue, genuine and
+        // completed (17 vs 12 seen, 13 in other runs). A double count records
+        // every app buffer twice, i.e. at least one extra buffer per
+        // op-carrying one; the layer's own buffers have stayed well below
+        // that. A lost buffer would show as fewer than the bare run.
+        let plausible = |a: usize, b: usize| a + 1 >= b && a < b + bare.2;
         assert!(
-            got.2 == bare.2 && close(got.0, bare.0) && close(got.1, bare.1),
+            got.2 == bare.2 && plausible(got.0, bare.0) && plausible(got.1, bare.1),
             "(committed, completed, cb_ops) under {layer}: {got:?} vs no layer {bare:?}; \
              commit paths:\n{}",
             commit_trace(dir.path(), layer)
