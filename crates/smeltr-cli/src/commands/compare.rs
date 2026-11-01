@@ -23,6 +23,15 @@ pub fn run(session_a: &str, session_b: Option<&str>, last: bool, top: usize) -> 
         sampling_disable_episodes(&a_events),
         sampling_disable_episodes(&b_events),
     );
+    let mut estimated = String::new();
+    render_apportioned_banner(
+        &mut estimated,
+        (
+            smeltr_analyzer::ApportionedOps::detect(&a_events),
+            smeltr_analyzer::ApportionedOps::detect(&b_events),
+        ),
+    );
+    print!("{estimated}");
     let meta = |d: &std::path::Path| smeltr_core::reader::read_metadata(d).ok();
     if let (Some(ma), Some(mb)) = (meta(&dir_a), meta(&dir_b)) {
         if let Some(caveat) = smeltr_analyzer::diff::timing_caveat(&ma, &mb) {
@@ -52,6 +61,35 @@ fn render_degraded_banner(out: &mut String, (a, b): (usize, usize)) {
         }
     }
     out.push('\n');
+}
+
+/// #314: op-kind deltas between per-kernel times split by dispatch count
+/// can come from where the encoders fell rather than from a change in cost.
+fn render_apportioned_banner(
+    out: &mut String,
+    (a, b): (
+        Option<smeltr_analyzer::ApportionedOps>,
+        Option<smeltr_analyzer::ApportionedOps>,
+    ),
+) {
+    let sides: Vec<(&str, f64)> = [("A", a), ("B", b)]
+        .into_iter()
+        .filter_map(|(label, est)| {
+            est.filter(|e| e.advice().is_some())
+                .map(|e| (label, e.share()))
+        })
+        .collect();
+    if sides.is_empty() {
+        return;
+    }
+    out.push_str("⚠ op times estimated (split between kernels by dispatch count, not measured):\n");
+    for (label, share) in sides {
+        out.push_str(&format!("  {label}: {:.0}% of op time\n", share * 100.0));
+    }
+    out.push_str(
+        "  Op-kind deltas below can be artefacts. Record both with \
+         `smeltr record --exact-ops` for measured per-kernel times.\n\n",
+    );
 }
 
 pub(crate) fn render(
@@ -373,6 +411,27 @@ mod degraded_banner_tests {
         assert!(s.contains("op-level numbers partial"), "got:\n{s}");
         assert!(s.contains("B: sampling disabled 2 time(s)"), "got:\n{s}");
         assert!(!s.contains("A: sampling disabled"), "got:\n{s}");
+    }
+
+    /// #314: an op-kind delta between two estimated splits can be an
+    /// artefact of where the encoders fell, not a change in cost.
+    #[test]
+    fn apportioned_banner_names_the_estimated_side() {
+        let est = |a, t| {
+            Some(smeltr_analyzer::ApportionedOps {
+                apportioned_ns: a,
+                total_ns: t,
+            })
+        };
+        let mut s = String::new();
+        render_apportioned_banner(&mut s, (None, est(70, 100)));
+        assert!(s.contains("op times estimated"), "got:\n{s}");
+        assert!(s.contains("B: 70%"), "got:\n{s}");
+        assert!(!s.contains("A:"), "got:\n{s}");
+        assert!(s.contains("--exact-ops"), "got:\n{s}");
+        let mut clean = String::new();
+        render_apportioned_banner(&mut clean, (est(1, 100), None));
+        assert!(clean.is_empty(), "got:\n{clean}");
     }
 
     #[test]

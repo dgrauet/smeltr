@@ -153,6 +153,10 @@ fn main() {
     // kernel (~tens of ms per CB) so queueing is measurable.
     let no_wait = std::env::var("SMELTR_HARNESS_NO_WAIT").as_deref() == Ok("1");
     let heavy = std::env::var("SMELTR_HARNESS_HEAVY").as_deref() == Ok("1");
+    // SMELTR_HARNESS_MIXED=1: each loop encoder also dispatches the light
+    // `gemm_test_kernel` after the loop kernel — two kernels sharing one
+    // encoder, whose time the hook can only split by dispatch count (#314).
+    let mixed = std::env::var("SMELTR_HARNESS_MIXED").as_deref() == Ok("1");
     let loop_pso = if heavy {
         let busy_src = r#"
             #include <metal_stdlib>
@@ -193,6 +197,10 @@ fn main() {
         unsafe { encoder.setBuffer_offset_atIndex(Some(&out_buf), 0, 0) };
         let threads = if heavy { 32768 } else { 16 };
         encoder.dispatchThreads_threadsPerThreadgroup(size(threads), size(16));
+        if mixed {
+            encoder.setComputePipelineState(&pso);
+            encoder.dispatchThreads_threadsPerThreadgroup(size(16), size(16));
+        }
         encoder.endEncoding();
         cb.commit();
         if no_wait {

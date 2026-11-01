@@ -334,10 +334,11 @@ void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
     const char *const *symbols,
     const uint64_t *gpu_ns,
     const uint32_t *counts,
+    const uint64_t *apportioned_ns,
     uint32_t op_count)
 {
     /* per-op upper bound: 4 (name_len) + 1024 (name) + 4 (symbol_len) +
-       1024 (symbol) + 8 (gpu_ns) + 4 (count). Names/symbols are bounded
+       1024 (symbol) + 8 (gpu_ns) + 4 (count) + 8 (apportioned_ns). Names/symbols are bounded
        in practice by MLX primitive/kernel names (~30 / ~80 chars), but
        cap each at 1024 for safety to keep buffer size sane. */
     size_t cap = 16;
@@ -349,7 +350,7 @@ void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
             sl = strlen(symbols[i]);
             if (sl > 1024) sl = 1024;
         }
-        cap += 4 + nl + 4 + sl + 8 + 4;
+        cap += 4 + nl + 4 + sl + 8 + 4 + 8;
     }
     uint8_t *buf = (uint8_t *)malloc(cap);
     if (!buf) return;
@@ -376,6 +377,7 @@ void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
 
         BUF_PUSH_U64(buf, off, gpu_ns[i]);
         BUF_PUSH_U32(buf, off, counts[i]);
+        BUF_PUSH_U64(buf, off, apportioned_ns ? apportioned_ns[i] : 0);
     }
     write_frame(r, SMELTR_KIND_CB_OPS, ts, buf, off);
     free(buf);

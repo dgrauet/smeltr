@@ -179,11 +179,17 @@ remains as fallback and disambiguates a single PSO launched with
 different shapes.
 
 Per-kernel GPU time comes from Metal counter sampling at compute-stage
-boundaries, distributed pro-rata by dispatch count within each encoder —
-or measured exactly per dispatch on M3+ with
-`SMELTR_HOOK_DISPATCH_BOUNDARY=1`. Module/scope window totals are the
-sum of these per-op times (a CB's queue-wait time is never counted), so
-attributed GPU time stays ≤ wall clock.
+boundaries: the GPU timestamps each encoder, not each dispatch. An
+encoder running one kernel is measured; an encoder running several has
+its time split between them by dispatch count, which is an estimate —
+MLX puts dozens of kernels in one encoder, and a GEMM sharing it with
+thirty elementwise kernels gets one share in thirty-one. smeltr reports
+how much of the op time was split that way (`op times estimated`, per
+row as `apportioned_ns`). To measure every kernel, record with
+`smeltr record --exact-ops` (MLX: one op per command buffer), or on M3+
+with `SMELTR_HOOK_DISPATCH_BOUNDARY=1`. Module/scope window totals are
+the sum of these per-op times (a CB's queue-wait time is never counted),
+so attributed GPU time stays ≤ wall clock.
 
 When a workload barely calls `mx.eval` (lazy pipelines, autoregressive
 LLMs), command buffers with no eval window fall back to the innermost

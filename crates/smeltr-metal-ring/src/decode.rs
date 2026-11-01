@@ -7,6 +7,9 @@ pub struct DecodedOpSample {
     pub symbol: Option<String>,
     pub gpu_ns: u64,
     pub count: u32,
+    /// Part of `gpu_ns` split across different kernels by dispatch count
+    /// rather than measured (#314; ring v4).
+    pub apportioned_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,11 +220,13 @@ pub fn decode_frame(kind_val: u32, payload: &[u8]) -> Result<DecodedFrame, RingE
 
                 let gpu_ns = c.read_u64()?;
                 let count = c.read_u32()?;
+                let apportioned_ns = c.read_u64()?;
                 ops.push(DecodedOpSample {
                     name,
                     symbol,
                     gpu_ns,
                     count,
+                    apportioned_ns,
                 });
             }
             DecodedFrame::CbOps { cb_id, ops }

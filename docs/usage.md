@@ -56,6 +56,9 @@ It will:
 2. Open a scoped session for the target and attach the per-run probes.
 3. Wait for the target to exit, then flush and close the session.
 
+`--exact-ops` measures per-kernel GPU time instead of estimating it (MLX
+only; see [Per-kernel times: measured or estimated](#per-kernel-times-measured-or-estimated)).
+
 Opt-in Metal captures, openable in Xcode's Metal debugger: `--gputrace <N>`
 records the first N command buffers; `--gputrace-scope <NAME>` records the
 work of one named `smeltr.scope(...)` (needs the Python sidecar). Both
@@ -177,6 +180,51 @@ empty-module-stack eval windows) and print an explicit
   eval** (see "Profiling scopes" below), or
 - record with `SMELTR_STACK_CAPTURE=1` and use `smeltr origins` for
   file:line attribution (it will point at the `mx.eval` call site).
+
+#### Per-kernel times: measured or estimated
+
+The GPU timestamps each compute encoder at its start and end (stage-boundary
+sampling); it does not timestamp each dispatch. An encoder that runs one
+kernel is therefore measured. An encoder that runs several has its time
+split between them **by dispatch count**, and MLX puts dozens of kernels in
+one encoder: a large GEMM and thirty small elementwise kernels each get one
+thirty-first. The split looks exact and is not.
+
+On a bench of eight bf16 GEMMs (2048×3072 @ 3072×3072), each followed by
+thirty small elementwise ops, 20 steps, M2 Pro (two runs each, quiet GPU):
+
+| | Matmul | Elementwise | `op times estimated` | ms/step |
+|---|---|---|---|---|
+| Ground truth (each group timed alone) | ~97 % | ~3 % | — | 73–80 |
+| `smeltr record` | 73 % | 26 % | 27–28 % | 74–77 |
+| `smeltr record --exact-ops` | 95 % | 4 % | 3 % (no warning) | 85 |
+
+The 23 points that the elementwise ops gain in the default recording are
+the GEMM time they were handed, and the warning measures that share.
+
+smeltr reports how much of the op time was split this way. `smeltr
+breakdown`, `smeltr origins`, `smeltr analyze`, `get_inference_breakdown`,
+`get_op_summary`, `get_dispatch_origins` and `get_session_summary` print an
+`op times estimated: N%` warning when it is 5 % or more; `smeltr compare`
+and `compare_sessions` name the side(s) concerned, since an op-kind delta
+between two estimates can come from where the encoders fell rather than
+from a change in cost. Each op row carries `apportioned_ns`, the part of
+its `gpu_ns` that was split rather than measured. Sessions recorded before
+smeltr 0.31 do not carry it and get no warning.
+
+To measure every kernel:
+
+- `smeltr record --exact-ops -- python …` sets `MLX_MAX_OPS_PER_BUFFER=1` in
+  the target: MLX commits a command buffer after every op or two, so each
+  encoder holds one kernel (rarely two, and those are still reported as
+  estimated). More command buffers cost time, so use it to read per-kernel
+  shares, not to compare scope totals with a run recorded without it.
+- On M3 and later, `SMELTR_HOOK_DISPATCH_BOUNDARY=1` timestamps each dispatch
+  without changing the program.
+
+Inside one encoder MLX dispatches concurrently, so even a measured encoder
+time covers kernels that overlap; only one kernel per encoder (or per-dispatch
+timestamps) gives a per-kernel figure.
 
 Kill switch: `SMELTR_HOOK_NO_OPS=1` disables op-level capture entirely
 (module-level breakdown stays active). See the
@@ -693,8 +741,8 @@ page the call.
 | `find_correlations` | Events from other sources around a focal event | Capped (default 50, `max_events`), notable events first (errors, marks, crashes) then telemetry by proximity; dropped events summarized per kind in `elided` |
 | `get_crash_report` | Session had a crash | parsed crash dumps |
 | `get_metal_cb_history` | Inspect Metal command-buffer activity | CB committed/scheduled/completed events |
-| `get_inference_breakdown` | Per-scope GPU time tree | Hierarchical: scope → child scopes + ops |
-| `get_op_summary` | Flat cross-scope op stats | Aggregated by op `kind` (Matmul, SDPA, …) |
+| `get_inference_breakdown` | Per-scope GPU time tree | Hierarchical: scope → child scopes + ops; `op_times_estimated` when per-kernel times are split by dispatch count |
+| `get_op_summary` | Flat cross-scope op stats | Aggregated by op `kind` (Matmul, SDPA, …), with per-row `apportioned_ns` and `op_times_estimated` |
 | `get_memory_breakdown` | Per-scope memory peak/avg/end + heap | `scope_memory`, `heap_memory` arrays |
 | `get_dispatch_origins` | Per-(kind, file:line) attribution | requires `SMELTR_STACK_CAPTURE=1` at record time |
 | `compare_sessions` | A/B regression analysis | `scope_deltas`, `op_deltas`, `memory_deltas`, `origin_deltas`, scopes-only-in-A/B |

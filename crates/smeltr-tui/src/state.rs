@@ -573,12 +573,14 @@ mod tests {
                         gpu_ns: 150,
                         count: 1,
                         symbol: None,
+                        apportioned_ns: None,
                     },
                     OpSample {
                         name: "b".into(),
                         gpu_ns: 50,
                         count: 1,
                         symbol: None,
+                        apportioned_ns: None,
                     },
                 ],
             },
@@ -600,12 +602,14 @@ mod tests {
                         symbol: None,
                         gpu_ns: 100,
                         count: 1,
+                        apportioned_ns: None,
                     },
                     OpSample {
                         name: "K_b".into(),
                         symbol: None,
                         gpu_ns: 500,
                         count: 2,
+                        apportioned_ns: None,
                     },
                 ],
             },
@@ -619,6 +623,7 @@ mod tests {
                     symbol: None,
                     gpu_ns: 50,
                     count: 1,
+                    apportioned_ns: None,
                 }],
             },
         ));
@@ -644,6 +649,7 @@ mod tests {
                     symbol: None,
                     gpu_ns: 999,
                     count: 1,
+                    apportioned_ns: None,
                 }],
             },
         ));
@@ -657,6 +663,7 @@ mod tests {
                     symbol: None,
                     gpu_ns: 10,
                     count: 1,
+                    apportioned_ns: None,
                 }],
             },
         ));

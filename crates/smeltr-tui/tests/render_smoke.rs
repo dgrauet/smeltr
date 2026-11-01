@@ -105,6 +105,7 @@ fn hot_kernels_panel_renders_when_toggled_on() {
                 symbol: None,
                 gpu_ns: 250_000,
                 count: 3,
+                apportioned_ns: None,
             }],
         },
     ));

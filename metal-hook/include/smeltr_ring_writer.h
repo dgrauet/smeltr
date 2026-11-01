@@ -43,15 +43,18 @@ void smeltr_write_skipped(smeltr_ring_t *r, uint64_t ts, const char *reason);
    ops_count entries packed as:
      u32 name_len; char name[name_len];
      u32 symbol_len; char symbol[symbol_len]  -- symbol_len == 0xFFFFFFFFu means no symbol;
-     u64 gpu_ns; u32 count.
+     u64 gpu_ns; u32 count; u64 apportioned_ns.
    `symbols` parallels `names`; entries may be NULL when no symbol is known.
-   Pass symbols=NULL to opt out entirely (equivalent to all-NULL entries). */
+   Pass symbols=NULL to opt out entirely (equivalent to all-NULL entries).
+   `apportioned_ns` (ring v4, #314): the part of gpu_ns split across kernels
+   by dispatch count rather than measured; NULL writes 0 for every op. */
 void smeltr_write_cb_ops(smeltr_ring_t *r, uint64_t ts,
     uint64_t cb_id,
     const char *const *names,   /* op_count C strings, non-NULL each */
     const char *const *symbols, /* nullable per entry; whole pointer also nullable */
     const uint64_t *gpu_ns,
     const uint32_t *counts,
+    const uint64_t *apportioned_ns, /* nullable */
     uint32_t op_count);
 
 /* MetalDeviceMemSample: sampled MTLDevice memory stats.

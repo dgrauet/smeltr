@@ -19,6 +19,15 @@ pub struct OpAttribution {
     pub symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Part of `gpu_ns` split across kernels by dispatch count rather than
+    /// measured (#314). 0 also for sessions recorded before the hook
+    /// reported it; [`ApportionedOps::detect`] tells the two apart.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub apportioned_ns: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -62,8 +71,50 @@ pub enum BreakdownError {
     EmptySession,
 }
 
-/// Aggregation bucket for ops keyed by [`op_key`]: (gpu_ns, count, symbol).
-type OpAgg = (u64, u64, Option<String>);
+/// Aggregation bucket for ops keyed by [`op_key`].
+#[derive(Default, Clone)]
+struct OpAgg {
+    gpu_ns: u64,
+    count: u64,
+    apportioned_ns: u64,
+    symbol: Option<String>,
+}
+
+impl OpAgg {
+    fn add(&mut self, op: &OpSample) {
+        self.merge(OpAgg {
+            gpu_ns: op.gpu_ns,
+            count: op.count as u64,
+            apportioned_ns: op.apportioned_ns.unwrap_or(0),
+            symbol: op.symbol.clone(),
+        });
+    }
+
+    fn merge(&mut self, other: OpAgg) {
+        self.gpu_ns += other.gpu_ns;
+        self.count += other.count;
+        self.apportioned_ns += other.apportioned_ns;
+        if self.symbol.is_none() {
+            self.symbol = other.symbol;
+        }
+    }
+
+    fn into_attribution(self, name: String) -> OpAttribution {
+        let kind = self
+            .symbol
+            .as_deref()
+            .and_then(crate::op_kinds::resolve_kind)
+            .map(str::to_string);
+        OpAttribution {
+            name,
+            gpu_ns: self.gpu_ns,
+            count: self.count,
+            symbol: self.symbol,
+            kind,
+            apportioned_ns: self.apportioned_ns,
+        }
+    }
+}
 
 #[derive(Default)]
 struct CallNode {
@@ -280,12 +331,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 per_eval_cb_count[i] += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
-                        let e = per_eval_ops[i].entry(op_key(op)).or_insert((0, 0, None));
-                        e.0 += op.gpu_ns;
-                        e.1 += op.count as u64;
-                        if e.2.is_none() {
-                            e.2 = op.symbol.clone();
-                        }
+                        per_eval_ops[i].entry(op_key(op)).or_default().add(op);
                     }
                 }
             }
@@ -315,12 +361,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 slot.1 += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
-                        let e = slot.2.entry(op_key(op)).or_insert((0, 0, None));
-                        e.0 += op.gpu_ns;
-                        e.1 += op.count as u64;
-                        if e.2.is_none() {
-                            e.2 = op.symbol.clone();
-                        }
+                        slot.2.entry(op_key(op)).or_default().add(op);
                     }
                 }
             }
@@ -329,12 +370,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 unmatched_cb_count += 1;
                 if let Some(ops) = ops_for_cb {
                     for op in ops {
-                        let e = unscoped_ops.entry(op_key(op)).or_insert((0, 0, None));
-                        e.0 += op.gpu_ns;
-                        e.1 += op.count as u64;
-                        if e.2.is_none() {
-                            e.2 = op.symbol.clone();
-                        }
+                        unscoped_ops.entry(op_key(op)).or_default().add(op);
                     }
                 }
             }
@@ -352,13 +388,8 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
                 node.gpu_ns_self += gpu;
                 node.eval_count += 1;
                 node.cb_count += cbs;
-                for (name, (ns, c, sym)) in per_eval_ops[i].drain() {
-                    let e = node.ops_buf.entry(name).or_insert((0, 0, None));
-                    e.0 += ns;
-                    e.1 += c;
-                    if e.2.is_none() {
-                        e.2 = sym;
-                    }
+                for (name, agg) in per_eval_ops[i].drain() {
+                    node.ops_buf.entry(name).or_default().merge(agg);
                 }
                 continue;
             }
@@ -366,13 +397,8 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         unscoped_gpu_ns += gpu;
         unscoped_eval_count += 1;
         unscoped_cb_count_from_evals += cbs;
-        for (name, (ns, c, sym)) in per_eval_ops[i].drain() {
-            let e = unscoped_ops.entry(name).or_insert((0, 0, None));
-            e.0 += ns;
-            e.1 += c;
-            if e.2.is_none() {
-                e.2 = sym;
-            }
+        for (name, agg) in per_eval_ops[i].drain() {
+            unscoped_ops.entry(name).or_default().merge(agg);
         }
     }
 
@@ -381,13 +407,8 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         if let Some(node) = calls.get_mut(&call_id) {
             node.gpu_ns_self += gpu;
             node.cb_count += cbs;
-            for (name, (ns, c, sym)) in ops {
-                let e = node.ops_buf.entry(name).or_insert((0, 0, None));
-                e.0 += ns;
-                e.1 += c;
-                if e.2.is_none() {
-                    e.2 = sym;
-                }
+            for (name, agg) in ops {
+                node.ops_buf.entry(name).or_default().merge(agg);
             }
         } else {
             unscoped_gpu_ns += gpu;
@@ -407,19 +428,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
         let mut ops: Vec<OpAttribution> = n
             .ops_buf
             .iter()
-            .map(|(name, (ns, c, sym))| {
-                let kind = sym
-                    .as_deref()
-                    .and_then(crate::op_kinds::resolve_kind)
-                    .map(str::to_string);
-                OpAttribution {
-                    name: name.clone(),
-                    gpu_ns: *ns,
-                    count: *c,
-                    symbol: sym.clone(),
-                    kind,
-                }
-            })
+            .map(|(name, agg)| agg.clone().into_attribution(name.clone()))
             .collect();
         sort_ops(&mut ops);
         Some(ModuleBreakdown {
@@ -456,19 +465,7 @@ pub fn compute(events: impl IntoIterator<Item = Event>) -> Result<ModuleBreakdow
     if unscoped_gpu_ns > 0 || unscoped_eval_count > 0 || unmatched_cb_count > 0 {
         let mut unscoped_ops_vec: Vec<OpAttribution> = unscoped_ops
             .into_iter()
-            .map(|(name, (ns, c, sym))| {
-                let kind = sym
-                    .as_deref()
-                    .and_then(crate::op_kinds::resolve_kind)
-                    .map(str::to_string);
-                OpAttribution {
-                    name,
-                    gpu_ns: ns,
-                    count: c,
-                    symbol: sym,
-                    kind,
-                }
-            })
+            .map(|(name, agg)| agg.into_attribution(name))
             .collect();
         sort_ops(&mut unscoped_ops_vec);
         root_children.push(ModuleBreakdown {
@@ -520,6 +517,8 @@ pub struct BreakdownNotices {
     /// Op-timing sampling auto-disabled this many times (#165). Non-zero
     /// means per-op GPU numbers are incomplete over those spans.
     pub sampling_disable_episodes: usize,
+    /// How much of the op time was split by dispatch count (#314).
+    pub apportioned: Option<ApportionedOps>,
     /// Why the tree is mostly `<unscoped>`, and what to do about it.
     /// The two causes are mutually exclusive — no sidecar implies no eval
     /// windows at all, so the lazy-eval detector cannot fire.
@@ -548,6 +547,7 @@ impl BreakdownNotices {
     pub fn detect(events: &[Event]) -> Self {
         Self {
             sampling_disable_episodes: crate::diff::sampling_disable_episodes(events),
+            apportioned: ApportionedOps::detect(events),
             attribution_gap: crate::rules::lazy_eval_attribution::detect(events)
                 .map(|gap| AttributionGap::LazyEval(gap.advice()))
                 .or_else(|| {
@@ -561,6 +561,11 @@ impl BreakdownNotices {
     pub fn degraded_advice(&self) -> Option<String> {
         degraded_advice(self.sampling_disable_episodes)
     }
+
+    /// One-line warning that per-op numbers are estimates, when enough are.
+    pub fn apportioned_advice(&self) -> Option<String> {
+        self.apportioned.and_then(|a| a.advice())
+    }
 }
 
 /// One-line warning that per-op numbers are partial over `episodes` spans
@@ -572,6 +577,79 @@ pub fn degraded_advice(episodes: usize) -> Option<String> {
              sustained alloc failures (GPU op timing degraded)"
         )
     })
+}
+
+/// Below this share of estimated op time, no conclusion drawn from per-kernel
+/// figures changes; saying nothing beats a warning on every session.
+const APPORTIONED_ADVICE_MIN_SHARE: f64 = 0.05;
+
+/// How much of a session's op-level GPU time was split across different
+/// kernels by dispatch count instead of measured (#314).
+///
+/// Stage-boundary sampling (every Apple GPU by default, the only mode before
+/// M3) timestamps an encoder, not each dispatch. MLX puts dozens of kernels
+/// in one encoder, so a large GEMM and thirty elementwise dispatches got
+/// equal shares: on a real run elementwise read 41 % of GPU time for about
+/// 3 % of the cost, and GEMM + SDPA 22 % for most of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApportionedOps {
+    pub apportioned_ns: u64,
+    pub total_ns: u64,
+}
+
+impl ApportionedOps {
+    /// `None` when no op carries the figure (sessions recorded before the
+    /// hook reported it): unknown, not zero. Op times are clamped first
+    /// (#146), like every other consumer of them.
+    pub fn detect(events: &[Event]) -> Option<Self> {
+        let scales = crate::op_clamp::compute_op_time_scales(events);
+        let mut known = false;
+        let mut est = Self {
+            apportioned_ns: 0,
+            total_ns: 0,
+        };
+        for ev in events {
+            let Payload::MetalCbOps { ops, .. } = &ev.payload else {
+                continue;
+            };
+            for op in ops {
+                est.total_ns += scales.scaled_gpu_ns(ev.seq, op.gpu_ns);
+                if let Some(a) = op.apportioned_ns {
+                    known = true;
+                    est.apportioned_ns += scales.scaled_gpu_ns(ev.seq, a);
+                }
+            }
+        }
+        (known && est.total_ns > 0).then_some(est)
+    }
+
+    pub fn share(&self) -> f64 {
+        self.apportioned_ns as f64 / self.total_ns as f64
+    }
+
+    /// One-line warning, worded once for every surface (CLI, MCP, analyze).
+    /// `None` below [`APPORTIONED_ADVICE_MIN_SHARE`].
+    pub fn advice(&self) -> Option<String> {
+        let share = self.share();
+        (share >= APPORTIONED_ADVICE_MIN_SHARE).then(|| {
+            format!(
+                "op times estimated: {:.0}% of op-level GPU time was split between \
+                 different kernels of the same encoder by dispatch count, not measured \
+                 (the GPU timestamps encoders, not dispatches). Per-kernel and per-kind \
+                 shares can be off by an order of magnitude: a GEMM and an elementwise \
+                 kernel get the same share. For measured per-kernel times, record with \
+                 `smeltr record --exact-ops` (MLX: one op per command buffer); on M3 and \
+                 later, SMELTR_HOOK_DISPATCH_BOUNDARY=1 times each dispatch instead",
+                share * 100.0
+            )
+        })
+    }
+}
+
+/// [`ApportionedOps::advice`] for `events`, for surfaces that need nothing
+/// else from [`BreakdownNotices`].
+pub fn apportioned_advice(events: &[Event]) -> Option<String> {
+    ApportionedOps::detect(events).and_then(|a| a.advice())
 }
 
 /// Prune every node whose own `fields` do not match `filter` and whose
@@ -774,29 +852,33 @@ pub fn render_chrome_trace(root: &ModuleBreakdown) -> String {
 /// then the op name when `kind` is None. `symbol` is dropped (a kind row spans many kernels);
 /// `kind` is the first non-None in the bucket. Sorted by gpu_ns desc, tie by name.
 fn regroup_ops_by_kind(ops: &[OpAttribution]) -> Vec<OpAttribution> {
-    let mut agg: HashMap<String, (u64, u64, Option<String>)> = HashMap::new();
+    let mut agg: HashMap<String, (u64, u64, u64, Option<String>)> = HashMap::new();
     for op in ops {
         let key = op
             .kind
             .clone()
             .or_else(|| op.symbol.clone())
             .unwrap_or_else(|| op.name.clone());
-        let e = agg.entry(key).or_insert((0, 0, None));
+        let e = agg.entry(key).or_insert((0, 0, 0, None));
         e.0 += op.gpu_ns;
         e.1 += op.count;
-        if e.2.is_none() {
-            e.2 = op.kind.clone();
+        e.2 += op.apportioned_ns;
+        if e.3.is_none() {
+            e.3 = op.kind.clone();
         }
     }
     let mut rows: Vec<OpAttribution> = agg
         .into_iter()
-        .map(|(name, (gpu_ns, count, kind))| OpAttribution {
-            name,
-            gpu_ns,
-            count,
-            symbol: None,
-            kind,
-        })
+        .map(
+            |(name, (gpu_ns, count, apportioned_ns, kind))| OpAttribution {
+                name,
+                gpu_ns,
+                count,
+                symbol: None,
+                kind,
+                apportioned_ns,
+            },
+        )
         .collect();
     rows.sort_by(|a, b| b.gpu_ns.cmp(&a.gpu_ns).then(a.name.cmp(&b.name)));
     rows
@@ -836,10 +918,12 @@ pub struct OpFlatRow {
     /// Representative kernel symbol (Name mode only; None in Kind mode).
     pub symbol: Option<String>,
     pub kind: Option<String>,
+    /// See [`OpAttribution::apportioned_ns`].
+    pub apportioned_ns: u64,
 }
 
-// key -> (gpu_ns, count, symbol, kind)
-type OpAggMap = HashMap<String, (u64, u64, Option<String>, Option<String>)>;
+// key -> (gpu_ns, count, symbol, kind, apportioned_ns)
+type OpAggMap = HashMap<String, (u64, u64, Option<String>, Option<String>, u64)>;
 
 /// Flatten all ops in the module tree into rows keyed by op name or resolved
 /// kind. Returns ALL rows sorted by gpu_ns desc (no truncation — callers
@@ -857,9 +941,10 @@ pub fn aggregate_ops_flat(root: &ModuleBreakdown, group_by: OpGroupBy) -> Vec<Op
                     .or_else(|| op.symbol.clone())
                     .unwrap_or_else(|| op.name.clone()),
             };
-            let e = agg.entry(key).or_insert((0, 0, None, None));
+            let e = agg.entry(key).or_insert((0, 0, None, None, 0));
             e.0 += op.gpu_ns;
             e.1 += op.count;
+            e.4 += op.apportioned_ns;
             if e.2.is_none() {
                 e.2 = op.symbol.clone();
             }
@@ -875,17 +960,20 @@ pub fn aggregate_ops_flat(root: &ModuleBreakdown, group_by: OpGroupBy) -> Vec<Op
 
     let mut rows: Vec<OpFlatRow> = agg
         .into_iter()
-        .map(|(key, (gpu_ns, count, symbol, kind))| OpFlatRow {
-            key,
-            gpu_ns,
-            count,
-            // A kind row spans many kernels: no single representative symbol.
-            symbol: match group_by {
-                OpGroupBy::Name => symbol,
-                OpGroupBy::Kind => None,
+        .map(
+            |(key, (gpu_ns, count, symbol, kind, apportioned_ns))| OpFlatRow {
+                key,
+                gpu_ns,
+                count,
+                apportioned_ns,
+                // A kind row spans many kernels: no single representative symbol.
+                symbol: match group_by {
+                    OpGroupBy::Name => symbol,
+                    OpGroupBy::Kind => None,
+                },
+                kind,
             },
-            kind,
-        })
+        )
         .collect();
     rows.sort_by(|a, b| b.gpu_ns.cmp(&a.gpu_ns).then(a.key.cmp(&b.key)));
     rows
@@ -941,6 +1029,7 @@ mod tests {
             symbol: None,
             gpu_ns,
             count,
+            apportioned_ns: None,
         }
     }
 
@@ -1519,6 +1608,7 @@ mod tests {
             symbol: Some(symbol.into()),
             gpu_ns,
             count: 1,
+            apportioned_ns: None,
         };
         let evs = vec![
             ev(
@@ -2156,6 +2246,87 @@ mod tests {
         assert_eq!(op_names(&lin.ops), TIED_OPS_SORTED);
     }
 
+    fn apportioned(mut op: OpSample, ns: u64) -> OpSample {
+        op.apportioned_ns = Some(ns);
+        op
+    }
+
+    /// #314: per-op apportioned time survives aggregation across CBs and
+    /// into the module leaf.
+    #[test]
+    fn module_ops_sum_their_apportioned_time() {
+        let mut events = vec![module_entered(1, 10, 1, "Linear", None)];
+        events.extend(eval_pair(2, 100, 105, 7, 1));
+        events.extend(cb_with_ops(
+            10,
+            101,
+            0xa,
+            vec![
+                apportioned(op_sample("Gemm", 600, 1), 600),
+                apportioned(op_sample("Add", 400, 1), 400),
+            ],
+        ));
+        events.extend(cb_with_ops(
+            20,
+            102,
+            0xb,
+            vec![apportioned(op_sample("Gemm", 500, 1), 0)],
+        ));
+        let root = compute(events).unwrap();
+        let lin = find_child(&root, "Linear");
+        let gemm = lin.ops.iter().find(|o| o.name == "Gemm").unwrap();
+        assert_eq!((gemm.gpu_ns, gemm.apportioned_ns), (1100, 600));
+        let add = lin.ops.iter().find(|o| o.name == "Add").unwrap();
+        assert_eq!((add.gpu_ns, add.apportioned_ns), (400, 400));
+    }
+
+    #[test]
+    fn apportioned_ops_measure_the_session_share() {
+        let mut events = cb_with_ops(
+            10,
+            101,
+            0xa,
+            vec![
+                apportioned(op_sample("Gemm", 600, 1), 600),
+                apportioned(op_sample("Add", 200, 1), 200),
+            ],
+        );
+        events.extend(cb_with_ops(
+            20,
+            102,
+            0xb,
+            vec![apportioned(op_sample("Gemm", 1200, 1), 0)],
+        ));
+        let est = ApportionedOps::detect(&events).unwrap();
+        assert_eq!((est.apportioned_ns, est.total_ns), (800, 2000));
+        let advice = est.advice().unwrap();
+        assert!(advice.contains("40%"), "{advice}");
+        assert!(advice.contains("--exact-ops"), "{advice}");
+    }
+
+    /// Sessions recorded before the hook reported it: unknown, so silent.
+    #[test]
+    fn legacy_ops_have_no_apportioned_estimate() {
+        let events = cb_with_ops(10, 101, 0xa, vec![op_sample("Gemm", 600, 1)]);
+        assert_eq!(ApportionedOps::detect(&events), None);
+    }
+
+    /// A few percent estimated does not change any conclusion; say nothing.
+    #[test]
+    fn small_apportioned_share_gives_no_advice() {
+        let events = cb_with_ops(
+            10,
+            101,
+            0xa,
+            vec![
+                apportioned(op_sample("Gemm", 990, 1), 0),
+                apportioned(op_sample("Add", 10, 1), 10),
+            ],
+        );
+        let est = ApportionedOps::detect(&events).unwrap();
+        assert_eq!(est.advice(), None);
+    }
+
     #[test]
     fn tied_unscoped_ops_sort_by_name() {
         let events = cb_with_ops(10, 101, 0xa, tied_ops());
@@ -2493,6 +2664,7 @@ mod tests {
                 count: 1,
                 symbol: None,
                 kind: None,
+                apportioned_ns: 0,
             },
             OpAttribution {
                 name: "Softmax".into(),
@@ -2500,6 +2672,7 @@ mod tests {
                 count: 1,
                 symbol: None,
                 kind: None,
+                apportioned_ns: 0,
             },
         ]);
         let s = render_table(&r, 10, 6, 5, true);
@@ -2517,6 +2690,7 @@ mod tests {
                 count: 1,
                 symbol: Some("v_copyint32float32".into()),
                 kind: None,
+                apportioned_ns: 0,
             },
             OpAttribution {
                 name: "K_6400_32x129x1".into(),
@@ -2524,6 +2698,7 @@ mod tests {
                 count: 1,
                 symbol: None,
                 kind: None,
+                apportioned_ns: 0,
             },
         ]);
         let s = render_table(&r, 10, 6, 5, true);
@@ -2541,6 +2716,7 @@ mod tests {
             count: 1,
             symbol: Some("v_copyint32float32".into()),
             kind: None,
+            apportioned_ns: 0,
         }]);
         let s = render_ops_flat(&r, OpGroupBy::Name, 10);
         assert!(s.contains("v_copyint32float32"));
@@ -2555,6 +2731,7 @@ mod tests {
             count: 1,
             symbol: None,
             kind: None,
+            apportioned_ns: 0,
         }]);
         let s = render_table(&r, 10, 6, 5, false);
         assert!(!s.contains("Matmul"));
@@ -2570,6 +2747,7 @@ mod tests {
                 count: 1,
                 symbol: None,
                 kind: None,
+                apportioned_ns: 0,
             });
         }
         let r = fixture_with_ops(ops);
@@ -2619,6 +2797,7 @@ mod tests {
             count: 1,
             symbol: None,
             kind: None,
+            apportioned_ns: 0,
         };
         let child = node("Child", 2_000_000, vec![], vec![]);
         let parent = node("Parent", 1_000_000, vec![child], vec![op]);
@@ -2646,6 +2825,7 @@ mod tests {
             count: 1,
             symbol: None,
             kind: None,
+            apportioned_ns: 0,
         }]);
         let json = render_chrome_trace(&r);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2681,6 +2861,7 @@ mod tests {
                         count: 1,
                         symbol: None,
                         kind: None,
+                        apportioned_ns: 0,
                     }],
                     diagnostics: None,
                     fields: Default::default(),
@@ -2701,6 +2882,7 @@ mod tests {
                             count: 2,
                             symbol: None,
                             kind: None,
+                            apportioned_ns: 0,
                         },
                         OpAttribution {
                             name: "Softmax".into(),
@@ -2708,6 +2890,7 @@ mod tests {
                             count: 1,
                             symbol: None,
                             kind: None,
+                            apportioned_ns: 0,
                         },
                     ],
                     diagnostics: None,
@@ -2797,6 +2980,7 @@ mod tests {
                         count: 1,
                         symbol: Some("gemm_kernel_0".into()),
                         kind: Some("Matmul".into()),
+                        apportioned_ns: 0,
                     }],
                     diagnostics: None,
                     fields: Default::default(),
@@ -2816,6 +3000,7 @@ mod tests {
                         count: 2,
                         symbol: Some("gemm_kernel_1".into()),
                         kind: Some("Matmul".into()),
+                        apportioned_ns: 0,
                     }],
                     diagnostics: None,
                     fields: Default::default(),
@@ -2855,6 +3040,7 @@ mod tests {
                     count: 1,
                     symbol: Some("gemm_a".into()),
                     kind: Some("Matmul".into()),
+                    apportioned_ns: 0,
                 },
                 OpAttribution {
                     name: "gemm_b".into(),
@@ -2862,6 +3048,7 @@ mod tests {
                     count: 2,
                     symbol: Some("gemm_b".into()),
                     kind: Some("Matmul".into()),
+                    apportioned_ns: 0,
                 },
                 OpAttribution {
                     name: "K_ff00".into(),
@@ -2869,6 +3056,7 @@ mod tests {
                     count: 1,
                     symbol: None,
                     kind: None,
+                    apportioned_ns: 0,
                 },
             ],
             children: vec![],
@@ -2912,6 +3100,7 @@ mod tests {
                 count: 1,
                 symbol: Some("weird_new_kernel_bf16".into()),
                 kind: None,
+                apportioned_ns: 0,
             }],
             children: vec![],
             diagnostics: None,
@@ -3006,6 +3195,7 @@ mod tests {
                     count: 1,
                     symbol: Some("gemm_a".into()),
                     kind: Some("Matmul".into()),
+                    apportioned_ns: 0,
                 },
                 OpAttribution {
                     name: "gemm_b".into(),
@@ -3013,6 +3203,7 @@ mod tests {
                     count: 2,
                     symbol: Some("gemm_b".into()),
                     kind: Some("Matmul".into()),
+                    apportioned_ns: 0,
                 },
                 OpAttribution {
                     name: "K_ff00".into(),
@@ -3020,6 +3211,7 @@ mod tests {
                     count: 1,
                     symbol: None,
                     kind: None,
+                    apportioned_ns: 0,
                 },
             ],
         );
@@ -3031,6 +3223,7 @@ mod tests {
                 count: 1,
                 symbol: Some("gemm_c".into()),
                 kind: Some("Matmul".into()),
+                apportioned_ns: 0,
             }],
         );
         root.children.push(child);
@@ -3063,6 +3256,7 @@ mod tests {
                 count: 1,
                 symbol: Some("gemm_a".into()),
                 kind: Some("Matmul".into()),
+                apportioned_ns: 0,
             }],
         );
         let before = root.ops.clone();
@@ -3144,6 +3338,7 @@ mod tests {
             gpu_ns: ns,
             count: 1,
             symbol: None,
+            apportioned_ns: None,
         };
         let evs = vec![
             ev(

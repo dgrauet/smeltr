@@ -13,6 +13,11 @@ pub fn run(session: Option<&str>, last: bool, top: usize) -> anyhow::Result<()> 
     let events = read_events(&dir).context("read session events")?;
     let origins = compute_dispatch_origins(&events);
     let degraded = smeltr_analyzer::diff::sampling_disable_episodes(&events);
+    if let Some(notice) =
+        crate::degraded::apportioned_notice(smeltr_analyzer::ApportionedOps::detect(&events))
+    {
+        print!("{notice}");
+    }
     print!("{}", render(&origins, top, degraded));
     Ok(())
 }

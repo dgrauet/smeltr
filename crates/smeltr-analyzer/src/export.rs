@@ -699,6 +699,7 @@ mod tests {
                         symbol: Some("gemm_t_n_bf16_64_64_32".into()),
                         gpu_ns: 2_000,
                         count: 1,
+                        apportioned_ns: None,
                     }],
                 },
             ),
@@ -781,6 +782,7 @@ mod tests {
                             symbol: Some((*sym).into()),
                             gpu_ns: *ns,
                             count: 1,
+                            apportioned_ns: None,
                         })
                         .collect(),
                 },
@@ -940,6 +942,7 @@ mod tests {
                     symbol: Some("gemm_orphan".into()),
                     gpu_ns: 1_000,
                     count: 1,
+                    apportioned_ns: None,
                 }],
             },
         )];
