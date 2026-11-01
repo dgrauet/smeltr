@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0](https://github.com/dgrauet/smeltr/compare/v0.30.1...v0.31.0) (2026-11-01)
+
+
+### Features
+
+* **ops:** report per-kernel GPU time split by dispatch count, add record --exact-ops ([#316](https://github.com/dgrauet/smeltr/issues/316)) ([e1138e7](https://github.com/dgrauet/smeltr/commit/e1138e7774cef51315b6a3d6d2651181d75ac90f)), closes [#314](https://github.com/dgrauet/smeltr/issues/314)
+
+
+### Bug Fixes
+
+* **metal-hook:** pool stage sample slots so sampling survives MLX warm-up ([#318](https://github.com/dgrauet/smeltr/issues/318)) ([6132da5](https://github.com/dgrauet/smeltr/commit/6132da5ff418ec768e44b8482c42b8c3e16ab754))
+
 ## [0.30.1](https://github.com/dgrauet/smeltr/compare/v0.30.0...v0.30.1) (2026-10-29)
 
 
