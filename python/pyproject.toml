@@ -21,7 +21,7 @@ dev = [
     "pytest-timeout>=2",
     "pytest-cov>=4",
     "ruff>=0.6",
-    "ty>=0.0.1a13",
+    "ty>=0.0.99",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -58,7 +58,7 @@ exclude = ["tests", "**/__pycache__", "**/.venv"]
 
 [tool.ty.rules]
 # mlx is an optional dependency — its absence is documented in the README.
-unresolved-import = "ignore"
+import-not-found = "ignore"
 # wrapped._smeltr_wrapped is set dynamically (same pattern as functools.wraps);
 # a known type-checker false positive that is not worth annotating around.
 unresolved-attribute = "ignore"
