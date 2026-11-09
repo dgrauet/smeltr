@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.1](https://github.com/dgrauet/smeltr/compare/v0.31.0...v0.31.1) (2026-11-09)
+
+
+### Build System
+
+* **deps:** upgrade rmcp from 1.7 to 3.9 ([#325](https://github.com/dgrauet/smeltr/issues/325)) ([f4d170c](https://github.com/dgrauet/smeltr/commit/f4d170cae85ca12f2704eaf4bdf3e8311b8157e4)), closes [#324](https://github.com/dgrauet/smeltr/issues/324)
+
 ## [0.31.0](https://github.com/dgrauet/smeltr/compare/v0.30.1...v0.31.0) (2026-11-01)
 
 
