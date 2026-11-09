@@ -21,7 +21,10 @@ dev = [
     "pytest-timeout>=2",
     "pytest-cov>=4",
     "ruff>=0.6",
-    "ty>=0.0.99",
+    # Pinned exactly: ty renames rules between 0.0.x releases and reports the
+    # old names in [tool.ty.rules] as diagnostics, which fails CI (twice in
+    # one week: 0.0.99, 0.0.100). Bump deliberately.
+    "ty==0.0.100",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -61,7 +64,7 @@ exclude = ["tests", "**/__pycache__", "**/.venv"]
 import-not-found = "ignore"
 # wrapped._smeltr_wrapped is set dynamically (same pattern as functools.wraps);
 # a known type-checker false positive that is not worth annotating around.
-unresolved-attribute = "ignore"
+missing-attribute = "ignore"
 unused-type-ignore-comment = "ignore"
 # _modules.py monkey-patches nn.Module.__call__ and installs an
 # __init_subclass__ hook — both intentionally violate the strict
