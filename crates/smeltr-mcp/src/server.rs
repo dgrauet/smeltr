@@ -135,14 +135,12 @@ pub fn session_resource_templates() -> Vec<(&'static str, &'static str, &'static
 
 /// Maps the pure template data into rmcp model values.
 fn rmcp_resource_templates() -> Vec<ResourceTemplate> {
-    use rmcp::model::AnnotateAble;
     session_resource_templates()
         .into_iter()
         .map(|(uri, name, desc)| {
-            RawResourceTemplate::new(uri, name)
+            ResourceTemplate::new(uri, name)
                 .with_description(desc)
                 .with_mime_type("application/json")
-                .no_annotation()
         })
         .collect()
 }
@@ -205,11 +203,10 @@ use std::sync::Arc;
 
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ErrorData as McpError, Implementation,
-    JsonObject, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParams, RawResource, RawResourceTemplate, ReadResourceRequestParams,
-    ReadResourceResult, Resource, ResourceContents, ResourceTemplate, ServerCapabilities,
-    ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData as McpError,
+    Implementation, JsonObject, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
+    Resource, ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleServer};
 
@@ -287,7 +284,7 @@ fn tool_result(tool: &str, value: serde_json::Value) -> Result<CallToolResult, M
     );
     let text =
         serde_json::to_string(&value).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
 fn tool_list() -> Vec<Tool> {
@@ -352,8 +349,8 @@ fn tool_list() -> Vec<Tool> {
 }
 
 impl ServerHandler for SmeltrMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -406,13 +403,13 @@ impl ServerHandler for SmeltrMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let args = request
             .arguments
             .map(serde_json::Value::Object)
             .unwrap_or(serde_json::Value::Object(JsonObject::new()));
         match dispatch_call(&request.name, args) {
-            Ok(value) => tool_result(&request.name, value),
+            Ok(value) => tool_result(&request.name, value).map(CallToolResponse::from),
             Err(e) => Err(tool_error_to_mcp(e)),
         }
     }
@@ -423,7 +420,6 @@ impl ServerHandler for SmeltrMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let uris = list_session_resource_uris().map_err(tool_error_to_mcp)?;
-        use rmcp::model::AnnotateAble;
         let resources: Vec<Resource> = uris
             .into_iter()
             .map(|uri| {
@@ -431,9 +427,7 @@ impl ServerHandler for SmeltrMcpServer {
                     .strip_prefix("smeltr://session/")
                     .unwrap_or(&uri)
                     .to_string();
-                RawResource::new(uri, name)
-                    .with_mime_type("application/json")
-                    .no_annotation()
+                Resource::new(uri, name).with_mime_type("application/json")
             })
             .collect();
         Ok(ListResourcesResult::with_all_items(resources))
@@ -453,15 +447,14 @@ impl ServerHandler for SmeltrMcpServer {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         let value = read_session_resource(&request.uri).map_err(tool_error_to_mcp)?;
         let text = serde_json::to_string(&value)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(ReadResourceResult::new(vec![ResourceContents::text(
-            text,
-            request.uri,
-        )
-        .with_mime_type("application/json")]))
+        Ok(ReadResourceResult::new(vec![
+            ResourceContents::text(text, request.uri).with_mime_type("application/json")
+        ])
+        .into())
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
@@ -688,10 +681,10 @@ mod tests {
         assert_eq!(templates.len(), 3);
         assert!(templates
             .iter()
-            .any(|t| t.raw.uri_template == "smeltr://session/{ref}/summary"));
+            .any(|t| t.uri_template == "smeltr://session/{ref}/summary"));
         for t in &templates {
-            assert_eq!(t.raw.mime_type.as_deref(), Some("application/json"));
-            assert!(t.raw.description.is_some());
+            assert_eq!(t.mime_type.as_deref(), Some("application/json"));
+            assert!(t.description.is_some());
         }
     }
 

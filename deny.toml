@@ -3,11 +3,3 @@
 
 [advisories]
 version = 2
-ignore = [
-    # rmcp < 3.9 buffers unbounded HTTP response bodies in its Streamable HTTP
-    # *clients* (`transport-streamable-http-client-*`). smeltr only uses the
-    # server side (stdio, plus the optional streamable HTTP server behind the
-    # `http` feature), so the vulnerable code is not compiled in. Remove once
-    # rmcp is upgraded to 3.9+ (an API migration of smeltr-mcp).
-    { id = "RUSTSEC-2026-0462", reason = "client-only; smeltr uses rmcp server transports only" },
-]
